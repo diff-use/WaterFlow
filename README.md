@@ -1,2 +1,22 @@
 # WaterFlow
 Predicting water moelcule placements on protein surfaces using flow matching conditioned on learned protein structure embeddings.
+
+This repo contains all the code required to process a dataset, load in features from a pre-trained model for protein structure embeddings, and run inference (and training) of the flow matching classes. 
+
+# Environment Setup
+
+We use `uv` for our environment and package management, with python 3.10.
+
+Installing the environment:
+
+```
+uv venv water --python 3.10
+source water/bin/activate
+
+uv pip install torch torchvision
+uv pip install torch_geometric
+uv pip install torch_cluster torch_scatter pyg_lib -f https://data.pyg.org/whl/torch-2.8.0+cu126.html
+uv pip install biotite wandb Bio networkx e3nn
+```
+
+If you have trouble installing torch_cluster or scatter, I would suggest changing the cuda version in the wheel.
