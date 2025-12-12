@@ -1,16 +1,22 @@
 import math
-from typing import Dict, Tuple, Optional, Literal, Callable
+from typing import Dict, Tuple, Optional
 
 import torch
 from torch import nn
 import torch.nn.functional as F
-from torch_geometric.nn import HeteroConv, knn
-from torch_geometric.typing import EdgeType
-from torch_geometric.data import HeteroData, Data, Batch
+from torch_geometric.nn import knn
+from torch_geometric.data import HeteroData, Data
 import e3nn
 
-from gvp import GVP, GVPConvLayer
-from gvp import GVPMultiEdge, GVPMultiEdgeConv
+from gvp import GVP, GVPMultiEdgeConv
+
+import copy
+
+import numpy as np
+from torch import Tensor
+from tqdm.auto import tqdm
+
+from utils import condot_pair_hard_hungarian, compute_rmsd, cov_prec_at_threshold
 
 def rbf(d: torch.Tensor, num_rbf: int, D_min: float = 0.0, D_max: float = 20.0) -> torch.Tensor:
     return e3nn.math.soft_one_hot_linspace(
@@ -566,6 +572,336 @@ class FlowWaterGVP(nn.Module):
         # water vector field head
         _, v_pred = self.vfield_head(x_dict['water'])
         return v_pred.squeeze(1)
-    
-# maybe add a class that does a flow matching step with sc etc, as well as eval functions 
 
+class FlowMatcher:
+    """
+    High level class for flow matching training, validation, and numerical integration
+    """
+
+    def __init__(
+        self,
+        model,
+        p_self_cond: float = 0.5,
+        use_distortion: bool = False,
+        p_distort: float = 0.2,
+        t_distort: float = 0.5,
+        sigma_distort: float = 0.5,
+        loss_eps: float = 1e-3,
+    ):
+        self.model = model
+        self.p_self_cond = p_self_cond
+        self.use_distortion = use_distortion
+        self.p_distort = p_distort
+        self.t_distort = t_distort
+        self.sigma_distort = sigma_distort
+        self.loss_eps = loss_eps
+
+    @staticmethod
+    def compute_sigma(data: HeteroData) -> float:
+        """Compute sigma as std of protein coordinates."""
+        pos = data['protein'].pos
+        return float(pos.std().item())
+
+    def training_step(
+        self,
+        batch: HeteroData,
+        optimizer: torch.optim.Optimizer,
+        grad_clip: float = 1.0,
+        use_self_conditioning: bool = True,
+    ) -> Dict[str, float]:
+        """
+        Single flow matching training step.
+        
+        Returns dict with 'loss', 'rmsd', 'sigma'.
+        """
+        self.model.train()
+        device = batch['protein'].pos.device
+
+        x1 = batch['water'].pos
+        batch_w = batch['water'].batch
+        batch_p = batch['protein'].batch
+        num_graphs = int(batch_p.max().item()) + 1
+
+        sigma = self.compute_sigma(batch)
+
+        x0 = torch.randn_like(x1) * sigma
+        x0_star, x1_star = condot_pair_hard_hungarian(x1=x1, batch=batch_w, x0=x0)
+
+        t = torch.rand(num_graphs, device=device)
+        t_per_atom = t[batch_w].unsqueeze(-1)
+
+        x_t = (1.0 - t_per_atom) * x0_star + t_per_atom * x1_star
+
+        # late stage path distortion
+        if self.use_distortion:
+            indicator = (t_per_atom >= self.t_distort).float()
+            if indicator.any():
+                mask = (torch.rand_like(t_per_atom) < self.p_distort).float()
+                eps = torch.randn_like(x_t) * self.sigma_distort
+                x_t = x_t + indicator * mask * eps
+
+        # self-conditioning
+        sc = None
+        if use_self_conditioning and torch.rand(1).item() < self.p_self_cond:
+            with torch.no_grad():
+                batch['water'].pos = x_t
+                v_sc = self.model(batch, t, sc=None)
+                x1_sc = x_t + (1.0 - t_per_atom) * v_sc
+            sc = {'x1_pred': x1_sc}
+
+        # forward pass
+        batch['water'].pos = x_t
+        v_pred = self.model(batch, t, sc=sc)
+
+        # target velocity
+        v_target = x1_star - x0_star
+
+        # weighted MSE loss (upweight near t=1)
+        w = 1.0 / (self.loss_eps + (1.0 - t_per_atom))
+        per_atom_mse = (v_pred - v_target).pow(2).mean(dim=-1, keepdim=True)
+        loss = (w * per_atom_mse).sum() / w.sum()
+
+        # backward
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        if grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(
+                [p for p in self.model.parameters() if p.requires_grad],
+                max_norm=grad_clip
+            )
+        optimizer.step()
+
+        # training RMSD
+        with torch.no_grad():
+            x1_hat = x_t + (1.0 - t_per_atom) * v_pred
+            rmsd = compute_rmsd(x1_hat, x1_star, batch_w)
+
+        return {'loss': loss.item(), 'rmsd': rmsd, 'sigma': sigma}
+
+    @torch.no_grad()
+    def validation_step(self, batch: HeteroData) -> Dict[str, float]:
+        """Single validation step (no gradient, no optimizer)."""
+        self.model.eval()
+        device = batch['protein'].pos.device
+
+        x1 = batch['water'].pos
+        batch_w = batch['water'].batch
+        batch_p = batch['protein'].batch
+        num_graphs = int(batch_p.max().item()) + 1
+
+        sigma = self.compute_sigma(batch)
+        x0 = torch.randn_like(x1) * sigma
+        x0_star, x1_star = condot_pair_hard_hungarian(x1=x1, batch=batch_w, x0=x0)
+
+        t = torch.rand(num_graphs, device=device)
+        t_per_atom = t[batch_w].unsqueeze(-1)
+        x_t = (1.0 - t_per_atom) * x0_star + t_per_atom * x1_star
+
+        batch['water'].pos = x_t
+        v_pred = self.model(batch, t, sc=None)
+        v_target = x1_star - x0_star
+
+        w = 1.0 / (self.loss_eps + (1.0 - t_per_atom))
+        per_atom_mse = (v_pred - v_target).pow(2).mean(dim=-1, keepdim=True)
+        loss = (w * per_atom_mse).sum() / w.sum()
+
+        x1_hat = x_t + (1.0 - t_per_atom) * v_pred
+        rmsd = compute_rmsd(x1_hat, x1_star, batch_w)
+
+        return {'loss': loss.item(), 'rmsd': rmsd}
+
+    @torch.no_grad()
+    def rk4_integrate(
+        self,
+        graph: HeteroData,
+        num_steps: int = 500,
+        use_sc: bool = True,
+        sc_ema_alpha: float = 0.2,
+        device: str = "cuda",
+    ) -> Dict[str, np.ndarray]:
+        """
+        RK4 integration from noise to final positions.
+        
+        Returns:
+            dict with keys:
+                'protein_pos': (Np, 3)
+                'mate_pos': (Nm, 3) or empty
+                'water_true': (Nw, 3)
+                'water_pred': (Nw, 3) final prediction
+                'trajectory': list of (Nw, 3) at each step
+                'rmsd': list of RMSD values
+                'coverage': list of coverage values
+                'precision': list of precision values
+        """
+        self.model.eval()
+        device = torch.device(device if torch.cuda.is_available() else "cpu")
+
+        g = copy.deepcopy(graph).to(device)
+        assert 'water' in g.node_types and g['water'].num_nodes > 0
+
+        # Extract positions
+        protein_pos = g['protein'].pos.detach().cpu().numpy()
+        mate_pos = g['mate'].pos.detach().cpu().numpy() if g['mate'].num_nodes > 0 else np.zeros((0, 3))
+        x1_true = g['water'].pos.clone()
+        water_true = x1_true.detach().cpu().numpy()
+
+        # Sigma from protein
+        sigma = self.compute_sigma(g)
+
+        # Initial noise
+        x = torch.randn_like(x1_true) * sigma
+        x1_pred_ema = x.clone()
+
+        # Ensure batch tensors exist
+        if 'batch' not in g['protein']:
+            g['protein'].batch = torch.zeros(g['protein'].num_nodes, dtype=torch.long, device=device)
+        if 'batch' not in g['water']:
+            g['water'].batch = torch.zeros(g['water'].num_nodes, dtype=torch.long, device=device)
+        if 'mate' in g.node_types and 'batch' not in g['mate']:
+            g['mate'].batch = torch.zeros(g['mate'].num_nodes, dtype=torch.long, device=device)
+
+        # Time grid
+        ts = torch.linspace(0, 1, num_steps, device=device)
+        dt = ts[1] - ts[0]
+
+        # Storage
+        trajectory = [x.detach().cpu().numpy().copy()]
+        rmsd_values = [compute_rmsd(x, x1_true)]
+        cov0, prec0 = cov_prec_at_threshold(x, x1_true, thresh=1.0)
+        cov_values, prec_values = [cov0], [prec0]
+
+        # RK4 integration
+        for i in tqdm(range(num_steps - 1), desc="RK4 integration", leave=False):
+            t0 = ts[i]
+
+            def f(xpos, t_scalar):
+                g['water'].pos = xpos
+                sc = {'x1_pred': x1_pred_ema} if use_sc else None
+                return self.model(g, t_scalar.view(1), sc=sc)
+
+            k1 = f(x, t0)
+            k2 = f(x + 0.5 * dt * k1, t0 + 0.5 * dt)
+            k3 = f(x + 0.5 * dt * k2, t0 + 0.5 * dt)
+            k4 = f(x + dt * k3, t0 + dt)
+
+            x = x + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
+
+            # Update self-conditioning EMA
+            if use_sc:
+                t1 = ts[i + 1]
+                g['water'].pos = x
+                v_next = self.model(g, t1.view(1), sc={'x1_pred': x1_pred_ema})
+                x1_pred_now = x + (1.0 - t1) * v_next
+                x1_pred_ema = (1.0 - sc_ema_alpha) * x1_pred_ema + sc_ema_alpha * x1_pred_now
+
+            trajectory.append(x.detach().cpu().numpy().copy())
+            rmsd_values.append(compute_rmsd(x, x1_true))
+            cov_i, prec_i = cov_prec_at_threshold(x, x1_true, thresh=1.0)
+            cov_values.append(cov_i)
+            prec_values.append(prec_i)
+
+        return {
+            'protein_pos': protein_pos,
+            'mate_pos': mate_pos,
+            'water_true': water_true,
+            'water_pred': x.detach().cpu().numpy(),
+            'trajectory': trajectory,
+            'rmsd': rmsd_values,
+            'coverage': cov_values,
+            'precision': prec_values,
+        }
+
+    @torch.no_grad()
+    def euler_integrate(
+        self,
+        graph: HeteroData,
+        num_steps: int = 100,
+        use_sc: bool = True,
+        device: str = "cuda",
+    ) -> np.ndarray:
+        """Simple Euler integration (faster than RK4, less accurate)."""
+        self.model.eval()
+        device = torch.device(device if torch.cuda.is_available() else "cpu")
+
+        g = copy.deepcopy(graph).to(device)
+        sigma = self.compute_sigma(g)
+        x = torch.randn(g['water'].num_nodes, 3, device=device) * sigma
+
+        if 'batch' not in g['protein']:
+            g['protein'].batch = torch.zeros(g['protein'].num_nodes, dtype=torch.long, device=device)
+        if 'batch' not in g['water']:
+            g['water'].batch = torch.zeros(g['water'].num_nodes, dtype=torch.long, device=device)
+        if 'mate' in g.node_types and 'batch' not in g['mate']:
+            g['mate'].batch = torch.zeros(g['mate'].num_nodes, dtype=torch.long, device=device)
+
+        ts = torch.linspace(0, 1, num_steps, device=device)
+        dt = ts[1] - ts[0]
+        x1_pred_ema = x.clone()
+
+        for i in range(num_steps - 1):
+            t = ts[i]
+            g['water'].pos = x
+            sc = {'x1_pred': x1_pred_ema} if use_sc else None
+            v = self.model(g, t.view(1), sc=sc)
+            x = x + dt * v
+
+            if use_sc:
+                t_next = ts[i + 1]
+                g['water'].pos = x
+                v_next = self.model(g, t_next.view(1), sc={'x1_pred': x1_pred_ema})
+                x1_pred_now = x + (1.0 - t_next) * v_next
+                x1_pred_ema = 0.8 * x1_pred_ema + 0.2 * x1_pred_now
+
+        return x.detach().cpu().numpy()
+
+    @torch.no_grad()
+    def sample_batch(
+        self,
+        batch: HeteroData,
+        num_steps: int = 100,
+        use_sc: bool = True,
+        method: str = "euler",
+    ) -> Tensor:
+        """
+        Sample water positions for a batched HeteroData.
+        Returns: (M, 3) predicted water positions.
+        """
+        self.model.eval()
+        device = batch['protein'].pos.device
+
+        sigma = self.compute_sigma(batch)
+        x = torch.randn(batch['water'].num_nodes, 3, device=device) * sigma
+
+        batch_w = batch['water'].batch
+        ts = torch.linspace(0, 1, num_steps, device=device)
+        dt = ts[1] - ts[0]
+        x1_pred_ema = x.clone()
+
+        for i in range(num_steps - 1):
+            t_scalar = ts[i]
+            num_graphs = int(batch_w.max().item()) + 1
+            t = t_scalar.expand(num_graphs)
+
+            batch['water'].pos = x
+            sc = {'x1_pred': x1_pred_ema} if use_sc else None
+            v = self.model(batch, t, sc=sc)
+
+            if method == "euler":
+                x = x + dt * v
+            else:  # midpoint
+                x_mid = x + 0.5 * dt * v
+                batch['water'].pos = x_mid
+                t_mid = t_scalar + 0.5 * dt
+                v_mid = self.model(batch, t_mid.expand(num_graphs), sc=sc)
+                x = x + dt * v_mid
+
+            if use_sc:
+                t_next = ts[i + 1]
+                batch['water'].pos = x
+                t_vec = t_next.expand(num_graphs)
+                v_next = self.model(batch, t_vec, sc={'x1_pred': x1_pred_ema})
+                t_per_atom = t_next.unsqueeze(0).expand(x.size(0), 1)
+                x1_pred_now = x + (1.0 - t_per_atom) * v_next
+                x1_pred_ema = 0.8 * x1_pred_ema + 0.2 * x1_pred_now
+
+        return x

@@ -206,47 +206,67 @@ def load_encoder_from_checkpoint(
     checkpoint_path: str,
     device: str = "cuda",
     freeze: bool = True,
+    default_hidden_dims: Tuple[int, int] = (256, 64),
+    default_pooled_dim: int = 128,
+    default_num_edge_rbf: int = 16,
+    default_radius: float = 8.0,
+    default_max_neighbors: int = 64,
 ) -> Tuple[ProteinGVPEncoder, Dict[str, Any]]:
     """
     Load pretrained ProteinGVPEncoder from SLAE checkpoint.
-    
-    Args:
-        checkpoint_path: Path to best_model.pt or encoder_epoch_X.pt
-        device: Device to load model on
-        freeze: Whether to freeze encoder weights
-        
-    Returns:
-        encoder: Loaded ProteinGVPEncoder
-        args: Training args dict from checkpoint
+    Falls back to blank encoder if checkpoint doesn't exist or fails to load.
     """
-    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    args = ckpt.get("args", {})
+    args = {
+        "hidden_dims": list(default_hidden_dims),
+        "pooled_dim": default_pooled_dim,
+        "num_edge_rbf": default_num_edge_rbf,
+        "radius": default_radius,
+        "max_neighbors": default_max_neighbors,
+    }
     
-    # Handle both full checkpoint and encoder-only checkpoint
-    state_dict = ckpt.get("encoder", ckpt)
+    loaded = False
+    state_dict = None
     
-    hidden_dims = tuple(args.get("hidden_dims", [256, 64]))
+    if checkpoint_path and Path(checkpoint_path).exists():
+        try:
+            ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+            args = ckpt.get("args", args)
+            state_dict = ckpt.get("encoder", ckpt)
+            loaded = True
+            print(f"Loaded encoder checkpoint from {checkpoint_path}")
+        except Exception as e:
+            print(f"Failed to load checkpoint {checkpoint_path}: {e}")
+            print("Initializing blank encoder instead.")
+    else:
+        print(f"Checkpoint not found at {checkpoint_path}, initializing blank encoder.")
+
+    hidden_dims = tuple(args.get("hidden_dims", list(default_hidden_dims)))
     
     encoder = ProteinGVPEncoder(
         node_scalar_in=16,
         hidden_dims=hidden_dims,
-        edge_scalar_in=args.get("num_edge_rbf", 16),
+        edge_scalar_in=args.get("num_edge_rbf", default_num_edge_rbf),
         edge_vec_in=1,
         edge_scalar_out=16,
         update_w_distance=True,
-        pooled_dim=args.get("pooled_dim", 128),
-        radius=args.get("radius", 8.0),
-        max_neighbors=args.get("max_neighbors", 64),
-        num_edge_rbf=args.get("num_edge_rbf", 16),
+        pooled_dim=args.get("pooled_dim", default_pooled_dim),
+        radius=args.get("radius", default_radius),
+        max_neighbors=args.get("max_neighbors", default_max_neighbors),
+        num_edge_rbf=args.get("num_edge_rbf", default_num_edge_rbf),
     ).to(device)
-    
-    encoder.load_state_dict(state_dict)
-    
+
+    if loaded and state_dict is not None:
+        try:
+            encoder.load_state_dict(state_dict)
+        except Exception as e:
+            print(f"Failed to load state dict: {e}")
+            print("Using randomly initialized weights.")
+
     if freeze:
         for p in encoder.parameters():
             p.requires_grad = False
         encoder.eval()
-    
+
     return encoder, args
 
 
