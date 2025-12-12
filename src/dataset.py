@@ -6,6 +6,8 @@
 
 # store the unit vectors and rbf embeddings of the distance for the cache -- compute it only for the water edges on the fly
 
+# TODO (12/9) -- implement better caching mechanism for dataset than the sharding (maybe look at the OG SLAE code or PLACR?)
+
 from __future__ import annotations
 from typing import List, Optional, Sequence, Tuple, Dict
 import numpy as np
@@ -157,7 +159,8 @@ def build_hetero_graph(
     protein_pos = torch.tensor(
         protein_atoms.coord.astype(np.float32), dtype=torch.float32
     )
-    protein_pos = protein_pos - protein_pos.mean(dim=0, keepdim=True)
+    center = protein_pos.mean(dim=0, keepdim=True)
+    protein_pos = protein_pos - center
     protein_elements = [str(e).upper() for e in protein_atoms.element]
     protein_x = element_onehot(protein_elements)
     
@@ -176,7 +179,7 @@ def build_hetero_graph(
         water_pos = torch.tensor(
             water_atoms.coord.astype(np.float32), dtype=torch.float32
         )
-        water_pos = water_pos - protein_pos.mean(dim=0, keepdim=True)
+        water_pos = water_pos - center
         water_elements = [str(e).upper() for e in water_atoms.element]
         water_x = element_onehot(water_elements)
     else:
@@ -188,7 +191,7 @@ def build_hetero_graph(
         mate_pos = torch.tensor(
             mate_coords.astype(np.float32), dtype=torch.float32
         )
-        mate_pos = mate_pos - protein_pos.mean(dim=0, keepdim=True)
+        mate_pos = mate_pos - center
         mate_elements = [a.symbol.upper() for a in crystal_data["mate_atoms"]]
         mate_x = element_onehot(mate_elements)
     else:
@@ -271,4 +274,6 @@ def build_hetero_graph(
     return data
 
 #caching, dataset, dataloader building
+
+
 
