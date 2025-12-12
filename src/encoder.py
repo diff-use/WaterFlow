@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F 
 
-from typing import Callable, Literal, Optional, Tuple
+from typing import Callable, Literal, Optional, Tuple, Any, Dict
 
 from torch_geometric.data import Batch, Data
 from torch_scatter import scatter_add, scatter_mean, scatter_max
@@ -42,19 +42,6 @@ def _rbf(d: torch.Tensor, number: int, cutoff: float) -> torch.Tensor:
     return e3nn.math.soft_one_hot_linspace(
         d, start=0.0, end=cutoff, number=number, basis="bessel", cutoff=True
     )
-
-def load_yaml_dict(path: Union[str, Path]) -> dict:
-    """Load YAML config, removing hydra _target_ if present."""
-    with open(path, "r") as f:
-        d = yaml.safe_load(f)
-    if not isinstance(d, dict):
-        raise ValueError(f"YAML at {path} did not parse to a dict.")
-    d.pop("_target_", None)
-    return d
-
-class EncoderType(Enum):
-    GVP = "gvp"
-    SLAE = "slae"
 
 class ProteinGVPEncoder(nn.Module):
     def __init__(
@@ -215,44 +202,109 @@ class ProteinGVPEncoder(nn.Module):
 
         return x
 
-class BaseProteinEncoder(ABC, nn.Module):
-    """Abstract encoder interface for FlowWaterGVP."""
+def load_encoder_from_checkpoint(
+    checkpoint_path: str,
+    device: str = "cuda",
+    freeze: bool = True,
+) -> Tuple[ProteinGVPEncoder, Dict[str, Any]]:
+    """
+    Load pretrained ProteinGVPEncoder from SLAE checkpoint.
+    
+    Args:
+        checkpoint_path: Path to best_model.pt or encoder_epoch_X.pt
+        device: Device to load model on
+        freeze: Whether to freeze encoder weights
+        
+    Returns:
+        encoder: Loaded ProteinGVPEncoder
+        args: Training args dict from checkpoint
+    """
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    args = ckpt.get("args", {})
+    
+    # Handle both full checkpoint and encoder-only checkpoint
+    state_dict = ckpt.get("encoder", ckpt)
+    
+    hidden_dims = tuple(args.get("hidden_dims", [256, 64]))
+    
+    encoder = ProteinGVPEncoder(
+        node_scalar_in=16,
+        hidden_dims=hidden_dims,
+        edge_scalar_in=args.get("num_edge_rbf", 16),
+        edge_vec_in=1,
+        edge_scalar_out=16,
+        update_w_distance=True,
+        pooled_dim=args.get("pooled_dim", 128),
+        radius=args.get("radius", 8.0),
+        max_neighbors=args.get("max_neighbors", 64),
+        num_edge_rbf=args.get("num_edge_rbf", 16),
+    ).to(device)
+    
+    encoder.load_state_dict(state_dict)
+    
+    if freeze:
+        for p in encoder.parameters():
+            p.requires_grad = False
+        encoder.eval()
+    
+    return encoder, args
 
+
+class FlowEncoder(nn.Module):
+    """
+    Wrapper that loads pretrained encoder and provides forward pass
+    for combined protein+mate homogeneous graphs.
+    """
+    
+    def __init__(
+        self,
+        checkpoint_path: str,
+        device: str = "cuda",
+        freeze: bool = True,
+    ):
+        super().__init__()
+        self.encoder, self.args = load_encoder_from_checkpoint(
+            checkpoint_path, device, freeze
+        )
+        self.freeze = freeze
+        self.hidden_dims = self.encoder.hidden_dims
+        self.pooled_dim = self.args.get("pooled_dim", 128)
+        
     @property
-    @abstractmethod
-    def output_dims(self) -> Tuple[int, int]:
-        """Return (scalar_dim, vector_dim) of encoder output."""
-        pass
-
-    @abstractmethod
+    def device(self):
+        return next(self.encoder.parameters()).device
+        
     def forward(self, data: Data) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Encode protein+mate graph.
+        Forward pass returning (scalar, vector) tuple before pooling.
         
         Args:
-            data: PyG Data with x, pos, edge_index, edge_rbf, edge_unit_vec
+            data: PyG Data with pos, x, edge_index
             
         Returns:
-            (s, v): scalar features (N, S), vector features (N, V, 3)
+            Tuple of (scalar_features, vector_features) at atom level
         """
-        pass
-
-class GVPEncoderWrapper(BaseProteinEncoder):
-    """Wraps ProteinGVPEncoder to conform to BaseProteinEncoder interface."""
-
-    def __init__(self, encoder: ProteinGVPEncoder):
-        super().__init__()
-        self.encoder = encoder
-        # Ensure atom-level output
-        self.encoder.pool_residue = False
-
-    @property
-    def output_dims(self) -> Tuple[int, int]:
-        return self.encoder.hidden_dims
-
-    def forward(self, data: Data) -> Tuple[torch.Tensor, torch.Tensor]:
-        return self.encoder(data)
+        with torch.set_grad_enabled(not self.freeze):
+            x_scalar = self.encoder.input_scalar_encoder(data.x)
+            node_features = self.encoder._initial_node_tuple(x_scalar)
+            x = self.encoder.input_gvp(node_features)
+            edge_attr, dist_feat = self.encoder._compute_edge_attr(
+                data.pos, data.edge_index
+            )
+            
+            for layer in self.encoder.layers:
+                x = layer(x, data.edge_index, edge_attr)
+                edge_attr = self.encoder.edge_update(
+                    node_tuple=x,
+                    edge_index=data.edge_index,
+                    edge_attr=edge_attr,
+                    distance_feat=(dist_feat if self.encoder.update_w_distance else None),
+                )
+            
+            return x  # (s, V) tuple
     
-# get scalar and vector features from SLAE?
+    def forward_pooled(self, data: Data) -> torch.Tensor:
+        with torch.set_grad_enabled(not self.freeze):
+            return self.encoder(data)
 
 
