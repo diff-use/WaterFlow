@@ -1,12 +1,4 @@
-# loading in encoder model from either OG SLAE or self implementation
-
-"""
-For OG SLAE implemenatation:
-- if weights_frozen == True, load in the encoder from the checkpoint once, and cache the protein embeddings as a protein atom node feature -- one forward pass per protein for the whole training run
-- if weights_frozen == False, load in the encoder from the checkpoint before first forward pass, and fine-tune the encoder weights during training -- one forward pass per protein per training step
-
-Currently, the learned embeddings will be paired with GVP based flow classes. Idea to try would be to make the flow model also based on SLAE architecture, so that the entire model is SLAE based.
-"""
+# encoder.py
 
 from __future__ import annotations
 from pathlib import Path

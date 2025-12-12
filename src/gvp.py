@@ -1,3 +1,6 @@
+# gvp.py 
+# generic GVP and GVPConv layers adapted from Jing et al. (2021)
+
 import torch
 import functools
 from torch import nn
