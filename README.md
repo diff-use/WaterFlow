@@ -12,10 +12,10 @@ You can install the environemnt by running `uv sync` and running the scripts wit
 Installing the environment:
 
 ```
-uv venv water --python 3.10
+uv venv water --python 3.12
 source water/bin/activate
 
-uv pip install torch torchvision
+uv pip install torch==2.8.0
 uv pip install torch_geometric
 uv pip install torch_cluster torch_scatter pyg_lib -f https://data.pyg.org/whl/torch-2.8.0+cu126.html
 uv pip install biotite wandb Bio networkx e3nn pytest pytest-cov
