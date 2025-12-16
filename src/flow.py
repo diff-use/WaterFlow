@@ -1,5 +1,7 @@
 # flow.py
 
+# flow.py
+
 import math
 from typing import Dict, Tuple, Optional
 
@@ -19,6 +21,7 @@ from torch import Tensor
 from tqdm.auto import tqdm
 
 from utils import condot_pair_hard_hungarian, compute_rmsd, cov_prec_at_threshold
+from encoder import ProteinGVPEncoder
 
 def rbf(d: torch.Tensor, num_rbf: int, D_min: float = 0.0, D_max: float = 20.0) -> torch.Tensor:
     return e3nn.math.soft_one_hot_linspace(
@@ -40,8 +43,6 @@ def edge_features(src_pos: torch.Tensor,
                 torch.empty(0, 1, 3, device=src_pos.device))
 
     s_idx, d_idx = edge_index
-    assert s_idx.max() < src_pos.size(0), "src index out of bounds"
-    assert d_idx.max() < dst_pos.size(0), "dst index out of bounds"
 
     disp = src_pos[s_idx] - dst_pos[d_idx]
     dist = torch.clamp(disp.norm(dim=-1, keepdim=True), min=1e-8)
@@ -70,58 +71,27 @@ def build_knn_edges(src_pos: torch.Tensor,
 
     return idx.unique(dim=1)
 
-def make_protein_mate_encoder_data(
+def make_protein_encoder_data(
     data: HeteroData,
     num_rbf: int,
     rbf_dmin: float = 0.0,
     rbf_dmax: float = 20.0,
-) -> Tuple[Data, int, int]:
+) -> Data:
     """
-    Build a homogeneous Data with nodes = protein + mate, and edges:
-      - protein-protein from ('protein', 'pp', 'protein')
-      - mate-mate from ('mate', 'mm', 'mate')
-      - protein-mate (both directions) from ('protein','pm','mate')
-
+    Build a homogeneous Data with protein nodes (including any mates).
+    
     Returns:
         enc_data: Data with x, pos, edge_index, edge_rbf, edge_unit_vec
-        num_prot: # protein nodes
-        num_mate: # mate nodes
     """
     device = data['protein'].pos.device
-
     prot = data['protein']
-    mate = data['mate']
 
-    num_prot = prot.num_nodes
-    num_mate = mate.num_nodes
+    x = prot.x
+    pos = prot.pos
 
-    x = torch.cat([prot.x, mate.x], dim=0)
-    pos = torch.cat([prot.pos, mate.pos], dim=0)
-
-    edge_index_list = []
-
-    # protein-protein
+    # protein-protein edges
     if ('protein', 'pp', 'protein') in data.edge_types:
-        pp = data['protein', 'pp', 'protein'].edge_index
-        edge_index_list.append(pp)
-
-    # mate-mate (offset indices by num_prot)
-    if num_mate > 0 and ('mate', 'mm', 'mate') in data.edge_types:
-        mm = data['mate', 'mm', 'mate'].edge_index.clone()
-        mm = mm + num_prot
-        edge_index_list.append(mm)
-
-    # protein-mate contacts (both directions)
-    if num_mate > 0 and ('protein', 'pm', 'mate') in data.edge_types:
-        pm_local = data['protein', 'pm', 'mate'].edge_index
-        pm_comb = torch.stack(
-            [pm_local[0], pm_local[1] + num_prot], dim=0
-        )
-        mp_comb = pm_comb.flip(0)
-        edge_index_list.extend([pm_comb, mp_comb])
-
-    if edge_index_list:
-        edge_index = torch.cat(edge_index_list, dim=1)
+        edge_index = data['protein', 'pp', 'protein'].edge_index
     else:
         edge_index = torch.empty(2, 0, dtype=torch.long, device=device)
 
@@ -146,45 +116,17 @@ def make_protein_mate_encoder_data(
     )
 
     # batch for multi-complex batches
-    if hasattr(prot, "batch") and hasattr(mate, "batch"):
-        enc_data.batch = torch.cat([prot.batch, mate.batch], dim=0)
+    if hasattr(prot, "batch"):
+        enc_data.batch = prot.batch
 
-    return enc_data, num_prot, num_mate
-
-class HeteroToDataWrapper:
-    """Wrap a single node type of HeteroData to mimic a Data object."""
-
-    def __init__(self, hetero_data: HeteroData, node_type: str = 'protein'):
-        self.hetero_data = hetero_data
-        self.node_type = node_type
-
-    def __getattr__(self, name):
-        if name in self.hetero_data[self.node_type]:
-            return self.hetero_data[self.node_type][name]
-
-        edge_key = (self.node_type, 'pp', self.node_type)
-        if edge_key in self.hetero_data.edge_types:
-            edge_storage = self.hetero_data[edge_key]
-            if name in edge_storage:
-                return edge_storage[name]
-
-        if name == 'edge_index':
-            return self.hetero_data[self.node_type, 'pp', self.node_type].edge_index
-        elif name == 'edge_rbf':
-            return self.hetero_data[self.node_type, 'pp', self.node_type].edge_rbf
-        elif name == 'edge_unit_vec':
-            return self.hetero_data[self.node_type, 'pp', self.node_type].edge_unit_vec
-
-        raise AttributeError(f"{self.__class__.__name__} has no attribute {name!r}")
+    return enc_data
 
 class ProteinWaterUpdate(nn.Module):
     """
     Heterogeneous GVP message passing:
       - protein -> water  (pw)
-      - mate    -> water  (mw)
       - water   -> water  (ww)
       - (optional) protein<->protein (pp), water->protein (wp)
-      - (optional) mate<->mate (mm), water->mate (wm)
     """
 
     def __init__(
@@ -196,7 +138,6 @@ class ProteinWaterUpdate(nn.Module):
         vector_gate=True,
         aggr_edges="sum",
         update_protein=False,
-        update_mate=False,
         use_dst_feats=True,
     ):
         super().__init__()
@@ -204,18 +145,12 @@ class ProteinWaterUpdate(nn.Module):
 
         etypes = [
             ('protein', 'pw', 'water'),
-            ('mate',    'mw', 'water'),
             ('water',   'ww', 'water'),
         ]
         if update_protein:
             etypes += [
                 ('protein', 'pp', 'protein'),
                 ('water',   'wp', 'protein'),
-            ]
-        if update_mate:
-            etypes += [
-                ('mate',  'mm', 'mate'),
-                ('water', 'wm', 'mate'),
             ]
 
         self.blocks = nn.ModuleList([
@@ -240,13 +175,11 @@ class ProteinWaterUpdate(nn.Module):
                     k_pw: int = 12,
                     k_ww: int = 8,
                     k_wp: int = 8,
-                    include_pp: bool = False,
-                    include_mm: bool = False) -> Dict[Tuple[str, str, str], torch.Tensor]:
+                    include_pp: bool = False) -> Dict[Tuple[str, str, str], torch.Tensor]:
         """
         Build KNN edges for:
           - protein->water, water->water,
-          - optional protein->protein, water->protein,
-          - mate->water, optional mate->mate, water->mate.
+          - optional protein->protein, water->protein
         Always returns entries for all self.etypes (possibly empty).
         """
         edge_index_dict: Dict[Tuple[str, str, str], torch.Tensor] = {}
@@ -263,11 +196,9 @@ class ProteinWaterUpdate(nn.Module):
 
         batch_p = data['protein'].batch if 'batch' in data['protein'] else None
         batch_w = data['water'].batch if 'batch' in data['water'] else None
-        batch_m = data['mate'].batch if 'batch' in data['mate'] else None
 
         pos_p = data['protein'].pos
         pos_w = data['water'].pos
-        pos_m = data['mate'].pos
 
         # protein -> water
         if pos_p.numel() > 0 and pos_w.numel() > 0:
@@ -308,35 +239,6 @@ class ProteinWaterUpdate(nn.Module):
                     2, 0, dtype=torch.long, device=device
                 )
 
-        # mate -> water
-        if pos_m.numel() > 0 and pos_w.numel() > 0:
-            edge_index_dict[('mate', 'mw', 'water')] = knn_edges(
-                pos_m, pos_w, k=k_pw, b_src=batch_m, b_dst=batch_w
-            )
-        else:
-            edge_index_dict[('mate', 'mw', 'water')] = torch.empty(
-                2, 0, dtype=torch.long, device=device
-            )
-
-        # optional mate-mate and water->mate
-        if include_mm:
-            if ('mate', 'mm', 'mate') in data.edge_types:
-                edge_index_dict[('mate', 'mm', 'mate')] = \
-                    data['mate', 'mm', 'mate'].edge_index
-            else:
-                edge_index_dict[('mate', 'mm', 'mate')] = knn_edges(
-                    pos_m, pos_m, k=k_pw, b_src=batch_m, b_dst=batch_m
-                )
-
-            if pos_w.numel() > 0 and pos_m.numel() > 0:
-                edge_index_dict[('water', 'wm', 'mate')] = knn_edges(
-                    pos_w, pos_m, k=k_wp, b_src=batch_w, b_dst=batch_m
-                )
-            else:
-                edge_index_dict[('water', 'wm', 'mate')] = torch.empty(
-                    2, 0, dtype=torch.long, device=device
-                )
-
         # ensure all etypes are present, even if empty
         for et in self.etypes:
             if et not in edge_index_dict:
@@ -352,12 +254,10 @@ class ProteinWaterUpdate(nn.Module):
                 k_pw: int = 12,
                 k_ww: int = 8,
                 k_wp: int = 8,
-                update_protein: bool = False,
-                update_mate: bool = False):
+                update_protein: bool = False):
         """
         x_dict: {
             'protein': (s_p, v_p),
-            'mate':    (s_m, v_m),
             'water':   (s_w, v_w)
         }
         """
@@ -367,7 +267,6 @@ class ProteinWaterUpdate(nn.Module):
             data,
             k_pw=k_pw, k_ww=k_ww, k_wp=k_wp,
             include_pp=update_protein,
-            include_mm=update_mate,
         )
 
         for block in self.blocks:
@@ -379,12 +278,11 @@ class ProteinWaterUpdate(nn.Module):
 class FlowWaterGVP(nn.Module):
     """
     End-to-end:
-      1. Encode protein+mate as homogeneous graph.
-      2. Split latents back into protein/mate nodes.
-      3. Time-condition protein, mate, and water.
-      4. Build protein->water and mate->water edges.
-      5. Run hetero multi-edge GVP update.
-      6. Predict water vector field.
+      1. Encode protein (which may include mate atoms).
+      2. Time-condition protein and water.
+      3. Build protein->water edges.
+      4. Run hetero multi-edge GVP update.
+      5. Predict water vector field.
     """
 
     def __init__(
@@ -429,7 +327,7 @@ class FlowWaterGVP(nn.Module):
             vector_gate=True,
         )
 
-        # time-conditioning for protein/mate
+        # time-conditioning for protein
         self.protein_scalar_encoder = nn.Sequential(
             nn.Linear(s_h + 1, s_h),
             nn.GELU(),
@@ -443,7 +341,7 @@ class FlowWaterGVP(nn.Module):
             nn.LayerNorm(s_h),
         )
 
-        # hetero updater: protein+mate+water
+        # hetero updater: protein+water
         self.updater = ProteinWaterUpdate(
             hidden_dims=hidden_dims,
             rbf_dim=edge_scalar_dim,
@@ -452,7 +350,6 @@ class FlowWaterGVP(nn.Module):
             vector_gate=vector_gate,
             aggr_edges="sum",
             update_protein=not freeze_encoder,
-            update_mate=True,
             use_dst_feats=True,
         )
 
@@ -481,7 +378,7 @@ class FlowWaterGVP(nn.Module):
                 t: torch.Tensor,
                 sc: Optional[Dict[str, torch.Tensor]] = None) -> torch.Tensor:
         """
-        data: HeteroData with node types 'protein', 'mate', 'water'
+        data: HeteroData with node types 'protein' (may include mates), 'water'
         t: (B,) diffusion time per complex
         sc: optional dict with 'x1_pred' for score conditioning (same shape as water.pos)
 
@@ -490,8 +387,8 @@ class FlowWaterGVP(nn.Module):
         """
         device = data['protein'].pos.device
 
-        # encoder over protein + mate as a single homogeneous graph
-        enc_data, num_prot, num_mate = make_protein_mate_encoder_data(
+        # encoder over protein (which includes any mates)
+        enc_data = make_protein_encoder_data(
             data,
             num_rbf=self.encoder.edge_scalar_in,
             rbf_dmin=0.0,
@@ -502,31 +399,18 @@ class FlowWaterGVP(nn.Module):
             s_all, v_all = self.encoder(enc_data)
 
         # bridge encoder dims -> flow dims
-        s_all, v_all = self.encoder_to_flow((s_all, v_all))
-
-        # split back into protein / mate
-        s_p_latent = s_all[:num_prot]
-        v_p_latent = v_all[:num_prot]
-        s_m_latent = s_all[num_prot:num_prot + num_mate]
-        v_m_latent = v_all[num_prot:num_prot + num_mate]
+        s_p_latent, v_p_latent = self.encoder_to_flow((s_all, v_all))
 
         if 'water' not in data.node_types or data['water'].num_nodes == 0:
             return torch.zeros(0, 3, device=device)
 
         batch_p = data['protein'].batch
         batch_w = data['water'].batch
-        batch_m = data['mate'].batch
 
         t_p = t[batch_p].unsqueeze(-1)
         t_w = t[batch_w].unsqueeze(-1)
-        t_m = t[batch_m].unsqueeze(-1)
 
         s_p = self.protein_scalar_encoder(torch.cat([s_p_latent, t_p], dim=-1))
-        if num_mate > 0:
-            s_m = self.protein_scalar_encoder(torch.cat([s_m_latent, t_m], dim=-1))
-        else:
-            s_m = s_m_latent
-
         s_w = self.water_scalar_encoder(torch.cat([data['water'].x, t_w], dim=-1))
 
         # initial water vectors (all zeros to start)
@@ -556,11 +440,10 @@ class FlowWaterGVP(nn.Module):
         # build hetero feature dict for GVP multi-edge updates
         x_dict = {
             'protein': (s_p, v_p_latent),
-            'mate':    (s_m, v_m_latent),
             'water':   (s_w, v_w),
         }
 
-        # hetero update (protein+mate+water graph)
+        # hetero update (protein+water graph)
         x_dict = self.updater(
             x_dict,
             data,
@@ -568,7 +451,6 @@ class FlowWaterGVP(nn.Module):
             k_ww=self.k_ww,
             k_wp=self.k_wp,
             update_protein=not self.freeze_encoder,
-            update_mate=False,
         )
 
         # water vector field head
@@ -713,6 +595,55 @@ class FlowMatcher:
         return {'loss': loss.item(), 'rmsd': rmsd}
 
     @torch.no_grad()
+    def euler_integrate(
+        self,
+        graph: HeteroData,
+        num_steps: int = 100,
+        use_sc: bool = True,
+        sc_ema_alpha: float = 0.2,
+        device: str = "cuda",
+    ) -> np.ndarray:
+        """
+        Euler integration from noise to final positions.
+        
+        Returns:
+            water_pred: (Nw, 3) final predicted water positions
+        """
+        self.model.eval()
+        device = torch.device(device if torch.cuda.is_available() else "cpu")
+
+        g = copy.deepcopy(graph).to(device)
+
+        sigma = self.compute_sigma(g)
+        x = torch.randn(g['water'].num_nodes, 3, device=device) * sigma
+        x1_pred_ema = x.clone()
+
+        # ensure batch tensors exist
+        if 'batch' not in g['protein']:
+            g['protein'].batch = torch.zeros(g['protein'].num_nodes, dtype=torch.long, device=device)
+        if 'batch' not in g['water']:
+            g['water'].batch = torch.zeros(g['water'].num_nodes, dtype=torch.long, device=device)
+
+        ts = torch.linspace(0, 1, num_steps, device=device)
+        dt = ts[1] - ts[0]
+
+        for i in range(num_steps - 1):
+            t = ts[i]
+            g['water'].pos = x
+            sc = {'x1_pred': x1_pred_ema} if use_sc else None
+            v = self.model(g, t.view(1), sc=sc)
+            x = x + dt * v
+
+            if use_sc:
+                t_next = ts[i + 1]
+                g['water'].pos = x
+                v_next = self.model(g, t_next.view(1), sc={'x1_pred': x1_pred_ema})
+                x1_pred_now = x + (1.0 - t_next) * v_next
+                x1_pred_ema = (1.0 - sc_ema_alpha) * x1_pred_ema + sc_ema_alpha * x1_pred_now
+
+        return x.detach().cpu().numpy()
+
+    @torch.no_grad()
     def rk4_integrate(
         self,
         graph: HeteroData,
@@ -720,57 +651,48 @@ class FlowMatcher:
         use_sc: bool = True,
         sc_ema_alpha: float = 0.2,
         device: str = "cuda",
+        return_trajectory: bool = True,
     ) -> Dict[str, np.ndarray]:
         """
         RK4 integration from noise to final positions.
         
         Returns:
             dict with keys:
-                'protein_pos': (Np, 3)
-                'mate_pos': (Nm, 3) or empty
+                'protein_pos': (Np, 3) - includes both ASU and mate atoms
                 'water_true': (Nw, 3)
                 'water_pred': (Nw, 3) final prediction
-                'trajectory': list of (Nw, 3) at each step
-                'rmsd': list of RMSD values
-                'coverage': list of coverage values
-                'precision': list of precision values
+                'trajectory': list of (Nw, 3) at each step (if return_trajectory=True)
+                'rmsd': list of RMSD values (if return_trajectory=True)
+                'coverage': list of coverage values (if return_trajectory=True)
+                'precision': list of precision values (if return_trajectory=True)
         """
         self.model.eval()
         device = torch.device(device if torch.cuda.is_available() else "cpu")
 
         g = copy.deepcopy(graph).to(device)
-        assert 'water' in g.node_types and g['water'].num_nodes > 0
 
-        # Extract positions
         protein_pos = g['protein'].pos.detach().cpu().numpy()
-        mate_pos = g['mate'].pos.detach().cpu().numpy() if g['mate'].num_nodes > 0 else np.zeros((0, 3))
         x1_true = g['water'].pos.clone()
         water_true = x1_true.detach().cpu().numpy()
 
-        # Sigma from protein
         sigma = self.compute_sigma(g)
-
-        # Initial noise
         x = torch.randn_like(x1_true) * sigma
         x1_pred_ema = x.clone()
 
-        # Ensure batch tensors exist
+        # ensure batch tensors exist
         if 'batch' not in g['protein']:
             g['protein'].batch = torch.zeros(g['protein'].num_nodes, dtype=torch.long, device=device)
         if 'batch' not in g['water']:
             g['water'].batch = torch.zeros(g['water'].num_nodes, dtype=torch.long, device=device)
-        if 'mate' in g.node_types and 'batch' not in g['mate']:
-            g['mate'].batch = torch.zeros(g['mate'].num_nodes, dtype=torch.long, device=device)
 
-        # Time grid
         ts = torch.linspace(0, 1, num_steps, device=device)
         dt = ts[1] - ts[0]
 
-        # Storage
-        trajectory = [x.detach().cpu().numpy().copy()]
-        rmsd_values = [compute_rmsd(x, x1_true)]
-        cov0, prec0 = cov_prec_at_threshold(x, x1_true, thresh=1.0)
-        cov_values, prec_values = [cov0], [prec0]
+        if return_trajectory:
+            trajectory = [x.detach().cpu().numpy().copy()]
+            rmsd_values = [compute_rmsd(x, x1_true)]
+            cov0, prec0 = cov_prec_at_threshold(x, x1_true, thresh=1.0)
+            cov_values, prec_values = [cov0], [prec0]
 
         # RK4 integration
         for i in tqdm(range(num_steps - 1), desc="RK4 integration", leave=False):
@@ -788,7 +710,6 @@ class FlowMatcher:
 
             x = x + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
 
-            # Update self-conditioning EMA
             if use_sc:
                 t1 = ts[i + 1]
                 g['water'].pos = x
@@ -796,114 +717,54 @@ class FlowMatcher:
                 x1_pred_now = x + (1.0 - t1) * v_next
                 x1_pred_ema = (1.0 - sc_ema_alpha) * x1_pred_ema + sc_ema_alpha * x1_pred_now
 
-            trajectory.append(x.detach().cpu().numpy().copy())
-            rmsd_values.append(compute_rmsd(x, x1_true))
-            cov_i, prec_i = cov_prec_at_threshold(x, x1_true, thresh=1.0)
-            cov_values.append(cov_i)
-            prec_values.append(prec_i)
+            if return_trajectory:
+                trajectory.append(x.detach().cpu().numpy().copy())
+                rmsd_values.append(compute_rmsd(x, x1_true))
+                cov_i, prec_i = cov_prec_at_threshold(x, x1_true, thresh=1.0)
+                cov_values.append(cov_i)
+                prec_values.append(prec_i)
 
-        return {
+        result = {
             'protein_pos': protein_pos,
-            'mate_pos': mate_pos,
             'water_true': water_true,
             'water_pred': x.detach().cpu().numpy(),
-            'trajectory': trajectory,
-            'rmsd': rmsd_values,
-            'coverage': cov_values,
-            'precision': prec_values,
         }
+        
+        if return_trajectory:
+            result.update({
+                'trajectory': trajectory,
+                'rmsd': rmsd_values,
+                'coverage': cov_values,
+                'precision': prec_values,
+            })
 
-    @torch.no_grad()
-    def euler_integrate(
+        return result
+
+    def sample(
         self,
         graph: HeteroData,
         num_steps: int = 100,
+        method: str = "euler",
         use_sc: bool = True,
         device: str = "cuda",
     ) -> np.ndarray:
-        """Simple Euler integration (faster than RK4, less accurate)."""
-        self.model.eval()
-        device = torch.device(device if torch.cuda.is_available() else "cpu")
-
-        g = copy.deepcopy(graph).to(device)
-        sigma = self.compute_sigma(g)
-        x = torch.randn(g['water'].num_nodes, 3, device=device) * sigma
-
-        if 'batch' not in g['protein']:
-            g['protein'].batch = torch.zeros(g['protein'].num_nodes, dtype=torch.long, device=device)
-        if 'batch' not in g['water']:
-            g['water'].batch = torch.zeros(g['water'].num_nodes, dtype=torch.long, device=device)
-        if 'mate' in g.node_types and 'batch' not in g['mate']:
-            g['mate'].batch = torch.zeros(g['mate'].num_nodes, dtype=torch.long, device=device)
-
-        ts = torch.linspace(0, 1, num_steps, device=device)
-        dt = ts[1] - ts[0]
-        x1_pred_ema = x.clone()
-
-        for i in range(num_steps - 1):
-            t = ts[i]
-            g['water'].pos = x
-            sc = {'x1_pred': x1_pred_ema} if use_sc else None
-            v = self.model(g, t.view(1), sc=sc)
-            x = x + dt * v
-
-            if use_sc:
-                t_next = ts[i + 1]
-                g['water'].pos = x
-                v_next = self.model(g, t_next.view(1), sc={'x1_pred': x1_pred_ema})
-                x1_pred_now = x + (1.0 - t_next) * v_next
-                x1_pred_ema = 0.8 * x1_pred_ema + 0.2 * x1_pred_now
-
-        return x.detach().cpu().numpy()
-
-    @torch.no_grad()
-    def sample_batch(
-        self,
-        batch: HeteroData,
-        num_steps: int = 100,
-        use_sc: bool = True,
-        method: str = "euler",
-    ) -> Tensor:
         """
-        Sample water positions for a batched HeteroData.
-        Returns: (M, 3) predicted water positions.
+        Sample water positions for a single graph.
+        
+        Args:
+            graph: HeteroData with 'protein' and 'water' node types
+            num_steps: Number of integration steps
+            method: 'euler' or 'rk4'
+            use_sc: Whether to use self-conditioning
+            device: Device to run on
+            
+        Returns:
+            (Nw, 3) predicted water positions
         """
-        self.model.eval()
-        device = batch['protein'].pos.device
-
-        sigma = self.compute_sigma(batch)
-        x = torch.randn(batch['water'].num_nodes, 3, device=device) * sigma
-
-        batch_w = batch['water'].batch
-        ts = torch.linspace(0, 1, num_steps, device=device)
-        dt = ts[1] - ts[0]
-        x1_pred_ema = x.clone()
-
-        for i in range(num_steps - 1):
-            t_scalar = ts[i]
-            num_graphs = int(batch_w.max().item()) + 1
-            t = t_scalar.expand(num_graphs)
-
-            batch['water'].pos = x
-            sc = {'x1_pred': x1_pred_ema} if use_sc else None
-            v = self.model(batch, t, sc=sc)
-
-            if method == "euler":
-                x = x + dt * v
-            else:  # midpoint
-                x_mid = x + 0.5 * dt * v
-                batch['water'].pos = x_mid
-                t_mid = t_scalar + 0.5 * dt
-                v_mid = self.model(batch, t_mid.expand(num_graphs), sc=sc)
-                x = x + dt * v_mid
-
-            if use_sc:
-                t_next = ts[i + 1]
-                batch['water'].pos = x
-                t_vec = t_next.expand(num_graphs)
-                v_next = self.model(batch, t_vec, sc={'x1_pred': x1_pred_ema})
-                t_per_atom = t_next.unsqueeze(0).expand(x.size(0), 1)
-                x1_pred_now = x + (1.0 - t_per_atom) * v_next
-                x1_pred_ema = 0.8 * x1_pred_ema + 0.2 * x1_pred_now
-
-        return x
+        if method == "euler":
+            return self.euler_integrate(graph, num_steps, use_sc, device=device)
+        elif method == "rk4":
+            result = self.rk4_integrate(
+                graph, num_steps, use_sc, device=device, return_trajectory=False
+            )
+            return result['water_pred']
