@@ -23,22 +23,12 @@ from torch_cluster import radius_graph
 import e3nn
 from e3nn.math import soft_one_hot_linspace
 
+from src.utils import rbf
+
 ELEMENT_VOCAB = [
     "C", "N", "O", "S", "P", "SE", "MG", "ZN", "CA", "FE", "NA", "K", "CL", "F", "BR",
 ]
 ELEM_IDX = {e: i for i, e in enumerate(ELEMENT_VOCAB)}
-
-
-def rbf(r: Tensor, num_gaussians: int = 16, cutoff: float = 8.0) -> Tensor:
-    """Radial basis function encoding of distances."""
-    return soft_one_hot_linspace(
-        r, 
-        start=0.0, 
-        end=cutoff, 
-        number=num_gaussians,
-        basis='bessel',
-        cutoff=True
-    )
 
 def edge_features(
     src_pos: torch.Tensor,

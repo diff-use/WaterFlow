@@ -4,23 +4,45 @@ import torch
 from torch import cdist
 import numpy as np
 from scipy.optimize import linear_sum_assignment
+import scipy.spatial.distance as spdist
 import matplotlib.pyplot as plt
 
 from typing import Tuple
+from torch import Tensor
+
+from e3nn.math import soft_one_hot_linspace
+
+def rbf(r: Tensor, num_gaussians: int = 16, cutoff: float = 8.0) -> Tensor:
+    """Radial basis function encoding of distances."""
+    return soft_one_hot_linspace(
+        r, 
+        start=0.0, 
+        end=cutoff, 
+        number=num_gaussians,
+        basis='bessel',
+        cutoff=True
+    )
 
 @torch.no_grad
-def compute_rmsd(pred, target):
+def compute_rmsd(pred, target, batch=None):
     """Compute RMSD with optimal assignment using Hungarian algorithm."""
     if isinstance(pred, torch.Tensor):
         pred = pred.detach().cpu().numpy()
     if isinstance(target, torch.Tensor):
         target = target.detach().cpu().numpy()
+    if batch is not None:
+        if isinstance(batch, torch.Tensor):
+            batch = batch.detach().cpu().numpy()
+        rmsds = []
+        for g in np.unique(batch):
+            m = batch == g
+            rmsds.append(compute_rmsd(pred[m], target[m], batch=None))
+        return float(np.mean(rmsds))
     
-    dist_matrix = cdist(pred, target)
+    dist_matrix = spdist.cdist(pred, target)
     row_ind, col_ind = linear_sum_assignment(dist_matrix)
     diff = pred[row_ind] - target[col_ind]
-    rmsd = np.sqrt(np.mean(np.sum(diff**2, axis=1)))
-    return float(rmsd)
+    return float(np.sqrt(np.mean(np.sum(diff**2, axis=1))))
 
 @torch.no_grad()
 def condot_pair_hard_hungarian(
@@ -70,7 +92,7 @@ def cov_prec_at_threshold(pred, true, thresh=1.5):
         true = true.detach().cpu().numpy()
     if pred.size == 0 or true.size == 0:
         return 0.0, 0.0
-    D = cdist(true, pred)   # [N_true, N_pred]
+    D = spdist.cdist(true, pred)   # [N_true, N_pred]
     coverage  = float((D.min(axis=1) <= thresh).mean())
     precision = float((D.min(axis=0) <= thresh).mean())
     return coverage, precision

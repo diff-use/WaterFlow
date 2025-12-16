@@ -14,11 +14,10 @@ from torch_geometric.nn import HeteroConv
 import e3nn
 from e3nn.math import soft_one_hot_linspace
 
-def rbf(d: torch.Tensor, number: int, cutoff: float) -> torch.Tensor:
-    # spherical Bessel basis
-    return soft_one_hot_linspace(
-        d, start=0.0, end=cutoff, number=number, basis="bessel", cutoff=True
-    )
+from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from src.utils import rbf
 
 def tuple_sum(*args):
     """

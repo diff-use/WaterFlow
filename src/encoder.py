@@ -27,6 +27,7 @@ from src.gvp import EdgeUpdate, GVP, GVPConvLayer
 import e3nn
 from e3nn.math import soft_one_hot_linspace
 
+from src.utils import rbf as _rbf
 
 def _edge_vectors(pos: torch.Tensor, edge_index: torch.Tensor):
     src, dst = edge_index[0], edge_index[1]
@@ -34,11 +35,6 @@ def _edge_vectors(pos: torch.Tensor, edge_index: torch.Tensor):
     rij = torch.linalg.norm(vec, dim=-1)
     r_hat = torch.where(rij[:, None] > 0, vec / rij[:, None], torch.zeros_like(vec))
     return rij, r_hat
-
-def _rbf(d: torch.Tensor, number: int, cutoff: float) -> torch.Tensor:
-    return soft_one_hot_linspace(
-        d, start=0.0, end=cutoff, number=number, basis="bessel", cutoff=True
-    )
 
 class ProteinGVPEncoder(nn.Module):
     def __init__(

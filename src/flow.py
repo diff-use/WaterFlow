@@ -1,7 +1,5 @@
 # flow.py
 
-# flow.py
-
 import math
 from typing import Dict, Tuple, Optional
 from pathlib import Path
@@ -23,38 +21,9 @@ import numpy as np
 from torch import Tensor
 from tqdm.auto import tqdm
 
-from src.utils import condot_pair_hard_hungarian, compute_rmsd, cov_prec_at_threshold
+from src.utils import condot_pair_hard_hungarian, compute_rmsd, cov_prec_at_threshold, rbf
 from src.encoder import ProteinGVPEncoder
 from src.gvp import GVP, GVPMultiEdgeConv
-
-
-def rbf(d: torch.Tensor, num_rbf: int, D_min: float = 0.0, D_max: float = 20.0) -> torch.Tensor:
-    return soft_one_hot_linspace(
-        d, start=D_min, end=D_max, number=num_rbf, basis="bessel", cutoff=True
-    )
-
-def edge_features(src_pos: torch.Tensor,
-                  dst_pos: torch.Tensor,
-                  edge_index: torch.Tensor,
-                  num_rbf: int = 16) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Compute RBF(dist) and unit displacement vectors for given edges.
-    Returns:
-        e_s: (E, num_rbf)
-        e_v: (E, 1, 3)
-    """
-    if edge_index.numel() == 0:
-        return (torch.empty(0, num_rbf, device=src_pos.device),
-                torch.empty(0, 1, 3, device=src_pos.device))
-
-    s_idx, d_idx = edge_index
-
-    disp = src_pos[s_idx] - dst_pos[d_idx]
-    dist = torch.clamp(disp.norm(dim=-1, keepdim=True), min=1e-8)
-    e_s = rbf(dist.squeeze(-1), num_rbf=num_rbf)
-    e_v = (disp / dist).unsqueeze(1)
-    return e_s, e_v
-
 
 def build_knn_edges(src_pos: torch.Tensor,
                     dst_pos: torch.Tensor,
@@ -75,6 +44,7 @@ def build_knn_edges(src_pos: torch.Tensor,
         idx = idx[:, mask]
 
     return idx.unique(dim=1)
+
 
 def make_protein_encoder_data(
     data: HeteroData,
@@ -106,7 +76,8 @@ def make_protein_encoder_data(
         disp = pos[s_idx] - pos[d_idx]
         dist = torch.clamp(disp.norm(dim=-1, keepdim=True), 1e-8)
         r = dist.squeeze(-1)
-        edge_rbf = rbf(r, num_rbf=num_rbf, D_min=rbf_dmin, D_max=rbf_dmax)
+        # FIX: use correct parameter names for rbf()
+        edge_rbf = rbf(r, num_gaussians=num_rbf, cutoff=rbf_dmax)
         edge_unit_vec = (disp / dist)
     else:
         edge_rbf = torch.empty(0, num_rbf, device=device)
@@ -125,6 +96,7 @@ def make_protein_encoder_data(
         enc_data.batch = prot.batch
 
     return enc_data
+
 
 class ProteinWaterUpdate(nn.Module):
     """
@@ -302,7 +274,7 @@ class FlowWaterGVP(nn.Module):
         k_ww: int = 8,
         k_wp: int = 8,
         freeze_encoder: bool = False,
-        water_input_dim = 16 # 1 hot with oxygen, same as encoder
+        water_input_dim: int = 16  # 1 hot with oxygen, same as encoder
     ):
         super().__init__()
         self.encoder = encoder
@@ -364,7 +336,7 @@ class FlowWaterGVP(nn.Module):
             activations=(None, None),
             vector_gate=True,
         )
-        
+
         self.sc_sca_encoder = nn.Sequential(
             nn.Linear(1, s_h),
             nn.GELU(),
@@ -461,6 +433,7 @@ class FlowWaterGVP(nn.Module):
         # water vector field head
         _, v_pred = self.vfield_head(x_dict['water'])
         return v_pred.squeeze(1)
+
 
 class FlowMatcher:
     """
@@ -560,10 +533,10 @@ class FlowMatcher:
             )
         optimizer.step()
 
-        # training RMSD
+        # training RMSD (FIX: only pass 2 args)
         with torch.no_grad():
             x1_hat = x_t + (1.0 - t_per_atom) * v_pred
-            rmsd = compute_rmsd(x1_hat, x1_star, batch_w)
+            rmsd = compute_rmsd(x1_hat, x1_star)
 
         return {'loss': loss.item(), 'rmsd': rmsd, 'sigma': sigma}
 
@@ -595,7 +568,7 @@ class FlowMatcher:
         loss = (w * per_atom_mse).sum() / w.sum()
 
         x1_hat = x_t + (1.0 - t_per_atom) * v_pred
-        rmsd = compute_rmsd(x1_hat, x1_star, batch_w)
+        rmsd = compute_rmsd(x1_hat, x1_star)
 
         return {'loss': loss.item(), 'rmsd': rmsd}
 
@@ -734,7 +707,7 @@ class FlowMatcher:
             'water_true': water_true,
             'water_pred': x.detach().cpu().numpy(),
         }
-        
+
         if return_trajectory:
             result.update({
                 'trajectory': trajectory,
