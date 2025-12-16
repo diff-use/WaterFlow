@@ -25,6 +25,7 @@ import yaml
 
 from src.gvp import EdgeUpdate, GVP, GVPConvLayer
 import e3nn
+from e3nn.math import soft_one_hot_linspace
 
 
 def _edge_vectors(pos: torch.Tensor, edge_index: torch.Tensor):
@@ -35,7 +36,7 @@ def _edge_vectors(pos: torch.Tensor, edge_index: torch.Tensor):
     return rij, r_hat
 
 def _rbf(d: torch.Tensor, number: int, cutoff: float) -> torch.Tensor:
-    return e3nn.math.soft_one_hot_linspace(
+    return soft_one_hot_linspace(
         d, start=0.0, end=cutoff, number=number, basis="bessel", cutoff=True
     )
 

@@ -15,6 +15,7 @@ import torch.nn.functional as F
 from torch_geometric.nn import knn
 from torch_geometric.data import HeteroData, Data
 import e3nn
+from e3nn.math import soft_one_hot_linspace
 
 import copy
 
@@ -28,7 +29,7 @@ from src.gvp import GVP, GVPMultiEdgeConv
 
 
 def rbf(d: torch.Tensor, num_rbf: int, D_min: float = 0.0, D_max: float = 20.0) -> torch.Tensor:
-    return e3nn.math.soft_one_hot_linspace(
+    return soft_one_hot_linspace(
         d, start=D_min, end=D_max, number=num_rbf, basis="bessel", cutoff=True
     )
 
