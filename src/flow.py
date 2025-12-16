@@ -4,6 +4,10 @@
 
 import math
 from typing import Dict, Tuple, Optional
+from pathlib import Path
+
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import torch
 from torch import nn
@@ -12,16 +16,16 @@ from torch_geometric.nn import knn
 from torch_geometric.data import HeteroData, Data
 import e3nn
 
-from gvp import GVP, GVPMultiEdgeConv
-
 import copy
 
 import numpy as np
 from torch import Tensor
 from tqdm.auto import tqdm
 
-from utils import condot_pair_hard_hungarian, compute_rmsd, cov_prec_at_threshold
-from encoder import ProteinGVPEncoder
+from src.utils import condot_pair_hard_hungarian, compute_rmsd, cov_prec_at_threshold
+from src.encoder import ProteinGVPEncoder
+from src.gvp import GVP, GVPMultiEdgeConv
+
 
 def rbf(d: torch.Tensor, num_rbf: int, D_min: float = 0.0, D_max: float = 20.0) -> torch.Tensor:
     return e3nn.math.soft_one_hot_linspace(

@@ -1,9 +1,13 @@
 #dataset.py
 
 from __future__ import annotations
+
 from typing import List, Optional, Sequence, Tuple, Dict
 from pathlib import Path
 import numpy as np
+
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import torch
 from torch import Tensor
@@ -17,7 +21,6 @@ from biotite.structure.io.pdb import PDBFile, get_structure
 import pymol2
 from torch_cluster import radius_graph
 import e3nn
-from e3nn import o3
 
 ELEMENT_VOCAB = [
     "C", "N", "O", "S", "P", "SE", "MG", "ZN", "CA", "FE", "NA", "K", "CL", "F", "BR",
@@ -35,7 +38,6 @@ def rbf(r: Tensor, num_gaussians: int = 16, cutoff: float = 8.0) -> Tensor:
         basis='bessel',
         cutoff=True
     )
-
 
 def edge_features(
     src_pos: torch.Tensor,

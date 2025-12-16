@@ -1,6 +1,12 @@
 import pytest
 import torch
 from torch_geometric.data import HeteroData
+
+from pathlib import Path
+
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from src.flow import rbf, edge_features, build_knn_edges, FlowMatcher
 
 

@@ -1,6 +1,11 @@
 import pytest
 import numpy as np
 import torch
+
+from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from src.utils import compute_rmsd, condot_pair_hard_hungarian, cov_prec_at_threshold
 
 
