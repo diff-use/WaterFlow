@@ -5,7 +5,9 @@ This repo contains all the code required to process a dataset, load in features 
 
 # Environment Setup
 
-We use `uv` for our environment and package management, with python 3.10.
+We use `uv` for our environment and package management, with python 3.12.
+
+You can install the environemnt by running `uv sync` and running the scripts with `uv run python <script>`. Or if you want to install a fresh virtual environment from scratch, follow the steps below.
 
 Installing the environment:
 
@@ -16,7 +18,7 @@ source water/bin/activate
 uv pip install torch torchvision
 uv pip install torch_geometric
 uv pip install torch_cluster torch_scatter pyg_lib -f https://data.pyg.org/whl/torch-2.8.0+cu126.html
-uv pip install biotite wandb Bio networkx e3nn
+uv pip install biotite wandb Bio networkx e3nn pytest pytest-cov
 ```
 
 If you have trouble installing torch_cluster or scatter, I would suggest changing the cuda version in the wheel.
