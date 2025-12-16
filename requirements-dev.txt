@@ -1,0 +1,17 @@
+# Development dependencies for testing
+
+# Testing framework
+pytest>=7.0.0
+pytest-cov>=4.0.0
+pytest-mock>=3.10.0
+
+# Code quality
+black>=23.0.0          # Code formatter
+flake8>=6.0.0          # Linter
+isort>=5.12.0          # Import sorter
+mypy>=1.0.0            # Type checker
+
+# Additional testing utilities
+pytest-xdist>=3.0.0    # Parallel test execution
+pytest-timeout>=2.1.0  # Test timeouts
+hypothesis>=6.70.0     # Property-based testing (optional)
