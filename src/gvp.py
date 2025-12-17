@@ -536,7 +536,7 @@ class GVPMultiEdge(MessagePassing):
         disp = pos_dst[d] - pos_src[s]              # (E, 3)
         dist = torch.clamp(disp.norm(dim=-1, keepdim=True), min=1e-5)  # (E,1)
         unit = disp / dist                          # (E, 3)
-        rbf_e = rbf(dist.squeeze(-1), num_rbf=rbf_dim, D_min=0.0, D_max=rbf_dmax)  # (E, rbf_dim)
+        rbf_e = rbf(dist.squeeze(-1), num_gaussians=rbf_dim, cutoff=rbf_dmax)  # (E, rbf_dim)
         return unit, rbf_e
 
     def forward(self, x, edge_index, pos_pair):

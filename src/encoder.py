@@ -78,6 +78,7 @@ class ProteinGVPEncoder(nn.Module):
         self.update_w_distance = update_w_distance
         self.radius = radius
         self.num_edge_rbf = num_edge_rbf
+        self.pooled_dim = pooled_dim
         
         distance_dim = distance_dim or edge_scalar_in
         self.distance_dim = distance_dim
@@ -161,7 +162,7 @@ class ProteinGVPEncoder(nn.Module):
 
     def _compute_edge_attr(self, pos: torch.Tensor, edge_index: torch.Tensor):
         d, u = _edge_vectors(pos, edge_index)
-        s_edge_raw = _rbf(d, number=self.num_edge_rbf, cutoff=self.radius)
+        s_edge_raw = _rbf(d, num_gaussians=self.num_edge_rbf, cutoff=self.radius)
         s_edge = self.edge_in_proj(s_edge_raw)
         V_edge = u.unsqueeze(1)
         return (s_edge, V_edge), s_edge_raw

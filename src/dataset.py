@@ -56,7 +56,7 @@ def edge_features(
 def element_onehot(symbols: List[str]) -> Tensor:
     """One-hot encoding with 'other' bucket at end."""
     other_idx = len(ELEMENT_VOCAB)
-    indices = torch.tensor([ELEM_IDX.get(s.upper(), other_idx) for s in symbols])
+    indices = torch.tensor([ELEM_IDX.get(s.upper(), other_idx) for s in symbols], dtype=torch.long) 
     return F.one_hot(indices, num_classes=other_idx + 1).float()
 
 
