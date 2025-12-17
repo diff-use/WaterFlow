@@ -25,8 +25,8 @@ If you have trouble installing torch_cluster or scatter, I would suggest changin
 
 # TODO
 
-* [] Encoder.py integrating original SLAE encoder
-* [] Integrating ESM3 and ESM-C embeddigs for the scalar features in the encoder, equivariant features can be init to zeros and learnt
-* [] Integration tests for the whole pipeline from data processing and caching to forward/backward passes, loss computation, and eval
-* [] train.py and inference.py
-* [] torch lightning or DDP for multi gpu training 
+- [ ] Encoder.py integrating original SLAE encoder
+- [ ] Integrating ESM3 and ESM-C embeddigs for the scalar features in the encoder, equivariant features can be init to zeros and learnt
+- [ ] Integration tests for the whole pipeline from data processing and caching to forward/backward passes, loss computation, and eval
+- [ ] train.py and inference.py
+- [ ] torch lightning or DDP for multi gpu training 
