@@ -81,7 +81,7 @@ def condot_pair_hard_hungarian(
 
     return x0_star, x1_star
 
-def cov_prec_at_threshold(pred, true, thresh=1.5):
+def cov_prec_at_threshold(pred, true, thresh=1.0):
     """
     coverage: fraction of true points with >=1 prediction within thresh
     precision: fraction of predicted points with >=1 true within thresh
@@ -96,6 +96,27 @@ def cov_prec_at_threshold(pred, true, thresh=1.5):
     coverage  = float((D.min(axis=1) <= thresh).mean())
     precision = float((D.min(axis=0) <= thresh).mean())
     return coverage, precision
+
+def water_metrics(pred, true, thresholds=(0.5, 1.0, 1.5, 2.0)):
+    """Compute coverage, precision, F1 at multiple distance thresholds."""
+    if isinstance(pred, torch.Tensor):
+        pred = pred.detach().cpu().numpy()
+    if isinstance(true, torch.Tensor):
+        true = true.detach().cpu().numpy()
+    
+    if pred.size == 0 or true.size == 0:
+        return {t: {'cov': 0., 'prec': 0., 'f1': 0.} for t in thresholds}
+    
+    D = spdist.cdist(true, pred)
+    results = {}
+    
+    for t in thresholds:
+        cov = float((D.min(axis=1) <= t).mean())   # true -> nearest pred
+        prec = float((D.min(axis=0) <= t).mean())  # pred -> nearest true
+        f1 = 2 * cov * prec / (cov + prec + 1e-8)
+        results[t] = {'cov': cov, 'prec': prec, 'f1': f1}
+    
+    return results
 
 def plot_3d_frame(ax, protein_pos, mate_pos, water_pred, water_true, title=""):
     """Plot a single 3D frame (protein, mates, true vs predicted waters)."""

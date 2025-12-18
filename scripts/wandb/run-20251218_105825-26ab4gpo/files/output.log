@@ -1,0 +1,16 @@
+Traceback (most recent call last):
+  File "/home/srivasv/WaterFlow/scripts/train.py", line 299, in <module>
+    main()
+  File "/home/srivasv/WaterFlow/scripts/train.py", line 224, in main
+    train_loader = get_dataloader(
+                   ^^^^^^^^^^^^^^^
+  File "/home/srivasv/WaterFlow/src/dataset.py", line 415, in get_dataloader
+    dataset = ProteinWaterDataset(
+              ^^^^^^^^^^^^^^^^^^^^
+  File "/home/srivasv/WaterFlow/src/dataset.py", line 172, in __init__
+    self.entries = self._parse_pdb_list(pdb_list_file)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/srivasv/WaterFlow/src/dataset.py", line 185, in _parse_pdb_list
+    with open(pdb_list_file, 'r') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'splits/train_test.txt'

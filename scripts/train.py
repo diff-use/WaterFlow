@@ -3,8 +3,10 @@
 import argparse
 import os
 from pathlib import Path
+
 import sys
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.append(str(Path(__file__).parent.parent))
 
 import torch
 import torch.nn as nn
@@ -42,8 +44,8 @@ def parse_args():
     # training
     p.add_argument("--epochs", type=int, default=100)
     p.add_argument("--batch_size", type=int, default=4)
-    p.add_argument("--lr", type=float, default=1e-4)
-    p.add_argument("--weight_decay", type=float, default=1e-2)
+    p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--weight_decay", type=float, default=1e-4)
     p.add_argument("--grad_clip", type=float, default=1.0)
     p.add_argument("--num_workers", type=int, default=4)
 
@@ -56,7 +58,7 @@ def parse_args():
     p.add_argument("--sigma_distort", type=float, default=0.5)
 
     # checkpointing
-    p.add_argument("--save_dir", type=str, default="./checkpoints")
+    p.add_argument("--save_dir", type=str, default="/home/srivasv/flow_checkpoints")
     p.add_argument("--save_every", type=int, default=10)
     p.add_argument("--eval_every", type=int, default=5)
     p.add_argument("--n_eval_samples", type=int, default=3)
@@ -80,7 +82,6 @@ def build_model(args, device):
             node_scalar_in=16,
             hidden_dims=(args.hidden_s, args.hidden_v),
             edge_scalar_in=16,
-            pooled_dim=128,
         ).to(device)
     
     model = FlowWaterGVP(

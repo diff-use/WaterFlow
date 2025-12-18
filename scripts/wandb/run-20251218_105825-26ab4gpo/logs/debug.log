@@ -1,0 +1,23 @@
+2025-12-18 10:58:25,747 INFO    MainThread:2647333 [wandb_setup.py:_flush():80] Current SDK version is 0.23.1
+2025-12-18 10:58:25,747 INFO    MainThread:2647333 [wandb_setup.py:_flush():80] Configure stats pid to 2647333
+2025-12-18 10:58:25,747 INFO    MainThread:2647333 [wandb_setup.py:_flush():80] Loading settings from /home/srivasv/.config/wandb/settings
+2025-12-18 10:58:25,747 INFO    MainThread:2647333 [wandb_setup.py:_flush():80] Loading settings from /home/srivasv/WaterFlow/scripts/wandb/settings
+2025-12-18 10:58:25,747 INFO    MainThread:2647333 [wandb_setup.py:_flush():80] Loading settings from environment variables
+2025-12-18 10:58:25,747 INFO    MainThread:2647333 [wandb_init.py:setup_run_log_directory():714] Logging user logs to /home/srivasv/WaterFlow/scripts/wandb/run-20251218_105825-26ab4gpo/logs/debug.log
+2025-12-18 10:58:25,747 INFO    MainThread:2647333 [wandb_init.py:setup_run_log_directory():715] Logging internal logs to /home/srivasv/WaterFlow/scripts/wandb/run-20251218_105825-26ab4gpo/logs/debug-internal.log
+2025-12-18 10:58:25,747 INFO    MainThread:2647333 [wandb_init.py:init():841] calling init triggers
+2025-12-18 10:58:25,747 INFO    MainThread:2647333 [wandb_init.py:init():846] wandb.init called with sweep_config: {}
+config: {'train_list': 'splits/train_test.txt', 'val_list': 'splits/valid_test.txt', 'processed_dir': '/home/srivasv/flow_cache/', 'base_pdb_dir': '/sb/wankowicz_lab/data/srivasv/pdb_redo_data', 'encoder_ckpt': None, 'freeze_encoder': True, 'hidden_s': 256, 'hidden_v': 64, 'flow_layers': 4, 'k_pw': 12, 'k_ww': 12, 'epochs': 100, 'batch_size': 1, 'lr': 0.001, 'weight_decay': 0.0001, 'grad_clip': 1.0, 'num_workers': 4, 'use_self_cond': False, 'p_self_cond': 0.5, 'use_distortion': False, 'p_distort': 0.2, 't_distort': 0.5, 'sigma_distort': 0.5, 'save_dir': '/home/srivasv/flow_checkpoints', 'save_every': 10, 'eval_every': 5, 'n_eval_samples': 3, 'rk4_steps': 100, 'wandb_project': 'flow_single_test', 'wandb_run': None, 'device': 'cuda', '_wandb': {}}
+2025-12-18 10:58:25,747 INFO    MainThread:2647333 [wandb_init.py:init():889] starting backend
+2025-12-18 10:58:26,021 INFO    MainThread:2647333 [wandb_init.py:init():892] sending inform_init request
+2025-12-18 10:58:26,027 INFO    MainThread:2647333 [wandb_init.py:init():900] backend started and connected
+2025-12-18 10:58:26,028 INFO    MainThread:2647333 [wandb_init.py:init():970] updated telemetry
+2025-12-18 10:58:26,031 INFO    MainThread:2647333 [wandb_init.py:init():994] communicating run to backend with 90.0 second timeout
+2025-12-18 10:58:26,492 INFO    MainThread:2647333 [wandb_init.py:init():1041] starting run threads in backend
+2025-12-18 10:58:26,544 INFO    MainThread:2647333 [wandb_run.py:_console_start():2521] atexit reg
+2025-12-18 10:58:26,544 INFO    MainThread:2647333 [wandb_run.py:_redirect():2369] redirect: wrap_raw
+2025-12-18 10:58:26,544 INFO    MainThread:2647333 [wandb_run.py:_redirect():2438] Wrapping output streams.
+2025-12-18 10:58:26,544 INFO    MainThread:2647333 [wandb_run.py:_redirect():2461] Redirects installed.
+2025-12-18 10:58:26,551 INFO    MainThread:2647333 [wandb_init.py:init():1081] run started, returning control to user process
+2025-12-18 10:58:26,553 INFO    wandb-AsyncioManager-main:2647333 [service_client.py:_forward_responses():80] Reached EOF.
+2025-12-18 10:58:26,553 INFO    wandb-AsyncioManager-main:2647333 [mailbox.py:close():137] Closing mailbox, abandoning 1 handles.

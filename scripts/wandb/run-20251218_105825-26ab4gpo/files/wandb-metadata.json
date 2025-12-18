@@ -1,0 +1,60 @@
+{
+  "os":  "Linux-5.14.0-570.19.1.el9_6.x86_64-x86_64-with-glibc2.34",
+  "python":  "CPython 3.12.10",
+  "startedAt":  "2025-12-18T16:58:25.746481Z",
+  "args":  [
+    "--train_list",
+    "splits/train_test.txt",
+    "--val_list",
+    "splits/valid_test.txt",
+    "--freeze_encoder",
+    "--epochs",
+    "100",
+    "--batch_size",
+    "1",
+    "--wandb_project",
+    "flow_single_test"
+  ],
+  "program":  "/home/srivasv/WaterFlow/scripts/train.py",
+  "codePath":  "scripts/train.py",
+  "codePathLocal":  "train.py",
+  "git":  {
+    "remote":  "git@github.com:Wankowicz-Lab/WaterFlow.git",
+    "commit":  "49f7fa542bbed3fd226fa28c94b222136dc2ee8d"
+  },
+  "email":  "vratins@andrew.cmu.edu",
+  "root":  "/home/srivasv/WaterFlow/scripts",
+  "host":  "everest.csb.vanderbilt.edu",
+  "executable":  "/home/srivasv/WaterFlow/.venv/bin/python3",
+  "cpu_count":  32,
+  "cpu_count_logical":  64,
+  "gpu":  "NVIDIA H100 NVL",
+  "gpu_count":  2,
+  "disk":  {
+    "/":  {
+      "total":  "75094818816",
+      "used":  "30862848000"
+    }
+  },
+  "memory":  {
+    "total":  "236293079040"
+  },
+  "gpu_nvidia":  [
+    {
+      "name":  "NVIDIA H100 NVL",
+      "memoryTotal":  "100485038080",
+      "cudaCores":  16896,
+      "architecture":  "Hopper",
+      "uuid":  "GPU-0c165662-d3b1-861e-6ffc-8a81b965ff63"
+    },
+    {
+      "name":  "NVIDIA H100 NVL",
+      "memoryTotal":  "100485038080",
+      "cudaCores":  16896,
+      "architecture":  "Hopper",
+      "uuid":  "GPU-a2e831dd-3a9d-cb64-ca4a-dba6629429c6"
+    }
+  ],
+  "cudaVersion":  "13.0",
+  "writerId":  "ty7dacytku596inc66qho3hh9i9redx6"
+}
