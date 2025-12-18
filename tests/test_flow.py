@@ -95,8 +95,6 @@ def mock_encoder(device):
     return encoder
 
 
-# ============== Tests for build_knn_edges ==============
-
 @pytest.mark.unit
 class TestBuildKnnEdges:
     
@@ -146,8 +144,6 @@ class TestBuildKnnEdges:
         assert edges.shape[1] > 0
 
 
-# ============== Tests for make_protein_encoder_data ==============
-
 @pytest.mark.unit
 class TestMakeProteinEncoderData:
     
@@ -190,8 +186,6 @@ class TestMakeProteinEncoderData:
         assert enc_data.edge_index.shape == (2, 0)
         assert enc_data.edge_rbf.shape[0] == 0
 
-
-# ============== Tests for ProteinWaterUpdate ==============
 
 @pytest.mark.unit
 class TestProteinWaterUpdate:

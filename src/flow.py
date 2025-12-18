@@ -154,22 +154,15 @@ class ProteinWaterUpdate(nn.Module):
                     k_wp: int = 8,
                     include_pp: bool = False) -> Dict[Tuple[str, str, str], torch.Tensor]:
         """
-        Build KNN edges for:
-          - protein->water, water->water,
-          - optional protein->protein, water->protein
-        Always returns entries for all self.etypes (possibly empty).
+        Build KNN edges for protein-water interactions.
+        
+        For protein->water edges, we take the union of:
+        - KNN(protein -> water): k nearest waters per protein
+        - KNN(water -> protein) reversed: k nearest proteins per water
+        This ensures every water has at least k_pw protein neighbors.
         """
         edge_index_dict: Dict[Tuple[str, str, str], torch.Tensor] = {}
         device = data['protein'].pos.device
-
-        def knn_edges(src_pos, dst_pos, k, b_src=None, b_dst=None):
-            if src_pos.numel() == 0 or dst_pos.numel() == 0:
-                return torch.empty(2, 0, dtype=torch.long, device=src_pos.device)
-            ei = knn(x=dst_pos, y=src_pos, k=k, batch_x=b_dst, batch_y=b_src)
-            if src_pos.data_ptr() == dst_pos.data_ptr():
-                mask = ei[0] != ei[1]
-                ei = ei[:, mask]
-            return ei.unique(dim=1)
 
         batch_p = data['protein'].batch if 'batch' in data['protein'] else None
         batch_w = data['water'].batch if 'batch' in data['water'] else None
@@ -177,51 +170,46 @@ class ProteinWaterUpdate(nn.Module):
         pos_p = data['protein'].pos
         pos_w = data['water'].pos
 
-        # protein -> water
+        # protein -> water 
         if pos_p.numel() > 0 and pos_w.numel() > 0:
-            edge_index_dict[('protein', 'pw', 'water')] = knn_edges(
-                pos_p, pos_w, k=k_pw, b_src=batch_p, b_dst=batch_w
-            )
+            # p->w
+            ei_pw = build_knn_edges(pos_p, pos_w, k=k_pw, batch_src=batch_p, batch_dst=batch_w)
+            # w->p then reverse
+            ei_wp = build_knn_edges(pos_w, pos_p, k=k_pw, batch_src=batch_w, batch_dst=batch_p)
+            ei_wp_reversed = ei_wp.flip(0)  
+            # union
+            ei_pw_union = torch.cat([ei_pw, ei_wp_reversed], dim=1).unique(dim=1)
+            edge_index_dict[('protein', 'pw', 'water')] = ei_pw_union
         else:
-            edge_index_dict[('protein', 'pw', 'water')] = torch.empty(
-                2, 0, dtype=torch.long, device=device
-            )
+            edge_index_dict[('protein', 'pw', 'water')] = torch.empty(2, 0, dtype=torch.long, device=device)
 
         # water -> water
         if pos_w.numel() > 0:
-            edge_index_dict[('water', 'ww', 'water')] = knn_edges(
-                pos_w, pos_w, k=k_ww, b_src=batch_w, b_dst=batch_w
+            edge_index_dict[('water', 'ww', 'water')] = build_knn_edges(
+                pos_w, pos_w, k=k_ww, batch_src=batch_w, batch_dst=batch_w
             )
         else:
-            edge_index_dict[('water', 'ww', 'water')] = torch.empty(
-                2, 0, dtype=torch.long, device=device
-            )
+            edge_index_dict[('water', 'ww', 'water')] = torch.empty(2, 0, dtype=torch.long, device=device)
 
-        # optional protein-protein and water->protein
+        # protein-protein and water->protein
         if include_pp:
             if ('protein', 'pp', 'protein') in data.edge_types:
-                edge_index_dict[('protein', 'pp', 'protein')] = \
-                    data['protein', 'pp', 'protein'].edge_index
+                edge_index_dict[('protein', 'pp', 'protein')] = data['protein', 'pp', 'protein'].edge_index
             else:
-                edge_index_dict[('protein', 'pp', 'protein')] = knn_edges(
-                    pos_p, pos_p, k=k_pw, b_src=batch_p, b_dst=batch_p
+                edge_index_dict[('protein', 'pp', 'protein')] = build_knn_edges(
+                    pos_p, pos_p, k=k_pw, batch_src=batch_p, batch_dst=batch_p
                 )
 
             if pos_w.numel() > 0 and pos_p.numel() > 0:
-                edge_index_dict[('water', 'wp', 'protein')] = knn_edges(
-                    pos_w, pos_p, k=k_wp, b_src=batch_w, b_dst=batch_p
+                edge_index_dict[('water', 'wp', 'protein')] = build_knn_edges(
+                    pos_w, pos_p, k=k_wp, batch_src=batch_w, batch_dst=batch_p
                 )
             else:
-                edge_index_dict[('water', 'wp', 'protein')] = torch.empty(
-                    2, 0, dtype=torch.long, device=device
-                )
+                edge_index_dict[('water', 'wp', 'protein')] = torch.empty(2, 0, dtype=torch.long, device=device)
 
-        # ensure all etypes are present, even if empty
         for et in self.etypes:
             if et not in edge_index_dict:
-                edge_index_dict[et] = torch.empty(
-                    2, 0, dtype=torch.long, device=device
-                )
+                edge_index_dict[et] = torch.empty(2, 0, dtype=torch.long, device=device)
 
         return edge_index_dict
 
