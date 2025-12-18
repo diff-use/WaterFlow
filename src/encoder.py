@@ -54,7 +54,7 @@ class ProteinGVPEncoder(nn.Module):
         vector_activation: Callable = torch.sigmoid,
         init_vec_zero: bool = True,
         pooled_dim: int = 128,
-        pool_residue: bool = True,
+        pool_residue: bool = False,
         pool_aggr: Literal["mean", "sum", "max"] = "mean",
         update_w_distance: bool = True,
         distance_dim: Optional[int] = None,

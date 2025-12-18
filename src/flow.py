@@ -392,9 +392,8 @@ class FlowWaterGVP(nn.Module):
             delta_vec = delta.unsqueeze(1)
 
             # vector conditioning (equivariant)
-            _, v_sc = self.sc_vec_encoder(
-                (torch.empty(0, device=device), delta_vec)
-            )
+            s_empty = torch.empty(data['water'].num_nodes, 0, device=device)
+            _, v_sc = self.sc_vec_encoder((s_empty, delta_vec))
             v_w = v_w + v_sc
 
             # scalar conditioning (invariant) on ||delta||
