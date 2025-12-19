@@ -526,7 +526,7 @@ class FlowMatcher:
             )
         optimizer.step()
 
-        # training RMSD (FIX: only pass 2 args)
+        # training RMSD 
         with torch.no_grad():
             x1_hat = x_t + (1.0 - t_per_atom) * v_pred
             rmsd = compute_rmsd(x1_hat, x1_star)
