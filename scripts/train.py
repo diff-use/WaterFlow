@@ -44,8 +44,8 @@ def parse_args():
     # training
     p.add_argument("--epochs", type=int, default=100)
     p.add_argument("--batch_size", type=int, default=4)
-    p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--weight_decay", type=float, default=1e-4)
+    p.add_argument("--lr", type=float, default=1e-4)
+    p.add_argument("--weight_decay", type=float, default=1e-3)
     p.add_argument("--grad_clip", type=float, default=1.0)
     p.add_argument("--num_workers", type=int, default=4)
 
@@ -67,6 +67,7 @@ def parse_args():
     # wandb
     p.add_argument("--wandb_project", type=str, default="water-flow")
     p.add_argument("--wandb_run", type=str, default=None)
+    p.add_argument("--wandb_dir", type=str, default="/home/srivasv/wandb_logs")
     p.add_argument("--device", type=str, default="cuda")
     return p.parse_args()
 
@@ -216,6 +217,7 @@ def main():
     # wandb init
     wandb.init(
         project=args.wandb_project,
+        dir=args.wandb_dir,
         name=args.wandb_run,
         config=vars(args),
     )

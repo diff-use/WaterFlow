@@ -229,6 +229,16 @@ class ProteinWaterDataset(Dataset):
                 self._preprocess_one(entry, cache_path)
             except Exception as e:
                 print(f"\nFailed to preprocess {entry['cache_key']}: {e}")
+
+        valid_entries = [
+            e for e in self.entries
+            if (self.processed_dir / f"{e['cache_key']}.pt").exists()
+        ]
+        n_removed = len(self.entries) - len(valid_entries)
+        if n_removed > 0:
+            print(f"Filtered out {n_removed} entries without valid cache files.")
+        self.entries = valid_entries
+        print(f"Dataset contains {len(self.entries)} valid entries.")
     
     def _preprocess_one(self, entry: Dict, cache_path: Path):
         """

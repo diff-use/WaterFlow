@@ -502,6 +502,12 @@ class FlowMatcher:
         batch['water'].pos = x_t
         v_pred = self.model(batch, t, sc=sc)
 
+        if torch.isnan(v_pred).any():
+            print(f"NaN in v_pred! sigma={sigma}, t_range=[{t.min():.3f}, {t.max():.3f}]")
+            print(f"  x_t has NaN: {torch.isnan(x_t).any()}")
+            print(f"  protein.pos has NaN: {torch.isnan(batch['protein'].pos).any()}")
+            return {'loss': 0.0, 'rmsd': float('nan'), 'sigma': sigma}
+
         # target velocity
         v_target = x1_star - x0_star
 
