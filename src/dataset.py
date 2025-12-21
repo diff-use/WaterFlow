@@ -2,27 +2,25 @@
 
 from __future__ import annotations
 
-from typing import List, Optional, Sequence, Tuple, Dict
-from pathlib import Path
-import numpy as np
-
 import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-import torch
-from torch import Tensor
-import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
-from torch_geometric.data import HeteroData, Batch
-from tqdm import tqdm
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import biotite.structure as bts
-from biotite.structure.io.pdb import PDBFile, get_structure
-import pymol2
-from torch_cluster import radius_graph
 import e3nn
+import numpy as np
+import pymol2
+import torch
+import torch.nn.functional as F
+from biotite.structure.io.pdb import PDBFile, get_structure
 from e3nn.math import soft_one_hot_linspace
+from torch import Tensor
+from torch.utils.data import DataLoader, Dataset
+from torch_cluster import radius_graph
+from torch_geometric.data import Batch, HeteroData
+from tqdm import tqdm
 
+sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.utils import rbf
 
 ELEMENT_VOCAB = [
