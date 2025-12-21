@@ -12,20 +12,10 @@ import os
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from src.dataset import *
+
 TEST_PDB_PATH = Path(__file__).parent.parent / "test_files" / "6eey_final.pdb"
 
-from src.dataset import (
-    edge_features,
-    element_onehot,
-    match_atoms_to_coords,
-    get_crystal_contacts_pymol,
-    parse_asu_with_biotite,
-    _make_undirected,
-    ProteinWaterDataset,
-    get_dataloader,
-    ELEMENT_VOCAB,
-    ELEM_IDX,
-)
 
 @pytest.fixture
 def pdb_path():
