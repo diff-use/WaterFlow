@@ -44,7 +44,7 @@ def parse_args():
     # training
     p.add_argument("--epochs", type=int, default=100)
     p.add_argument("--batch_size", type=int, default=4)
-    p.add_argument("--lr", type=float, default=1e-4)
+    p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--weight_decay", type=float, default=1e-3)
     p.add_argument("--grad_clip", type=float, default=1.0)
     p.add_argument("--num_workers", type=int, default=4)
@@ -160,7 +160,7 @@ def train_epoch(flow_matcher, train_loader, optimizer, args, epoch):
     total_loss, total_rmsd = 0.0, 0.0
     
     pbar = tqdm(train_loader, desc=f"Epoch {epoch} [Train]")
-    for batch in pbar:
+    for step, batch in enumerate(pbar):
         batch = batch.to(args.device)
         if batch['water'].num_nodes == 0:
             continue
@@ -174,10 +174,15 @@ def train_epoch(flow_matcher, train_loader, optimizer, args, epoch):
         total_loss += metrics['loss']
         total_rmsd += metrics['rmsd']
         pbar.set_postfix(loss=f"{metrics['loss']:.4f}", rmsd=f"{metrics['rmsd']:.2f}")
+        
+        global_step = (epoch - 1) * len(train_loader) + step
+        wandb.log({
+            "iter/loss": metrics['loss'],
+            "iter/rmsd": metrics['rmsd'],
+        }, step=global_step)
     
     n = len(train_loader)
     return {'train/loss': total_loss / n, 'train/rmsd': total_rmsd / n}
-
 
 @torch.no_grad()
 def val_epoch(flow_matcher, val_loader, args, epoch):
@@ -255,7 +260,7 @@ def main():
         [p for p in model.parameters() if p.requires_grad],
         lr=args.lr, weight_decay=args.weight_decay
     )
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.lr * 0.01)
+    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.lr * 0.05)
     
     best_val_loss = float('inf')
     

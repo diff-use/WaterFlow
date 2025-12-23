@@ -12,6 +12,8 @@ from torch import nn
 import torch.nn.functional as F
 from torch_geometric.nn import knn
 from torch_geometric.data import HeteroData, Data
+
+from torch_scatter import scatter_mean
 import e3nn
 from e3nn.math import soft_one_hot_linspace
 
@@ -529,7 +531,11 @@ class FlowMatcher:
         # training RMSD 
         with torch.no_grad():
             x1_hat = x_t + (1.0 - t_per_atom) * v_pred
-            rmsd = compute_rmsd(x1_hat, x1_star)
+            # rmsd = compute_rmsd(x1_hat, x1_star)
+
+            # on-gpu version of rmsd
+            diff2 = ((x1_hat - x1_star) ** 2).sum(-1)  # (Nw,)
+            rmsd = torch.sqrt(scatter_mean(diff2, batch_w, dim=0)).mean().item()
 
         return {'loss': loss.item(), 'rmsd': rmsd, 'sigma': sigma}
 
