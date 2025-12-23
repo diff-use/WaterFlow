@@ -32,9 +32,10 @@ from src.utils import rbf as _rbf
 def _edge_vectors(pos: torch.Tensor, edge_index: torch.Tensor):
     src, dst = edge_index[0], edge_index[1]
     vec = pos[dst] - pos[src]
-    rij = torch.linalg.norm(vec, dim=-1)
-    r_hat = torch.where(rij[:, None] > 0, vec / rij[:, None], torch.zeros_like(vec))
+    rij = torch.linalg.norm(vec, dim=-1).clamp(min=1e-4) 
+    r_hat = vec / rij[:, None]
     return rij, r_hat
+
 
 class ProteinGVPEncoder(nn.Module):
     def __init__(

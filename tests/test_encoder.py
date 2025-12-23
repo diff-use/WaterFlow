@@ -12,7 +12,7 @@ from src.encoder import ProteinGVPEncoder, FlowEncoder
 
 class TestProteinGVPEncoder:
     """Tests for ProteinGVPEncoder."""
-    
+
     @pytest.fixture
     def simple_encoder(self):
         """Create a simple encoder for testing."""

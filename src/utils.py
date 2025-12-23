@@ -14,6 +14,7 @@ from e3nn.math import soft_one_hot_linspace
 
 def rbf(r: Tensor, num_gaussians: int = 16, cutoff: float = 8.0) -> Tensor:
     """Radial basis function encoding of distances."""
+    r = r.clamp(min=1e-4)
     return soft_one_hot_linspace(
         r, 
         start=0.0, 
