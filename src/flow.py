@@ -4,9 +4,6 @@ import math
 from typing import Dict, Tuple, Optional
 from pathlib import Path
 
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -21,6 +18,8 @@ import numpy as np
 from torch import Tensor
 from tqdm.auto import tqdm
 
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.utils import condot_pair_hard_hungarian, compute_rmsd, cov_prec_at_threshold, rbf
 from src.encoder import ProteinGVPEncoder
 from src.gvp import GVP, GVPMultiEdgeConv
