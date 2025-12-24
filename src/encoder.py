@@ -5,9 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 import numpy as np
 
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F 
@@ -17,16 +14,19 @@ from typing import Callable, Literal, Optional, Tuple, Any, Dict
 from torch_geometric.data import Batch, Data
 from torch_scatter import scatter_add, scatter_mean, scatter_max
 
+import e3nn
+from e3nn.math import soft_one_hot_linspace
+
 from abc import ABC, abstractmethod
 from enum import Enum
 from pathlib import Path
 
 import yaml
 
-from src.gvp import EdgeUpdate, GVP, GVPConvLayer
-import e3nn
-from e3nn.math import soft_one_hot_linspace
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from src.gvp import EdgeUpdate, GVP, GVPConvLayer
 from src.utils import rbf as _rbf
 
 def _edge_vectors(pos: torch.Tensor, edge_index: torch.Tensor):
