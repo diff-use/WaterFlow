@@ -24,6 +24,8 @@ def rbf(r: Tensor, num_gaussians: int = 16, cutoff: float = 8.0) -> Tensor:
         cutoff=True
     )
 
+
+#slow and do not use when training
 @torch.no_grad
 def compute_rmsd(pred, target, batch=None):
     """Compute RMSD with optimal assignment using Hungarian algorithm."""
