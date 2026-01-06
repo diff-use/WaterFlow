@@ -177,8 +177,11 @@ class ProteinWaterDataset(Dataset):
     def _parse_pdb_list(self, pdb_list_file: str) -> List[Dict]:
         """
         Parse PDB list file and construct entries with paths.
-        
-        Expected format per line: <pdb_id>_final_<chainID>
+
+        Supports two formats:
+        1. Chain-specific: <pdb_id>_final_<chainID>  (e.g., "6eey_final_A")
+        2. Whole PDB: <pdb_id>_final  (e.g., "6eey_final")
+
         Constructs path: {base_pdb_dir}/{pdb_id}/{pdb_id}_final.pdb
         """
         entries = []
@@ -187,25 +190,35 @@ class ProteinWaterDataset(Dataset):
                 line = line.strip()
                 if not line:
                     continue
-                
-                #parse format: <pdb_id>_final_<chainID>
+
+                # Parse format: <pdb_id>_final[_<chainID>]
                 parts = line.split('_')
-                if len(parts) < 3:
+                if len(parts) < 2:
                     print(f"Warning: Skipping malformed line: {line}")
                     continue
-                
+
                 pdb_id = parts[0]
-                chain_id = parts[-1]  # last part is chain ID
-                
+
+                # Determine if chain ID is specified
+                if len(parts) >= 3 and parts[1] == "final":
+                    # Format: pdb_id_final_chainID (chain-specific)
+                    chain_id = parts[-1]
+                elif len(parts) == 2 and parts[1] == "final":
+                    # Format: pdb_id_final (whole PDB, no chain filter)
+                    chain_id = None
+                else:
+                    print(f"Warning: Unexpected format: {line}")
+                    continue
+
                 pdb_path = self.base_pdb_dir / pdb_id / f"{pdb_id}_final.pdb"
-                
+
                 entries.append({
                     'pdb_id': pdb_id,
                     'chain_id': chain_id,
                     'pdb_path': pdb_path,
-                    'cache_key': line,  
+                    'cache_key': line,
                 })
-        
+
         print(f"Loaded {len(entries)} entries from {pdb_list_file}")
         return entries
     
@@ -243,15 +256,15 @@ class ProteinWaterDataset(Dataset):
     def _preprocess_one(self, entry: Dict, cache_path: Path):
         """
         Preprocess a single PDB file.
-        
+
         Runs expensive PyMOL crystal contact detection and caches:
         - Protein positions, features, residue indices
         - Water positions and features (if any)
         - Symmetry mate positions and features (if any)
         """
         pdb_path = str(entry['pdb_path'])
-        chain_filter = [entry['chain_id']]
-        
+        chain_filter = [entry['chain_id']] if entry['chain_id'] is not None else None
+
         protein_atoms, water_atoms = parse_asu_with_biotite(pdb_path, chain_filter)
         crystal_data = get_crystal_contacts_pymol(pdb_path, self.cutoff)
         
@@ -364,13 +377,22 @@ class ProteinWaterDataset(Dataset):
         
         water_pos = cached['water_pos']
         water_x = cached['water_x']
-        
+
         data = HeteroData()
-        
+
         data['protein'].x = protein_x
         data['protein'].pos = protein_pos
         data['protein'].residue_index = protein_res_idx
         data['protein'].num_nodes = protein_pos.size(0)
+
+        # Load SLAE embeddings if available (precomputed by scripts/precompute_slae_embeddings.py)
+        if 'protein_slae_embedding' in cached:
+            slae_emb = cached['protein_slae_embedding']
+            # Handle mates: if mates were concatenated during preprocessing, embeddings include them
+            if self.include_mates and 'mate_slae_embedding' in cached:
+                mate_emb = cached['mate_slae_embedding']
+                slae_emb = torch.cat([slae_emb, mate_emb], dim=0)
+            data['protein'].slae_embedding = slae_emb
         
         data['water'].x = water_x
         data['water'].pos = water_pos

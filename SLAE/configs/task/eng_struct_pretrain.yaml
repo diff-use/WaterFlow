@@ -1,0 +1,107 @@
+# @package _global_
+
+defaults:
+  - override /metrics:
+      - accuracy
+      - rmse
+  - override /decoder:
+      - allatom_decoder
+
+
+
+callbacks:
+  early_stopping:
+    monitor: train/loss/weighted_energy_mse
+    mode: "min"
+  model_checkpoint:
+    monitor: val/backbone_coords/rmse
+    mode: "min"
+    every_n_epochs: 1
+
+optimiser:
+  optimiser:
+    lr: 0.0005
+    weight_decay: 0.01
+
+scheduler:
+  monitor: val/backbone_coords/rmse
+  scheduler:
+    eta_min: 0.0000001
+    warmup_epochs: 0.1
+
+
+ckpt_path: null # add path to restore training states in addition to model weights
+
+task:
+  pretrained_ckpt: null
+  energy_dir: "/sb/wankowicz_lab/data/srivasv/af2_energies"
+  freeze_encoder: False
+  freeze_decoder: False
+  unfreeze_decoder_parts: [] #["proj", "seq_mlp", "chain_break_prediction_head", "pairwise_energy_feat", "energy_head"]
+  init_decoder: False # do not reinitialize decoder weights
+  reinit_decoder_modules: [] #['linear_output_projection']
+  clip_decoder_grad: False
+
+
+  classification_type: "multiclass"
+  metric_average: "micro"
+
+  
+  backbone_atoms: 5  # include Cb and O when computing losses on backbone
+  align_backbone: True # align before computing loss
+
+
+  loss_clamp:
+    dist: [10.0, 8.0, 5.0, 3.0]
+
+  losses:
+    residue_type: ["cross_entropy"]
+    backbone_coords: ["fape_loss", "smooth_lddt_loss_scheduled"]
+    allatom_coords: ["allatom_FAPE", "smooth_lddt_loss"]
+    energy: ["weighted_energy_mse_loss"]
+
+
+  backbone_loss_coefficient:
+    backbone_fape_loss: 1
+    smooth_lddt_loss_scheduled: 10
+
+  allatom_loss_coefficient:
+    allatom_FAPE: 1
+    allatom_lddt_loss: 10
+
+  energy_loss_coefficient:
+    weighted_energy_mse_loss: 10
+
+
+
+  aux_loss_coefficient:
+    backbone_coords: 1.0
+    residue_type: 1.0
+    allatom_coords: 1.0
+    energy: 1.0
+
+    
+  label_smoothing: 0.0
+
+
+
+  output:
+    - backbone_coords
+    - allatom_coords
+    - residue_type
+    - energy
+  supervise_on:
+    - backbone_coords
+    - allatom_coords
+    - residue_type
+    - energy
+
+  inference_only: false  # Run in inference-only mode (all parameters frozen)
+
+monitor: # directory to output validation structures
+  output_dir: "/home/srivasv/slae_valid_files/tmp/"
+  pdb_out: "first_aa"
+
+
+        
+

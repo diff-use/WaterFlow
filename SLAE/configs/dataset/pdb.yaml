@@ -1,0 +1,22 @@
+datamodule:
+  _target_: "SLAE.datasets.datamodule.PDBDataModule"
+  pdb_dir: "/sb/wankowicz_lab/data/srivasv/af2_structures/organized_pdb" #${env.paths.data}/pdb/ # Directory where raw PDB/mmtf files are stored
+  processed_dir: "/home/srivasv/slae_og_cache" # Directory where processed dataset files are stored
+  format: "pdb" #"mmtf" # Format of the raw PDB/MMTF files
+  num_workers: 8 # Number of workers for dataloader (FIX #3: increased from 4)
+  pin_memory: True # Pin memory for dataloader (FIX #2: enabled for faster GPU transfer)
+  batch_size: 8 # Batch size for dataloader
+  dataset_fraction: 1.0 # Fraction of the dataset to use
+  overwrite: False # Whether to overwrite the dataset if it already exists
+  in_memory: False # Whether to load the entire dataset into memory
+  train_list: "/home/srivasv/SLAE_Internal/train.list" # list of files containing training file names
+  val_list: "/home/srivasv/SLAE_Internal/valid.list" # list of files containing validation file names
+  crop: True
+  crop_len: 512
+  full_graph_eval: True
+  rand_slice: True
+  slice_range: [0.5,1.0]
+  remove_sidechains: False
+
+
+num_classes: 24 # Number of classes

@@ -264,7 +264,10 @@ class FlowWaterGVP(nn.Module):
         k_ww: int = 8,
         k_wp: int = 8,
         freeze_encoder: bool = False,
-        water_input_dim: int = 16  # 1 hot with oxygen, same as encoder
+        water_input_dim: int = 16,  # 1 hot with oxygen, same as encoder
+        encoder_type: str = "gvp",  # "gvp" or "slae"
+        use_cached_slae: bool = True,
+        slae_adapter: Optional[nn.Module] = None,
     ):
         super().__init__()
         self.encoder = encoder
@@ -277,6 +280,15 @@ class FlowWaterGVP(nn.Module):
         self.k_ww = k_ww
         self.k_wp = k_wp
         self.freeze_encoder = freeze_encoder
+        self.encoder_type = encoder_type
+        self.use_cached_slae = use_cached_slae
+
+        if encoder_type == "slae":
+            if slae_adapter is None:
+                raise ValueError("slae_adapter required when encoder_type='slae'")
+            self.slae_adapter = slae_adapter
+        else:
+            self.slae_adapter = None
 
         if freeze_encoder:
             for p in self.encoder.parameters():
@@ -284,7 +296,11 @@ class FlowWaterGVP(nn.Module):
             self.encoder.eval()
 
         # map encoder hidden dims -> flow hidden dims
-        self.encoder_hidden_dims = encoder.hidden_dims
+        if encoder_type == "gvp":
+            self.encoder_hidden_dims = encoder.hidden_dims
+        elif encoder_type == "slae":
+            # SLAE adapter outputs (s, V) tuples, encoder_to_flow expects those dims
+            self.encoder_hidden_dims = hidden_dims
         s_h, v_h = hidden_dims
 
         self.encoder_to_flow = GVP(
@@ -354,19 +370,42 @@ class FlowWaterGVP(nn.Module):
         """
         device = data['protein'].pos.device
 
-        # encoder over protein (which includes any mates)
-        enc_data = make_protein_encoder_data(
-            data,
-            num_rbf=self.encoder.edge_scalar_in,
-            rbf_dmin=0.0,
-            rbf_dmax=20.0,
-        )
+        # Get protein embeddings (conditional on encoder type)
+        if self.encoder_type == "gvp":
+            # Original GVP encoder path
+            enc_data = make_protein_encoder_data(
+                data,
+                num_rbf=self.encoder.edge_scalar_in,
+                rbf_dmin=0.0,
+                rbf_dmax=20.0,
+            )
 
-        with torch.set_grad_enabled(not self.freeze_encoder):
-            s_all, v_all = self.encoder(enc_data)
+            with torch.set_grad_enabled(not self.freeze_encoder):
+                s_all, v_all = self.encoder(enc_data)
 
-        # bridge encoder dims -> flow dims
-        s_p_latent, v_p_latent = self.encoder_to_flow((s_all, v_all))
+            # bridge encoder dims -> flow dims
+            s_p_latent, v_p_latent = self.encoder_to_flow((s_all, v_all))
+
+        elif self.encoder_type == "slae":
+            # SLAE encoder path (uses precomputed embeddings)
+            if self.use_cached_slae and 'slae_embedding' in data['protein']:
+                # Use precomputed embeddings (fast path)
+                embeddings = data['protein'].slae_embedding
+            else:
+                # On-the-fly SLAE encoding not implemented yet
+                raise NotImplementedError(
+                    "On-the-fly SLAE encoding not yet implemented. "
+                    "Please precompute embeddings using scripts/precompute_slae_embeddings.py"
+                )
+
+            # Adapter: 128-dim embeddings -> (s, V) tuple
+            s_all, v_all = self.slae_adapter(embeddings)
+
+            # bridge adapter output -> flow dims
+            s_p_latent, v_p_latent = self.encoder_to_flow((s_all, v_all))
+
+        else:
+            raise ValueError(f"Unknown encoder_type: {self.encoder_type}")
 
         if 'water' not in data.node_types or data['water'].num_nodes == 0:
             return torch.zeros(0, 3, device=device)

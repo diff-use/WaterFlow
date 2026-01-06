@@ -1,0 +1,35 @@
+allatom_decoder:
+  _target_: "SLAE.model.decoder.AllAtomDecoder"
+  res_idx_chainbreak: False
+  struct_out: "linear_aa" # Nx37x3 # linear
+  eng_after_tfm: True
+  decoder_proj: True
+  d_model: 1024 # wide   # 512
+  n_heads: 16
+  n_layers: 16
+  pos_enc: True
+  pos_enc_type: "rotary_idx" # rotary, rel
+  dim_pairwise: 64
+  eng_mlp_layers: 3
+  eng_type: ["hbond", "sol", "elec"]
+  eng_clamp: True
+  eng_clamp_abs_min: 0.001
+  seq_mlp_hidden_dim: [128, 128]
+  seq_mlp_dropout: 0.0
+  seq_mlp_activation: ["relu", "relu", "none"]
+  seq_mlp_skip: "concat"
+  seq_mlp_out_dim: 23
+  sc_noise: 0.5
+  sc_move_backbone: False
+  sc_num_message_layers: 2
+  sc_message_hidden_dim: 128
+  sc_message_activation: "relu"
+  sc_message_dropout: 0.0
+  sc_message_skip: False
+  sc_num_distance_layers: 1
+  sc_distance_hidden_dim: 128
+  sc_distance_activation: "relu"
+  sc_distance_dropout: 0.0
+  sc_distance_skip: False
+
+

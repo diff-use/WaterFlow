@@ -1,0 +1,3 @@
+_target_: SLAE.features.graph_featurizer.ProteinGraphFeaturizer
+radius: 8.0
+use_atom37: true

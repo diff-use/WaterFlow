@@ -33,6 +33,7 @@ def parse_args():
     p.add_argument("--base_pdb_dir", type=str, default="/sb/wankowicz_lab/data/srivasv/pdb_redo_data")
 
     # model
+    p.add_argument("--encoder_type", type=str, default="gvp", choices=["gvp", "slae"])
     p.add_argument("--encoder_ckpt", type=str, default=None)
     p.add_argument("--freeze_encoder", action="store_true")
     p.add_argument("--hidden_s", type=int, default=256)
@@ -40,6 +41,11 @@ def parse_args():
     p.add_argument("--flow_layers", type=int, default=4)
     p.add_argument("--k_pw", type=int, default=12)
     p.add_argument("--k_ww", type=int, default=12)
+
+    # SLAE-specific arguments
+    p.add_argument("--use_cached_slae", action="store_true", default=True)
+    p.add_argument("--slae_ckpt", type=str, default="checkpoints/autoencoder.ckpt")
+    p.add_argument("--slae_config", type=str, default="SLAE/configs/encoder/protein_encoder.yaml")
 
     # training
     p.add_argument("--epochs", type=int, default=100)
@@ -72,29 +78,79 @@ def parse_args():
     return p.parse_args()
 
 
+def load_yaml_dict(config_path):
+    """Load YAML config file and return as dict."""
+    import yaml
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    config.pop('_target_', None)  # Remove hydra-specific keys
+    return config
+
+
 def build_model(args, device):
     """Build encoder and flow model."""
-    if args.encoder_ckpt:
-        encoder, enc_args = load_encoder_from_checkpoint(
-            args.encoder_ckpt, device=device, freeze=args.freeze_encoder
-        )
-    else:
-        encoder = ProteinGVPEncoder(
-            node_scalar_in=16,
+    if args.encoder_type == "gvp":
+        # Build GVP encoder
+        if args.encoder_ckpt:
+            encoder, enc_args = load_encoder_from_checkpoint(
+                args.encoder_ckpt, device=device, freeze=args.freeze_encoder
+            )
+        else:
+            encoder = ProteinGVPEncoder(
+                node_scalar_in=16,
+                hidden_dims=(args.hidden_s, args.hidden_v),
+                edge_scalar_in=16,
+            ).to(device)
+
+        model = FlowWaterGVP(
+            encoder=encoder,
+            encoder_type="gvp",
             hidden_dims=(args.hidden_s, args.hidden_v),
-            edge_scalar_in=16,
+            edge_scalar_dim=32,
+            layers=args.flow_layers,
+            k_pw=args.k_pw,
+            k_ww=args.k_ww,
+            freeze_encoder=args.freeze_encoder,
         ).to(device)
-    
-    model = FlowWaterGVP(
-        encoder=encoder,
-        hidden_dims=(args.hidden_s, args.hidden_v),
-        edge_scalar_dim=32,
-        layers=args.flow_layers,
-        k_pw=args.k_pw,
-        k_ww=args.k_ww,
-        freeze_encoder=args.freeze_encoder,
-    ).to(device)
-    
+
+    elif args.encoder_type == "slae":
+        # Build SLAE encoder (frozen)
+        from SLAE.model.encoder import ProteinEncoder
+        from src.encoder_adapters import SLAEToGVPAdapter
+
+        # Load SLAE encoder config and checkpoint
+        enc_config = load_yaml_dict(args.slae_config)
+        encoder = ProteinEncoder(**enc_config).to(device).eval()
+
+        ckpt = torch.load(args.slae_ckpt, map_location="cpu", weights_only=False)
+        encoder.load_state_dict(ckpt["encoder"], strict=False)
+
+        # Freeze SLAE encoder
+        for p in encoder.parameters():
+            p.requires_grad = False
+
+        # Create adapter
+        adapter = SLAEToGVPAdapter(
+            slae_dim=128,
+            out_dims=(args.hidden_s, args.hidden_v)
+        ).to(device)
+
+        model = FlowWaterGVP(
+            encoder=encoder,
+            encoder_type="slae",
+            use_cached_slae=args.use_cached_slae,
+            slae_adapter=adapter,
+            hidden_dims=(args.hidden_s, args.hidden_v),
+            edge_scalar_dim=32,
+            layers=args.flow_layers,
+            k_pw=args.k_pw,
+            k_ww=args.k_ww,
+            freeze_encoder=True,  # SLAE always frozen
+        ).to(device)
+
+    else:
+        raise ValueError(f"Unknown encoder_type: {args.encoder_type}")
+
     return model
 
 

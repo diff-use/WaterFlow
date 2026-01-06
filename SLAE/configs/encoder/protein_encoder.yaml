@@ -1,0 +1,34 @@
+
+  _target_: SLAE.model.encoder.ProteinEncoder
+  atom_representation: atom37 # "element"
+  edge_attr: edge_attr
+  edge_invariant_field: edge_embedding
+  node_invariant_field: node_features
+  edge_energy_field: edge_energy
+  atom_energy_field: atom_energy
+  residue_energy_field: residue_energy
+  l_max: 2
+  r_max: 8.0
+  num_basis: 8
+  BesselBasis_trainable: true
+  PolynomialCutoff_p: 6
+  parity: o3_full
+  num_layers: 2
+  env_embed_multiplicity: 64
+  embed_initial_edge: true
+  two_body_latent_mlp_latent_dimensions: [128, 256, 512, 1024]
+  two_body_latent_mlp_nonlinearity: silu
+  two_body_latent_mlp_initialization: uniform
+  latent_mlp_latent_dimensions: [1024, 1024, 1024, 1024]
+  latent_mlp_nonlinearity: silu
+  latent_mlp_initialization: uniform
+  latent_resnet: true
+  env_embed_mlp_latent_dimensions: []
+  env_embed_mlp_nonlinearity: null
+  env_embed_mlp_initialization: uniform
+  edge_eng_mlp_latent_dimensions: [1024]
+  edgewise_reduce: sum
+  atomwise_reduce: mean
+  out_dim: 128
+  readout: mean
+
