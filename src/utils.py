@@ -121,7 +121,7 @@ def water_metrics(pred, true, thresholds=(0.5, 1.0, 1.5, 2.0)):
     
     return results
 
-def plot_3d_frame(ax, protein_pos, mate_pos, water_pred, water_true, title=""):
+def plot_3d_frame(ax, protein_pos, mate_pos, water_pred, water_true, title="", xlim=None, ylim=None, zlim=None):
     """Plot a single 3D frame (protein, mates, true vs predicted waters)."""
     ax.clear()
 
@@ -157,17 +157,149 @@ def plot_3d_frame(ax, protein_pos, mate_pos, water_pred, water_true, title=""):
     ax.set_title(title)
     ax.legend(loc='upper right')
 
-    # consistent limits based on protein + mates + true waters
-    all_arrays = [water_true]
-    if protein_pos.size > 0:
-        all_arrays.append(protein_pos)
-    if mate_pos is not None and mate_pos.size > 0:
-        all_arrays.append(mate_pos)
-    all_pos = np.vstack(all_arrays)
-    lims = [(all_pos[:, i].min() - 2, all_pos[:, i].max() + 2) for i in range(3)]
-    ax.set_xlim(lims[0])
-    ax.set_ylim(lims[1])
-    ax.set_zlim(lims[2])
+    # Set fixed axis limits if provided
+    if xlim is not None:
+        ax.set_xlim(xlim)
+    if ylim is not None:
+        ax.set_ylim(ylim)
+    if zlim is not None:
+        ax.set_zlim(zlim)
+
+
+def compute_placement_metrics(pred, true, threshold=1.0):
+    """
+    Compute standard ML metrics for water placement.
+
+    Args:
+        pred: (N_pred, 3) predicted water positions
+        true: (N_true, 3) ground truth water positions
+        threshold: Distance threshold in Angstroms for considering a match
+
+    Returns:
+        dict with keys: 'precision', 'recall', 'f1', 'auc_pr'
+    """
+    from sklearn.metrics import auc, precision_recall_curve
+
+    if isinstance(pred, torch.Tensor):
+        pred = pred.detach().cpu().numpy()
+    if isinstance(true, torch.Tensor):
+        true = true.detach().cpu().numpy()
+
+    if pred.size == 0 or true.size == 0:
+        return {
+            'precision': 0.0,
+            'recall': 0.0,
+            'f1': 0.0,
+            'auc_pr': 0.0
+        }
+
+    # Compute pairwise distances
+    D = spdist.cdist(true, pred)  # [N_true, N_pred]
+
+    # For fixed threshold
+    recall = float((D.min(axis=1) <= threshold).mean())  # fraction of true covered
+    precision = float((D.min(axis=0) <= threshold).mean())  # fraction of pred with nearby true
+    f1 = 2 * precision * recall / (precision + recall + 1e-8)
+
+    # For AUC-PR: sweep over thresholds
+    thresholds = np.linspace(0.1, 3.0, 50)
+    precisions = []
+    recalls = []
+
+    for t in thresholds:
+        r = float((D.min(axis=1) <= t).mean())
+        p = float((D.min(axis=0) <= t).mean())
+        recalls.append(r)
+        precisions.append(p)
+
+    # Sort by recall for proper AUC computation
+    sorted_indices = np.argsort(recalls)
+    recalls_sorted = np.array(recalls)[sorted_indices]
+    precisions_sorted = np.array(precisions)[sorted_indices]
+
+    # Compute AUC using trapezoidal rule
+    auc_pr = auc(recalls_sorted, precisions_sorted)
+
+    return {
+        'precision': precision,
+        'recall': recall,
+        'f1': f1,
+        'auc_pr': auc_pr
+    }
+
+
+def create_trajectory_gif(trajectory, protein_pos, water_true, save_path, title="", fps=10, pdb_id=None):
+    """
+    Create a GIF from a trajectory of water positions.
+
+    Args:
+        trajectory: List of (N_water, 3) arrays at each timestep
+        protein_pos: (N_protein, 3) protein positions
+        water_true: (N_water, 3) ground truth water positions
+        save_path: Path to save the GIF
+        title: Title prefix for frames
+        fps: Frames per second in the GIF
+        pdb_id: PDB ID to include in title
+    """
+    from PIL import Image
+
+    frames = []
+
+    # Compute fixed axis limits based on all data
+    all_coords = [protein_pos, water_true]
+    all_coords.extend(trajectory)
+    all_points = np.vstack([c for c in all_coords if c.size > 0])
+
+    mins = all_points.min(axis=0)
+    maxs = all_points.max(axis=0)
+    # Add 10% padding
+    ranges = maxs - mins
+    xlim = (mins[0] - 0.1 * ranges[0], maxs[0] + 0.1 * ranges[0])
+    ylim = (mins[1] - 0.1 * ranges[1], maxs[1] + 0.1 * ranges[1])
+    zlim = (mins[2] - 0.1 * ranges[2], maxs[2] + 0.1 * ranges[2])
+
+    # Sample frames to keep GIF size reasonable (max 50 frames)
+    step = max(1, len(trajectory) // 50)
+
+    for i in range(0, len(trajectory), step):
+        water_pred = trajectory[i]
+        fig = plt.figure(figsize=(10, 8))
+        ax = fig.add_subplot(111, projection='3d')
+
+        # Create title with PDB ID if available
+        frame_title = f"{title} Step {i}/{len(trajectory)-1}"
+        if pdb_id:
+            frame_title = f"{pdb_id} | {frame_title}"
+
+        plot_3d_frame(
+            ax,
+            protein_pos,
+            None,
+            water_pred,
+            water_true,
+            title=frame_title,
+            xlim=xlim,
+            ylim=ylim,
+            zlim=zlim
+        )
+
+        # Convert figure to image
+        fig.canvas.draw()
+        img = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
+        img = img.reshape(fig.canvas.get_width_height()[::-1] + (4,))
+        img = img[:, :, :3]  # Drop alpha channel to get RGB
+        frames.append(Image.fromarray(img))
+        plt.close(fig)
+
+    # Save as GIF
+    if frames:
+        frames[0].save(
+            save_path,
+            save_all=True,
+            append_images=frames[1:],
+            duration=1000 // fps,
+            loop=0
+        )
 
 def save_protein_plot(pred_ca, true_ca, step, save_dir):
     """Aligns and plots CA traces."""

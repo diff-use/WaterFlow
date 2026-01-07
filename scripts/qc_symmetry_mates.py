@@ -107,15 +107,15 @@ def visualize_mates(cached_data, pdb_id, output_dir):
 
     # Plot ASU (blue), mates (red), waters (cyan)
     ax.scatter(asu_viz[:, 0], asu_viz[:, 1], asu_viz[:, 2],
-               c='blue', marker='o', s=1, alpha=0.6, label=f'ASU ({protein_pos.shape[0]} atoms)')
+               c='blue', marker='o', s=20, alpha=0.6, label=f'ASU ({protein_pos.shape[0]} atoms)')
 
     if mate_viz.shape[0] > 0:
         ax.scatter(mate_viz[:, 0], mate_viz[:, 1], mate_viz[:, 2],
-                   c='red', marker='^', s=1, alpha=0.6, label=f'Mates ({mate_pos.shape[0]} atoms)')
+                   c='red', marker='^', s=20, alpha=0.6, label=f'Mates ({mate_pos.shape[0]} atoms)')
 
     if water_viz.shape[0] > 0:
         ax.scatter(water_viz[:, 0], water_viz[:, 1], water_viz[:, 2],
-                   c='cyan', marker='*', s=10, alpha=0.8, label=f'Waters ({water_pos.shape[0]})')
+                   c='cyan', marker='*', s=10, alpha=0.4, label=f'Waters ({water_pos.shape[0]})')
 
     ax.set_xlabel('X (Å)')
     ax.set_ylabel('Y (Å)')

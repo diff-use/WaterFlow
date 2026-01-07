@@ -59,6 +59,51 @@ def mock_cached_data():
         'mate_x': torch.randn(8, 16),
     }
 
+@pytest.fixture(scope="session")
+def real_cached_data(tmp_path_factory):
+    """Create real cached data from test PDB file."""
+    import shutil
+
+    if not TEST_PDB_PATH.exists():
+        pytest.skip(f"Test PDB not found: {TEST_PDB_PATH}")
+
+    # Create temporary directories
+    tmpdir = tmp_path_factory.mktemp("test_cache")
+
+    # Create base_pdb_dir structure: base_pdb_dir/6eey/6eey_final.pdb
+    base_pdb_dir = tmpdir / "pdb_base"
+    pdb_subdir = base_pdb_dir / "6eey"
+    pdb_subdir.mkdir(parents=True)
+
+    # Copy test PDB to expected location
+    target_pdb = pdb_subdir / "6eey_final.pdb"
+    shutil.copy(TEST_PDB_PATH, target_pdb)
+
+    # Create processed directory
+    processed_dir = tmpdir / "processed"
+    processed_dir.mkdir()
+
+    # Create PDB list file
+    pdb_list = tmpdir / "list.txt"
+    pdb_list.write_text("6eey_final\n")
+
+    # Create dataset and preprocess
+    dataset = ProteinWaterDataset(
+        pdb_list_file=str(pdb_list),
+        processed_dir=str(processed_dir),
+        base_pdb_dir=str(base_pdb_dir),
+        preprocess=True,
+        cutoff=5.0,
+    )
+
+    # Load and return the cached data
+    cache_file = processed_dir / "6eey_final.pt"
+    if not cache_file.exists():
+        pytest.skip(f"Failed to create cache file at {cache_file}")
+
+    cached = torch.load(cache_file, weights_only=False)
+    return cached, str(processed_dir), str(base_pdb_dir)
+
 @pytest.mark.unit
 class TestEdgeFeatures:
     
@@ -234,47 +279,49 @@ class TestMakeUndirected:
 
 @pytest.mark.unit
 class TestProteinWaterDataset:
-    
+
     @pytest.fixture
     def pdb_list_file(self, temp_dir):
-        """Create a temporary PDB list file."""
+        """Create a temporary PDB list file (whole PDB format)."""
         list_path = Path(temp_dir) / "pdb_list.txt"
-        list_path.write_text("1abc_final_A\n2def_final_B\n")
+        list_path.write_text("6eey_final\n")
         return str(list_path)
-    
+
     @pytest.fixture
-    def cached_dataset(self, temp_dir, pdb_list_file, mock_cached_data):
-        """Create dataset with pre-cached data files."""
+    def cached_dataset(self, temp_dir, real_cached_data):
+        """Create dataset with real cached data files."""
+        cached, _, _ = real_cached_data
+
         processed_dir = Path(temp_dir) / "processed"
         processed_dir.mkdir()
-        
-        # Create cached files
-        for key in ["1abc_final_A", "2def_final_B"]:
-            torch.save(mock_cached_data, processed_dir / f"{key}.pt")
-        
+
+        # Create cached file from real data
+        torch.save(cached, processed_dir / "6eey_final.pt")
+
+        pdb_list_file = Path(temp_dir) / "list.txt"
+        pdb_list_file.write_text("6eey_final\n")
+
         return ProteinWaterDataset(
-            pdb_list_file=pdb_list_file,
+            pdb_list_file=str(pdb_list_file),
             processed_dir=str(processed_dir),
             base_pdb_dir=temp_dir,
-            preprocess=True,
+            preprocess=False,  # Already cached
         )
     
     def test_parse_pdb_list(self, pdb_list_file, temp_dir):
-        """Test PDB list parsing."""
+        """Test PDB list parsing (whole PDB format without chain ID)."""
         dataset = ProteinWaterDataset(
             pdb_list_file=pdb_list_file,
             processed_dir=temp_dir,
-            preprocess=True,
+            preprocess=False,
         )
-        
-        assert len(dataset.entries) == 2
-        assert dataset.entries[0]['pdb_id'] == '1abc'
-        assert dataset.entries[0]['chain_id'] == 'A'
-        assert dataset.entries[1]['pdb_id'] == '2def'
-        assert dataset.entries[1]['chain_id'] == 'B'
-    
+
+        assert len(dataset.entries) == 1
+        assert dataset.entries[0]['pdb_id'] == '6eey'
+        assert dataset.entries[0]['chain_id'] is None
+
     def test_len(self, cached_dataset):
-        assert len(cached_dataset) == 2
+        assert len(cached_dataset) == 1
     
     def test_getitem_returns_heterodata(self, cached_dataset):
         data = cached_dataset[0]
@@ -306,42 +353,52 @@ class TestProteinWaterDataset:
         assert hasattr(edge_data, 'edge_rbf')
         assert hasattr(edge_data, 'edge_vec')
     
-    def test_include_mates_true(self, cached_dataset, mock_cached_data):
+    def test_include_mates_true(self, cached_dataset, real_cached_data):
         """Test that mates are included when flag is True."""
+        cached, _, _ = real_cached_data
         data = cached_dataset[0]
-        
+
         expected_protein_nodes = (
-            mock_cached_data['protein_pos'].size(0) +
-            mock_cached_data['mate_pos'].size(0)
+            cached['protein_pos'].size(0) +
+            cached['mate_pos'].size(0)
         )
         assert data['protein'].num_nodes == expected_protein_nodes
     
-    def test_include_mates_false(self, temp_dir, pdb_list_file, mock_cached_data):
+    def test_include_mates_false(self, temp_dir, real_cached_data):
         """Test that mates are excluded when flag is False."""
+        cached, _, _ = real_cached_data
+
         processed_dir = Path(temp_dir) / "processed_no_mates"
         processed_dir.mkdir()
-        
-        torch.save(mock_cached_data, processed_dir / "1abc_final_A.pt")
-        torch.save(mock_cached_data, processed_dir / "2def_final_B.pt")
-        
+
+        torch.save(cached, processed_dir / "6eey_final.pt")
+
+        pdb_list_file = Path(temp_dir) / "list.txt"
+        pdb_list_file.write_text("6eey_final\n")
+
         dataset = ProteinWaterDataset(
-            pdb_list_file=pdb_list_file,
+            pdb_list_file=str(pdb_list_file),
             processed_dir=str(processed_dir),
-            preprocess=True,
+            preprocess=False,
             include_mates=False,
         )
-        
+
         data = dataset[0]
-        assert data['protein'].num_nodes == mock_cached_data['protein_pos'].size(0)
+        assert data['protein'].num_nodes == cached['protein_pos'].size(0)
     
-    def test_missing_cache_raises(self, temp_dir, pdb_list_file):
+    def test_missing_cache_raises(self, temp_dir):
         """Test that missing cache file raises FileNotFoundError."""
+        pdb_list_file = Path(temp_dir) / "list.txt"
+        pdb_list_file.write_text("missing_final\n")
+
         dataset = ProteinWaterDataset(
-            pdb_list_file=pdb_list_file,
+            pdb_list_file=str(pdb_list_file),
             processed_dir=temp_dir,
-            preprocess=True,
+            preprocess=False,  # Don't preprocess, so entry won't be filtered
         )
-        
+
+        # Dataset should have the entry, but accessing it should raise
+        assert len(dataset.entries) == 1
         with pytest.raises(FileNotFoundError):
             _ = dataset[0]
     
@@ -354,71 +411,77 @@ class TestProteinWaterDataset:
 
 @pytest.mark.unit
 class TestGetDataloader:
-    
+
     @pytest.fixture
-    def dataloader_setup(self, temp_dir, mock_cached_data):
+    def dataloader_setup(self, temp_dir, real_cached_data):
         """Setup for dataloader tests."""
+        cached, _, _ = real_cached_data
+
         processed_dir = Path(temp_dir) / "processed"
         processed_dir.mkdir()
-        
+
         pdb_list = Path(temp_dir) / "list.txt"
-        pdb_list.write_text("test1_final_A\ntest2_final_B\n")
-        
-        for key in ["test1_final_A", "test2_final_B"]:
-            torch.save(mock_cached_data, processed_dir / f"{key}.pt")
-        
+        pdb_list.write_text("6eey_final\n6eey_final\n")
+
+        # Create two identical cache files for testing
+        for i, key in enumerate(["6eey_final", "6eey_final"]):
+            torch.save(cached, processed_dir / f"{key}_{i}.pt")
+
+        # Update list to use the numbered keys
+        pdb_list.write_text("6eey_final_0\n6eey_final_1\n")
+
         return str(pdb_list), str(processed_dir)
     
     def test_returns_dataloader(self, dataloader_setup):
         pdb_list, processed_dir = dataloader_setup
-        
+
         loader = get_dataloader(
             pdb_list_file=pdb_list,
             processed_dir=processed_dir,
             batch_size=2,
-            preprocess=True,
+            preprocess=False,
             num_workers=0,
         )
-        
+
         from torch.utils.data import DataLoader
         assert isinstance(loader, DataLoader)
-    
+
     def test_batch_size(self, dataloader_setup):
         pdb_list, processed_dir = dataloader_setup
-        
+
         loader = get_dataloader(
             pdb_list_file=pdb_list,
             processed_dir=processed_dir,
             batch_size=2,
-            preprocess=True,
+            preprocess=False,
             num_workers=0,
         )
-        
+
         batch = next(iter(loader))
         # Batch should contain data from 2 graphs
         assert batch['protein'].batch.max().item() == 1  # 0 and 1 for 2 graphs
-    
+
     def test_shuffle_option(self, dataloader_setup):
         pdb_list, processed_dir = dataloader_setup
-        
+
         loader_shuffled = get_dataloader(
             pdb_list_file=pdb_list,
             processed_dir=processed_dir,
             batch_size=1,
             shuffle=True,
-            preprocess=True,
+            preprocess=False,
             num_workers=0,
         )
-        
+
         loader_unshuffled = get_dataloader(
             pdb_list_file=pdb_list,
             processed_dir=processed_dir,
             batch_size=1,
             shuffle=False,
-            preprocess=True,
+            preprocess=False,
             num_workers=0,
         )
-        
+
         # Both should work
         assert len(list(loader_shuffled)) == 2
         assert len(list(loader_unshuffled)) == 2
@@ -430,10 +493,10 @@ class TestEdgeCases:
         """Test dataset handles entries with no water."""
         processed_dir = Path(temp_dir) / "processed"
         processed_dir.mkdir()
-        
+
         pdb_list = Path(temp_dir) / "list.txt"
-        pdb_list.write_text("nowat_final_A\n")
-        
+        pdb_list.write_text("nowat_final\n")
+
         cached = {
             'protein_pos': torch.randn(20, 3),
             'protein_x': torch.randn(20, 16),
@@ -443,25 +506,25 @@ class TestEdgeCases:
             'mate_pos': torch.zeros((0, 3)),
             'mate_x': torch.zeros((0, 16)),
         }
-        torch.save(cached, processed_dir / "nowat_final_A.pt")
-        
+        torch.save(cached, processed_dir / "nowat_final.pt")
+
         dataset = ProteinWaterDataset(
             pdb_list_file=str(pdb_list),
             processed_dir=str(processed_dir),
-            preprocess=True,
+            preprocess=False,
         )
-        
+
         data = dataset[0]
         assert data['water'].num_nodes == 0
-    
+
     def test_no_mates(self, temp_dir):
         """Test dataset handles entries with no symmetry mates."""
         processed_dir = Path(temp_dir) / "processed"
         processed_dir.mkdir()
-        
+
         pdb_list = Path(temp_dir) / "list.txt"
-        pdb_list.write_text("nomate_final_A\n")
-        
+        pdb_list.write_text("nomate_final\n")
+
         cached = {
             'protein_pos': torch.randn(15, 3),
             'protein_x': torch.randn(15, 16),
@@ -471,15 +534,15 @@ class TestEdgeCases:
             'mate_pos': torch.zeros((0, 3)),
             'mate_x': torch.zeros((0, 16)),
         }
-        torch.save(cached, processed_dir / "nomate_final_A.pt")
-        
+        torch.save(cached, processed_dir / "nomate_final.pt")
+
         dataset = ProteinWaterDataset(
             pdb_list_file=str(pdb_list),
             processed_dir=str(processed_dir),
-            preprocess=True,
+            preprocess=False,
             include_mates=True,
         )
-        
+
         data = dataset[0]
         # Should only have ASU protein atoms
         assert data['protein'].num_nodes == 15
@@ -487,17 +550,54 @@ class TestEdgeCases:
     def test_malformed_pdb_list_line(self, temp_dir, capsys):
         """Test that malformed lines are skipped with warning."""
         pdb_list = Path(temp_dir) / "list.txt"
-        pdb_list.write_text("valid_final_A\ninvalid\n")
-        
+        pdb_list.write_text("valid_final\ninvalid\n")
+
         dataset = ProteinWaterDataset(
             pdb_list_file=str(pdb_list),
             processed_dir=temp_dir,
-            preprocess=True,
+            preprocess=False,  # Don't try to actually preprocess
         )
-        
+
+        # Only the valid line should be parsed
         assert len(dataset.entries) == 1
         captured = capsys.readouterr()
         assert "Skipping malformed" in captured.out
+
+    def test_parse_pdb_list_with_chain_ids(self, temp_dir):
+        """Test PDB list parsing with chain-specific format."""
+        pdb_list = Path(temp_dir) / "list.txt"
+        pdb_list.write_text("6eey_final_A\n6eey_final_B\n")
+
+        dataset = ProteinWaterDataset(
+            pdb_list_file=str(pdb_list),
+            processed_dir=temp_dir,
+            preprocess=False,  # Don't preprocess
+        )
+
+        assert len(dataset.entries) == 2
+        assert dataset.entries[0]['pdb_id'] == '6eey'
+        assert dataset.entries[0]['chain_id'] == 'A'
+        assert dataset.entries[1]['pdb_id'] == '6eey'
+        assert dataset.entries[1]['chain_id'] == 'B'
+
+    def test_parse_pdb_list_mixed_formats(self, temp_dir):
+        """Test PDB list parsing with mixed formats (with and without chain IDs)."""
+        pdb_list = Path(temp_dir) / "list.txt"
+        pdb_list.write_text("6eey_final\n6eey_final_A\n6eey_final_B\n")
+
+        dataset = ProteinWaterDataset(
+            pdb_list_file=str(pdb_list),
+            processed_dir=temp_dir,
+            preprocess=False,  # Don't preprocess
+        )
+
+        assert len(dataset.entries) == 3
+        assert dataset.entries[0]['pdb_id'] == '6eey'
+        assert dataset.entries[0]['chain_id'] is None
+        assert dataset.entries[1]['pdb_id'] == '6eey'
+        assert dataset.entries[1]['chain_id'] == 'A'
+        assert dataset.entries[2]['pdb_id'] == '6eey'
+        assert dataset.entries[2]['chain_id'] == 'B'
 
 @pytest.mark.integration
 class TestParseAsuWithBiotite:
@@ -666,10 +766,10 @@ class TestPreprocessingPipeline:
         base_pdb_dir = setup_pdb_structure
         processed_dir = tmp_path / "processed"
         processed_dir.mkdir()
-        
+
         pdb_list = tmp_path / "list.txt"
-        pdb_list.write_text("6eey_final_A\n")
-        
+        pdb_list.write_text("6eey_final\n")
+
         dataset = ProteinWaterDataset(
             pdb_list_file=str(pdb_list),
             processed_dir=str(processed_dir),
@@ -677,8 +777,8 @@ class TestPreprocessingPipeline:
             preprocess=True,
             cutoff=5.0,
         )
-        
-        cache_file = processed_dir / "6eey_final_A.pt"
+
+        cache_file = processed_dir / "6eey_final.pt"
         assert cache_file.exists()
     
     def test_cached_data_structure(self, pdb_path, tmp_path, setup_pdb_structure):
@@ -686,19 +786,19 @@ class TestPreprocessingPipeline:
         base_pdb_dir = setup_pdb_structure
         processed_dir = tmp_path / "processed"
         processed_dir.mkdir()
-        
+
         pdb_list = tmp_path / "list.txt"
-        pdb_list.write_text("6eey_final_A\n")
-        
+        pdb_list.write_text("6eey_final\n")
+
         ProteinWaterDataset(
             pdb_list_file=str(pdb_list),
             processed_dir=str(processed_dir),
             base_pdb_dir=str(base_pdb_dir),
             preprocess=True,
         )
-        
-        cached = torch.load(processed_dir / "6eey_final_A.pt", weights_only=False)
-        
+
+        cached = torch.load(processed_dir / "6eey_final.pt", weights_only=False)
+
         required_keys = [
             'protein_pos', 'protein_x', 'protein_res_idx',
             'water_pos', 'water_x',
@@ -712,19 +812,19 @@ class TestPreprocessingPipeline:
         base_pdb_dir = setup_pdb_structure
         processed_dir = tmp_path / "processed"
         processed_dir.mkdir()
-        
+
         pdb_list = tmp_path / "list.txt"
-        pdb_list.write_text("6eey_final_A\n")
-        
+        pdb_list.write_text("6eey_final\n")
+
         ProteinWaterDataset(
             pdb_list_file=str(pdb_list),
             processed_dir=str(processed_dir),
             base_pdb_dir=str(base_pdb_dir),
             preprocess=True,
         )
-        
-        cached = torch.load(processed_dir / "6eey_final_A.pt", weights_only=False)
-        
+
+        cached = torch.load(processed_dir / "6eey_final.pt", weights_only=False)
+
         assert cached['protein_pos'].shape[1] == 3
         assert cached['protein_pos'].dtype == torch.float32
         assert cached['protein_x'].shape[0] == cached['protein_pos'].shape[0]
@@ -737,19 +837,19 @@ class TestPreprocessingPipeline:
         base_pdb_dir = setup_pdb_structure
         processed_dir = tmp_path / "processed"
         processed_dir.mkdir()
-        
+
         pdb_list = tmp_path / "list.txt"
-        pdb_list.write_text("6eey_final_A\n")
-        
+        pdb_list.write_text("6eey_final\n")
+
         dataset = ProteinWaterDataset(
             pdb_list_file=str(pdb_list),
             processed_dir=str(processed_dir),
             base_pdb_dir=str(base_pdb_dir),
             preprocess=True,
         )
-        
+
         data = dataset[0]
-        
+
         assert 'protein' in data.node_types
         assert 'water' in data.node_types
         assert ('protein', 'pp', 'protein') in data.edge_types

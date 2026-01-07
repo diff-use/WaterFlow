@@ -520,14 +520,98 @@ class TestEdgeCases:
             edge_scalar_in=16,
             pool_residue=False,
         ).to(device)
-        
+
         model = FlowWaterGVP(
             encoder=encoder,
             hidden_dims=(64, 8),
             layers=1,
             freeze_encoder=True,
         ).to(device)
-        
+
         # Verify encoder params are frozen
         for p in model.encoder.parameters():
             assert p.requires_grad is False
+
+
+# ============== Tests for edge connectivity ==============
+
+@pytest.mark.unit
+class TestWaterEdgeConnectivity:
+    """Tests to ensure all waters have edges (both protein-water and water-water)."""
+
+    def test_all_waters_have_protein_edges(self, simple_hetero_data):
+        """Ensure every water has at least one protein-water edge."""
+        updater = ProteinWaterUpdate(hidden_dims=(128, 16), layers=1)
+
+        edge_dict = updater.build_edges(simple_hetero_data, k_pw=4, k_ww=3)
+        pw_edges = edge_dict[('protein', 'pw', 'water')]
+
+        n_water = simple_hetero_data['water'].num_nodes
+
+        # Check that all water nodes appear in the protein-water edges
+        water_nodes_with_edges = torch.unique(pw_edges[1])
+        assert len(water_nodes_with_edges) == n_water, \
+            f"Only {len(water_nodes_with_edges)}/{n_water} waters have protein edges"
+
+    def test_all_waters_have_water_edges(self, simple_hetero_data):
+        """Ensure every water has at least one water-water edge (if multiple waters exist)."""
+        updater = ProteinWaterUpdate(hidden_dims=(128, 16), layers=1)
+
+        edge_dict = updater.build_edges(simple_hetero_data, k_pw=4, k_ww=3)
+        ww_edges = edge_dict[('water', 'ww', 'water')]
+
+        n_water = simple_hetero_data['water'].num_nodes
+
+        if n_water > 1:
+            # Check that all water nodes appear in the water-water edges
+            water_nodes_with_edges = torch.unique(ww_edges[0])
+            assert len(water_nodes_with_edges) == n_water, \
+                f"Only {len(water_nodes_with_edges)}/{n_water} waters have water-water edges"
+
+    def test_batched_waters_have_edges(self, batched_hetero_data):
+        """Ensure all waters in a batched graph have edges."""
+        updater = ProteinWaterUpdate(hidden_dims=(128, 16), layers=1)
+
+        edge_dict = updater.build_edges(batched_hetero_data, k_pw=4, k_ww=3)
+        pw_edges = edge_dict[('protein', 'pw', 'water')]
+        ww_edges = edge_dict[('water', 'ww', 'water')]
+
+        n_water = batched_hetero_data['water'].num_nodes
+
+        # Check protein-water edges
+        water_nodes_with_pw_edges = torch.unique(pw_edges[1])
+        assert len(water_nodes_with_pw_edges) == n_water, \
+            f"Only {len(water_nodes_with_pw_edges)}/{n_water} waters have protein edges in batched data"
+
+        # Check water-water edges
+        if n_water > 1:
+            water_nodes_with_ww_edges = torch.unique(ww_edges[0])
+            assert len(water_nodes_with_ww_edges) == n_water, \
+                f"Only {len(water_nodes_with_ww_edges)}/{n_water} waters have water-water edges in batched data"
+
+    def test_single_water_has_protein_edges_no_water_edges(self, device):
+        """A single water should have protein edges but no water-water edges."""
+        data = HeteroData()
+        data['protein'].pos = torch.randn(10, 3, device=device)
+        data['protein'].x = torch.randn(10, 16, device=device)
+        data['protein'].batch = torch.zeros(10, dtype=torch.long, device=device)
+        data['water'].pos = torch.randn(1, 3, device=device)  # Single water
+        data['water'].x = torch.randn(1, 16, device=device)
+        data['water'].batch = torch.zeros(1, dtype=torch.long, device=device)
+        data['protein', 'pp', 'protein'].edge_index = torch.tensor(
+            [[0, 1], [1, 2]], dtype=torch.long, device=device
+        )
+
+        updater = ProteinWaterUpdate(hidden_dims=(128, 16), layers=1)
+        edge_dict = updater.build_edges(data, k_pw=4, k_ww=3)
+
+        pw_edges = edge_dict[('protein', 'pw', 'water')]
+        ww_edges = edge_dict[('water', 'ww', 'water')]
+
+        # Single water should have protein edges
+        assert pw_edges.shape[1] > 0, "Single water should have at least one protein edge"
+        water_nodes_with_edges = torch.unique(pw_edges[1])
+        assert len(water_nodes_with_edges) == 1, "Single water must have protein edges"
+
+        # Single water should have no water-water edges (since k_ww excludes self-loops)
+        assert ww_edges.shape[1] == 0, "Single water should have no water-water edges"

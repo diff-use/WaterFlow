@@ -88,6 +88,7 @@ def get_crystal_contacts_pymol(pdb_path: str, cutoff: float = 5.0) -> Dict:
     with pymol2.PyMOL() as pm:
         cmd = pm.cmd
         cmd.reinitialize()
+        cmd.feedback("disable", "all", "everything")
         obj = "struct"
         cmd.load(pdb_path, obj)
         cmd.symexp("sym", obj, obj, cutoff)
@@ -191,7 +192,6 @@ class ProteinWaterDataset(Dataset):
                 if not line:
                     continue
 
-                # Parse format: <pdb_id>_final[_<chainID>]
                 parts = line.split('_')
                 if len(parts) < 2:
                     print(f"Warning: Skipping malformed line: {line}")
@@ -199,12 +199,9 @@ class ProteinWaterDataset(Dataset):
 
                 pdb_id = parts[0]
 
-                # Determine if chain ID is specified
                 if len(parts) >= 3 and parts[1] == "final":
-                    # Format: pdb_id_final_chainID (chain-specific)
                     chain_id = parts[-1]
                 elif len(parts) == 2 and parts[1] == "final":
-                    # Format: pdb_id_final (whole PDB, no chain filter)
                     chain_id = None
                 else:
                     print(f"Warning: Unexpected format: {line}")
@@ -339,7 +336,7 @@ class ProteinWaterDataset(Dataset):
         - 'protein' node type with pos, x, residue_index
         - 'water' node type with pos, x
         - ('protein', 'pp', 'protein') edges with edge_index, edge_rbf, edge_vec
-        - NO water edges (create these during training as needed)
+        - NO water edges 
         """
         entry = self.entries[idx]
         cache_path = self.processed_dir / f"{entry['cache_key']}.pt"
