@@ -23,7 +23,7 @@ from torch_cluster import radius_graph
 import e3nn
 from e3nn.math import soft_one_hot_linspace
 
-from src.utils import rbf
+from src.utils import rbf, atom37_to_atoms
 
 ELEMENT_VOCAB = [
     "C", "N", "O", "S", "P", "SE", "MG", "ZN", "CA", "FE", "NA", "K", "CL", "F", "BR",
@@ -153,6 +153,7 @@ class ProteinWaterDataset(Dataset):
         num_rbf: int = 16,
         include_mates: bool = True,
         preprocess: bool = True,
+        duplicate_single_sample: int = 1,
     ):
         """
         Args:
@@ -163,17 +164,26 @@ class ProteinWaterDataset(Dataset):
             num_rbf: Number of RBF bins for edge distance encoding
             include_mates: If True, include symmetry mate atoms as protein nodes
             preprocess: If True, run preprocessing on missing cached files
+            duplicate_single_sample: If dataset has 1 sample, duplicate it this many times
         """
         self.processed_dir = Path(processed_dir)
         self.base_pdb_dir = Path(base_pdb_dir)
         self.cutoff = cutoff
         self.num_rbf = num_rbf
         self.include_mates = include_mates
-        
+        self.duplicate_single_sample = duplicate_single_sample
+
         self.entries = self._parse_pdb_list(pdb_list_file)
-        
+
         if preprocess:
             self._preprocess_all()
+
+        # If single sample and duplication requested, set effective length
+        if len(self.entries) == 1 and duplicate_single_sample > 1:
+            self._effective_length = duplicate_single_sample
+            print(f"Single sample detected. Duplicating {duplicate_single_sample}x ")
+        else:
+            self._effective_length = len(self.entries)
     
     def _parse_pdb_list(self, pdb_list_file: str) -> List[Dict]:
         """
@@ -326,19 +336,21 @@ class ProteinWaterDataset(Dataset):
         }, cache_path)
     
     def __len__(self) -> int:
-        return len(self.entries)
+        return self._effective_length
     
     def __getitem__(self, idx: int) -> HeteroData:
         """
         Load cached data and build graph on-the-fly.
-        
+
         Returns HeteroData with:
         - 'protein' node type with pos, x, residue_index
         - 'water' node type with pos, x
         - ('protein', 'pp', 'protein') edges with edge_index, edge_rbf, edge_vec
-        - NO water edges 
+        - NO water edges
         """
-        entry = self.entries[idx]
+        # Map idx to actual entry index (handles duplication)
+        actual_idx = idx % len(self.entries)
+        entry = self.entries[actual_idx]
         cache_path = self.processed_dir / f"{entry['cache_key']}.pt"
         
         if not cache_path.exists():
@@ -348,12 +360,31 @@ class ProteinWaterDataset(Dataset):
             )
         
         cached = torch.load(cache_path, weights_only=False)
-        
-        #start with ASU protein atoms
-        protein_pos = cached['protein_pos']
-        protein_x = cached['protein_x']
-        protein_res_idx = cached['protein_res_idx']
-        num_asu_protein = protein_pos.size(0)
+
+        # When SLAE embeddings are present, use atom37-derived atoms to match
+        # exactly what SLAE encoder used (handles insertion codes correctly)
+        if 'protein_slae_embedding' in cached and 'protein_atom37_coords' in cached:
+
+            #reconstruct protein atoms from atom37 coords (matches SLAE preprocessing)
+            atom37_coords = cached['protein_atom37_coords']
+            protein_pos, residue_idx_per_atom, atom_types = atom37_to_atoms(atom37_coords)
+
+            # recenter (inefficient kinda, will optimize this later, most likely need to center in precompute script)
+            center = protein_pos.mean(dim=0, keepdim=True)
+            protein_pos = protein_pos - center
+
+            protein_x = F.one_hot(atom_types, num_classes=37).float()
+
+            # Create residue index from atom37 data
+            protein_res_idx = residue_idx_per_atom
+
+            num_asu_protein = protein_pos.size(0)
+        else:
+            # Use original protein atoms from cache (no SLAE or old cache format)
+            protein_pos = cached['protein_pos']
+            protein_x = cached['protein_x']
+            protein_res_idx = cached['protein_res_idx']
+            num_asu_protein = protein_pos.size(0)
         
         #concatenate symmetry mate atoms to protein if mates are included
         if self.include_mates and cached['mate_pos'].size(0) > 0:
@@ -429,24 +460,30 @@ def get_dataloader(
 ) -> DataLoader:
     """
     Create a DataLoader for crystal contact dataset.
-    
+
     Args:
         pdb_list_file: Path to text file with PDB entries (one per line)
         processed_dir: Directory for cached preprocessed files
         batch_size: Number of graphs per batch
         **dataset_kwargs: Additional arguments passed to ProteinWaterDataset
-                         (e.g., cutoff, num_rbf, include_mates)
-    
+                         (e.g., cutoff, num_rbf, include_mates, duplicate_single_sample)
+
     Returns:
         DataLoader that yields batched HeteroData objects
-        
+
+    Note:
+        For single-protein overfitting, use duplicate_single_sample parameter:
+        - duplicate_single_sample=100 creates 100 copies of the sample in the dataset
+        - Then batch_size works normally (e.g., batch_size=4 gives 25 batches/epoch)
+        - This gives more gradient updates per epoch without changing batch size
+
     """
     dataset = ProteinWaterDataset(
         pdb_list_file=pdb_list_file,
         processed_dir=processed_dir,
         **dataset_kwargs
     )
-    
+
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -455,6 +492,6 @@ def get_dataloader(
         pin_memory=pin_memory,
         collate_fn=lambda batch: Batch.from_data_list(batch),
     )
-    
+
     return loader
 

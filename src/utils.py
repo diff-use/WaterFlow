@@ -12,6 +12,32 @@ from torch import Tensor
 
 from e3nn.math import soft_one_hot_linspace
 
+# Constant used in atom37 representation (copied from SLAE)
+ATOM37_FILL = 1e-5
+
+def atom37_to_atoms(atom_tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Convert atom37 representation to flat atom list.
+
+    Given an atom tensor of shape (N_res, 37, 3), return:
+    - coords: (N_atoms, 3) - coordinates of present atoms
+    - residue_index: (N_atoms,) - which residue each atom belongs to
+    - atom_type: (N_atoms,) - atom type index (0-36)
+
+    This function is copied from SLAE to avoid import dependency.
+    """
+    # A site is present if ANY of its 3 coords differs from ATOM37_FILL
+    present = (atom_tensor != ATOM37_FILL).any(dim=-1)  # (N_res, 37)
+    nz = present.nonzero(as_tuple=False)  # (N_atoms, 2)
+    residue_index = nz[:, 0]
+    atom_type = nz[:, 1].long()
+
+    flat = atom_tensor.reshape(-1, 3)
+    flat_mask = present.reshape(-1)  # (N_res * 37,)
+    coords = flat[flat_mask]  # (N_atoms, 3)
+
+    return coords, residue_index, atom_type
+
 def rbf(r: Tensor, num_gaussians: int = 16, cutoff: float = 8.0) -> Tensor:
     """Radial basis function encoding of distances."""
     r = r.clamp(min=1e-4)
@@ -99,6 +125,35 @@ def cov_prec_at_threshold(pred, true, thresh=1.0):
     coverage  = float((D.min(axis=1) <= thresh).mean())
     precision = float((D.min(axis=0) <= thresh).mean())
     return coverage, precision
+
+
+@torch.no_grad()
+def recall_precision_gpu(pred: torch.Tensor, true: torch.Tensor, thresh: float = 0.5):
+    """
+    Fast GPU version of recall and precision computation.
+
+    Args:
+        pred: (N_pred, 3) predicted positions
+        true: (N_true, 3) ground truth positions
+        thresh: distance threshold in Angstroms
+
+    Returns:
+        recall: fraction of true waters with a prediction within thresh
+        precision: fraction of predictions within thresh of a true water
+    """
+    if pred.numel() == 0 or true.numel() == 0:
+        return 0.0, 0.0
+
+    # Compute pairwise distances: [N_true, N_pred]
+    D = torch.cdist(true, pred, p=2)
+
+    # Recall: fraction of true waters covered
+    recall = (D.min(dim=1)[0] <= thresh).float().mean().item()
+
+    # Precision: fraction of predictions that are correct
+    precision = (D.min(dim=0)[0] <= thresh).float().mean().item()
+
+    return recall, precision
 
 def water_metrics(pred, true, thresholds=(0.5, 1.0, 1.5, 2.0)):
     """Compute coverage, precision, F1 at multiple distance thresholds."""

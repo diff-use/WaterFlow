@@ -22,6 +22,17 @@ from src.encoder import ProteinGVPEncoder, load_encoder_from_checkpoint
 from src.encoder_adapters import SLAEToGVPAdapter
 from src.flow import FlowWaterGVP, FlowMatcher
 from src.utils import plot_3d_frame, compute_placement_metrics, create_trajectory_gif
+from datetime import datetime
+
+
+def generate_run_name(args):
+    """Generate a run name from timestamp and key parameters."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    encoder_type = "slae" if args.use_slae else "gvp"
+    layers = f"L{args.flow_layers}"
+    hidden = f"h{args.hidden_s}"
+    name = f"{timestamp}_{encoder_type}_{layers}_{hidden}"
+    return name
 
 
 def parse_args():
@@ -33,15 +44,17 @@ def parse_args():
     p.add_argument("--processed_dir", type=str, default="/home/srivasv/flow_cache/")
     p.add_argument("--base_pdb_dir", type=str, default="/sb/wankowicz_lab/data/srivasv/pdb_redo_data")
     p.add_argument("--include_mates", action="store_true", help="Include symmetry mate atoms as protein nodes")
+    p.add_argument("--duplicate_single_sample", type=int, default=1,
+                   help="If training on single sample, duplicate it N times for more gradient updates per epoch")
 
     # model
     p.add_argument("--encoder_ckpt", type=str, default=None)
     p.add_argument("--freeze_encoder", action="store_true")
     p.add_argument("--hidden_s", type=int, default=256)
     p.add_argument("--hidden_v", type=int, default=64)
-    p.add_argument("--flow_layers", type=int, default=4)
-    p.add_argument("--k_pw", type=int, default=12)
-    p.add_argument("--k_ww", type=int, default=12)
+    p.add_argument("--flow_layers", type=int, default=5)
+    p.add_argument("--k_pw", type=int, default=24)
+    p.add_argument("--k_ww", type=int, default=24)
 
     # SLAE encoder options
     p.add_argument("--use_slae", action="store_true", help="Use SLAE encoder instead of GVP")
@@ -52,7 +65,7 @@ def parse_args():
     # training
     p.add_argument("--epochs", type=int, default=100)
     p.add_argument("--batch_size", type=int, default=4)
-    p.add_argument("--lr", type=float, default=1e-4)
+    p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--weight_decay", type=float, default=1e-3)
     p.add_argument("--grad_clip", type=float, default=1.0)
     p.add_argument("--num_workers", type=int, default=4)
@@ -67,11 +80,12 @@ def parse_args():
 
     # checkpointing
     p.add_argument("--save_dir", type=str, default="/home/srivasv/flow_checkpoints")
-    p.add_argument("--save_every", type=int, default=10)
+    p.add_argument("--run_name", type=str, default=None, help="Name for this run (auto-generated if not provided)")
+    p.add_argument("--save_every", type=int, default=100)
     p.add_argument("--eval_every", type=int, default=5)
     p.add_argument("--n_eval_samples", type=int, default=3)
     p.add_argument("--rk4_steps", type=int, default=100)
-    p.add_argument("--save_gif_every", type=int, default=10, help="Save trajectory GIFs every N epochs")
+    p.add_argument("--save_gifs", action="store_true", help="Save trajectory GIFs during eval")
 
     # wandb
     p.add_argument("--wandb_project", type=str, default="water-flow")
@@ -86,6 +100,7 @@ def build_model(args, device):
     if args.use_slae:
         # SLAE mode: use cached embeddings with adapter
         print("Building model with SLAE encoder (using cached embeddings)")
+        print(f"  SLAE dim: {args.slae_dim}, Adapter output dims: {args.slae_adapter_dims or f'{args.hidden_s},{args.hidden_v}'}")
 
         # Parse adapter dimensions
         if args.slae_adapter_dims is not None:
@@ -143,16 +158,17 @@ def build_model(args, device):
     return model
 
 
-def run_eval_sampling(flow_matcher, val_loader, args, epoch, device, global_step):
-    """Run RK4 integration on a few samples and log results."""
+def run_eval_sampling(flow_matcher, val_loader, args, epoch, device, global_step, eval_indices, run_dir):
+    """Run RK4 integration on fixed eval samples and log results.
+
+    Args:
+        eval_indices: Fixed list of dataset indices to evaluate (sampled once at start)
+        run_dir: Path to run directory for saving outputs
+    """
     flow_matcher.model.eval()
     results = []
 
-    sample_indices = np.random.choice(len(val_loader.dataset), min(args.n_eval_samples, len(val_loader.dataset)), replace=False)
-
-    save_gifs = (epoch % args.save_gif_every == 0)
-
-    for i, idx in enumerate(sample_indices):
+    for i, idx in enumerate(eval_indices):
         graph = val_loader.dataset[idx]
         if graph['water'].num_nodes == 0:
             continue
@@ -194,16 +210,14 @@ def run_eval_sampling(flow_matcher, val_loader, args, epoch, device, global_step
             title=f"Epoch {epoch} Sample {i} | RMSD={final_rmsd:.2f}Å | F1={final_metrics['f1']:.3f}"
         )
 
-        plot_path = Path(args.save_dir) / "plots" / f"epoch{epoch}_sample{i}.png"
+        plot_path = run_dir / "plots" / f"epoch{epoch}_sample{i}.png"
         plot_path.parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(plot_path, dpi=150)
         plt.close()
 
-        wandb.log({f"eval/sample_{i}": wandb.Image(str(plot_path))}, step=global_step)
-
         # Save GIF if requested
-        if save_gifs and 'trajectory' in out:
-            gif_path = Path(args.save_dir) / "gifs" / f"epoch{epoch}_sample{i}.gif"
+        if args.save_gifs and 'trajectory' in out:
+            gif_path = run_dir / "gifs" / f"epoch{epoch}_sample{i}.gif"
             gif_path.parent.mkdir(parents=True, exist_ok=True)
             create_trajectory_gif(
                 trajectory=out['trajectory'],
@@ -214,7 +228,6 @@ def run_eval_sampling(flow_matcher, val_loader, args, epoch, device, global_step
                 fps=10,
                 pdb_id=graph.pdb_id
             )
-            wandb.log({f"eval/trajectory_{i}": wandb.Video(str(gif_path))}, step=global_step)
 
     if results:
         avg_metrics = {
@@ -246,15 +259,43 @@ def train_epoch(flow_matcher, train_loader, optimizer, args, epoch):
             use_self_conditioning=args.use_self_cond,
         )
 
+        # Print per-sample losses if batch loss exceeded 1000.0
+        if metrics['per_sample_info'] is not None:
+            per_sample_losses = metrics['per_sample_info']['losses'].cpu()
+            num_graphs = metrics['per_sample_info']['num_graphs']
+            # Get PDB IDs for each sample in the batch
+            if hasattr(batch, 'pdb_id'):
+                # pdb_id might be a list when batched
+                pdb_ids = batch.pdb_id if isinstance(batch.pdb_id, list) else [batch.pdb_id]
+                print(f"\n{'='*60}")
+                print(f"WARNING: Batch loss {metrics['loss']:.2f} exceeded 1000.0!")
+                print(f"Per-sample losses ({num_graphs} samples):")
+                for i in range(num_graphs):
+                    pdb_id = pdb_ids[i] if i < len(pdb_ids) else 'unknown'
+                    sample_loss = per_sample_losses[i].item()
+                    print(f"  [{i}] {pdb_id}: {sample_loss:.2f}")
+                print(f"{'='*60}")
+
         total_loss += metrics['loss']
         total_rmsd += metrics['rmsd']
         pbar.set_postfix(loss=f"{metrics['loss']:.4f}", rmsd=f"{metrics['rmsd']:.2f}")
 
         global_step = (epoch - 1) * len(train_loader) + step
-        wandb.log({
+        log_dict = {
             "train/iter_loss": metrics['loss'],
             "train/iter_rmsd": metrics['rmsd'],
-        }, step=global_step)
+        }
+
+        # Log gradient norms every 10 steps for debugging
+        if step % 10 == 0:
+            total_grad_norm = 0.0
+            for p in flow_matcher.model.parameters():
+                if p.grad is not None:
+                    total_grad_norm += p.grad.data.norm(2).item() ** 2
+            total_grad_norm = total_grad_norm ** 0.5
+            log_dict["train/grad_norm"] = total_grad_norm
+
+        wandb.log(log_dict, step=global_step)
 
     n = len(train_loader)
     # Return metrics and the last global_step for epoch-level logging
@@ -279,8 +320,39 @@ def val_epoch(flow_matcher, val_loader, args, epoch):
     return {'val/loss': total_loss / n, 'val/rmsd': total_rmsd / n}
 
 
+def count_parameters(model):
+    """Count trainable and total parameters."""
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in model.parameters())
+    return trainable, total
+
+
+def check_slae_embeddings(loader, device):
+    """Check if SLAE embeddings are present and compute statistics."""
+    print("\nChecking SLAE embeddings in dataset...")
+    batch = next(iter(loader))
+    batch = batch.to(device)
+
+    if 'slae_embedding' not in batch['protein']:
+        print("  WARNING: No SLAE embeddings found in data!")
+        print("  Please run scripts/precompute_slae_embeddings.py first")
+        return False
+
+    emb = batch['protein'].slae_embedding
+    print(f"  SLAE embedding shape: {emb.shape}")
+    print(f"  SLAE embedding stats: mean={emb.mean():.4f}, std={emb.std():.4f}, min={emb.min():.4f}, max={emb.max():.4f}")
+
+    # Check if embeddings are all zeros or constant
+    if emb.std() < 1e-6:
+        print("  WARNING: SLAE embeddings appear to be constant/zero!")
+        return False
+
+    return True
+
+
 def save_checkpoint(model, optimizer, scheduler, epoch, path, best=False):
     """Save model checkpoint."""
+    path.parent.mkdir(parents=True, exist_ok=True)
     torch.save({
         'epoch': epoch,
         'model_state_dict': model.state_dict(),
@@ -293,8 +365,29 @@ def save_checkpoint(model, optimizer, scheduler, epoch, path, best=False):
 def main():
     args = parse_args()
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    
-    Path(args.save_dir).mkdir(parents=True, exist_ok=True)
+
+    # Generate or use provided run name
+    if args.run_name is None:
+        args.run_name = generate_run_name(args)
+
+    # Create run directory structure
+    run_dir = Path(args.save_dir) / args.run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "checkpoints").mkdir(exist_ok=True)
+    (run_dir / "plots").mkdir(exist_ok=True)
+    (run_dir / "gifs").mkdir(exist_ok=True)
+
+    print(f"\n{'='*60}")
+    print(f"Run name: {args.run_name}")
+    print(f"Run directory: {run_dir}")
+    print(f"{'='*60}\n")
+
+    # Save run configuration
+    import json
+    config_file = run_dir / "config.json"
+    with open(config_file, 'w') as f:
+        json.dump(vars(args), f, indent=2)
+    print(f"Configuration saved to: {config_file}\n")
     
     # dataloaders
     train_loader = get_dataloader(
@@ -303,6 +396,7 @@ def main():
         num_workers=args.num_workers,
         base_pdb_dir=args.base_pdb_dir,
         include_mates=args.include_mates,
+        duplicate_single_sample=args.duplicate_single_sample,
     )
     val_loader = get_dataloader(
         args.val_list, args.processed_dir,
@@ -310,7 +404,27 @@ def main():
         num_workers=args.num_workers,
         base_pdb_dir=args.base_pdb_dir,
         include_mates=args.include_mates,
+        duplicate_single_sample=1,  # Don't duplicate for validation
     )
+
+    # Sample fixed eval indices (same proteins evaluated every epoch)
+    np.random.seed(42)  # Fixed seed for reproducibility
+    eval_indices = np.random.choice(
+        len(val_loader.dataset),
+        min(args.n_eval_samples, len(val_loader.dataset)),
+        replace=False
+    ).tolist()
+
+    # Save eval indices for reproducibility
+    eval_indices_file = run_dir / "eval_indices.txt"
+    with open(eval_indices_file, 'w') as f:
+        f.write("# Fixed evaluation sample indices\n")
+        for idx in eval_indices:
+            graph = val_loader.dataset[idx]
+            pdb_id = getattr(graph, 'pdb_id', 'unknown')
+            f.write(f"{idx}\t{pdb_id}\n")
+    print(f"Fixed eval indices saved to: {eval_indices_file}")
+    print(f"Evaluating on {len(eval_indices)} proteins at each eval epoch\n")
 
     # wandb init
     wandb.init(
@@ -322,7 +436,43 @@ def main():
 
     # model
     model = build_model(args, device)
-    # Disable gradient/weight logging to reduce wandb overhead
+
+    # Print model statistics
+    trainable_params, total_params = count_parameters(model)
+    print(f"\nModel statistics:")
+    print(f"  Trainable parameters: {trainable_params:,}")
+    print(f"  Total parameters: {total_params:,}")
+
+    # Check SLAE embeddings if using SLAE mode
+    if args.use_slae:
+        embeddings_ok = check_slae_embeddings(train_loader, device)
+        if not embeddings_ok:
+            print("\nERROR: SLAE embeddings are missing or invalid!")
+            print("Please run: python scripts/precompute_slae_embeddings.py \\")
+            print(f"  --train_list {args.train_list} \\")
+            print(f"  --val_list {args.val_list} \\")
+            print(f"  --processed_dir {args.processed_dir}")
+            return
+
+        # Test forward pass to check if adapter is working
+        print("\nTesting forward pass with SLAE...")
+        model.eval()
+        batch = next(iter(train_loader)).to(device)
+        with torch.no_grad():
+            # Determine number of graphs in batch
+            num_graphs = int(batch['protein'].batch.max().item()) + 1
+            t = torch.zeros(num_graphs, device=device)
+            try:
+                v_out = model(batch, t)
+                print(f"  Forward pass successful! Output shape: {v_out.shape}")
+                print(f"  Output stats: mean={v_out.mean():.4f}, std={v_out.std():.4f}")
+                if v_out.std() < 1e-6:
+                    print("  WARNING: Model output is constant! This indicates a problem.")
+            except Exception as e:
+                print(f"  ERROR in forward pass: {e}")
+                return
+        model.train()
+
     # wandb.watch(model, log="none")  # Uncomment to track architecture only
     
     # flow matcher
@@ -340,7 +490,7 @@ def main():
         [p for p in model.parameters() if p.requires_grad],
         lr=args.lr, weight_decay=args.weight_decay
     )
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.lr * 0.05)
+    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.lr * 0.01)
     
     best_val_loss = float('inf')
 
@@ -363,16 +513,18 @@ def main():
         if val_metrics['val/loss'] < best_val_loss:
             best_val_loss = val_metrics['val/loss']
             save_checkpoint(model, optimizer, scheduler, epoch,
-                            Path(args.save_dir) / "best.pt", best=True)
+                            run_dir / "checkpoints" / "best.pt", best=True)
 
         # periodic save
         if epoch % args.save_every == 0:
             save_checkpoint(model, optimizer, scheduler, epoch,
-                            Path(args.save_dir) / f"epoch_{epoch}.pt")
+                            run_dir / "checkpoints" / f"epoch_{epoch}.pt")
 
         # eval sampling
         if epoch % args.eval_every == 0:
-            eval_metrics = run_eval_sampling(flow_matcher, val_loader, args, epoch, device, global_step)
+            eval_metrics = run_eval_sampling(
+                flow_matcher, val_loader, args, epoch, device, global_step, eval_indices, run_dir
+            )
             if eval_metrics:
                 print(f"  Eval: RMSD={eval_metrics['eval/avg_rmsd']:.2f}Å, "
                       f"Precision={eval_metrics['eval/avg_precision']:.2%}, "

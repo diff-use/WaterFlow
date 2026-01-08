@@ -27,6 +27,30 @@ from src.utils import condot_pair_hard_hungarian, compute_rmsd, cov_prec_at_thre
 from src.encoder import ProteinGVPEncoder
 from src.gvp import GVP, GVPMultiEdgeConv
 
+
+class SinusoidalTimeEmbedding(nn.Module):
+    """Sinusoidal positional encoding for timestep t in [0, 1]."""
+
+    def __init__(self, dim, max_period=10000):
+        super().__init__()
+        self.dim = dim
+        self.max_period = max_period
+
+    def forward(self, t):
+        """
+        Args:
+            t: (B,) tensor of timesteps in [0, 1]
+        Returns:
+            (B, dim) tensor of sinusoidal embeddings
+        """
+        half_dim = self.dim // 2
+        freqs = torch.exp(
+            -math.log(self.max_period) * torch.arange(half_dim, device=t.device, dtype=torch.float32) / half_dim
+        )
+        args = t[:, None] * freqs[None, :]
+        embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+        return embedding
+
 def build_knn_edges(src_pos: torch.Tensor,
                     dst_pos: torch.Tensor,
                     k: int,
@@ -557,6 +581,18 @@ class FlowMatcher:
         per_atom_mse = (v_pred - v_target).pow(2).mean(dim=-1, keepdim=True)
         loss = (w * per_atom_mse).sum() / w.sum()
 
+        # Check for high loss and compute per-sample losses for debugging
+        per_sample_info = None
+        if loss.item() > 100.0:
+            with torch.no_grad():
+                from torch_scatter import scatter_add
+                weighted_mse = (w * per_atom_mse).squeeze(-1)
+                # Compute per-graph loss: sum(weighted_mse) / sum(w) for each graph
+                numerator = scatter_add(weighted_mse, batch_w, dim=0)
+                denominator = scatter_add(w.squeeze(-1), batch_w, dim=0)
+                per_sample_loss = numerator / (denominator + 1e-8)
+                per_sample_info = {'losses': per_sample_loss, 'num_graphs': num_graphs}
+
         # backward
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -567,7 +603,7 @@ class FlowMatcher:
             )
         optimizer.step()
 
-        # training RMSD 
+        # training RMSD
         with torch.no_grad():
             x1_hat = x_t + (1.0 - t_per_atom) * v_pred
             # rmsd = compute_rmsd(x1_hat, x1_star)
@@ -576,7 +612,7 @@ class FlowMatcher:
             diff2 = ((x1_hat - x1_star) ** 2).sum(-1)  # (Nw,)
             rmsd = torch.sqrt(scatter_mean(diff2, batch_w, dim=0)).mean().item()
 
-        return {'loss': loss.item(), 'rmsd': rmsd, 'sigma': sigma}
+        return {'loss': loss.item(), 'rmsd': rmsd, 'sigma': sigma, 'per_sample_info': per_sample_info}
 
     @torch.no_grad()
     def validation_step(self, batch: HeteroData) -> Dict[str, float]:
@@ -605,8 +641,10 @@ class FlowMatcher:
         per_atom_mse = (v_pred - v_target).pow(2).mean(dim=-1, keepdim=True)
         loss = (w * per_atom_mse).sum() / w.sum()
 
+        # Fast GPU RMSD (same as training)
         x1_hat = x_t + (1.0 - t_per_atom) * v_pred
-        rmsd = compute_rmsd(x1_hat, x1_star)
+        diff2 = ((x1_hat - x1_star) ** 2).sum(-1)  # (Nw,)
+        rmsd = torch.sqrt(scatter_mean(diff2, batch_w, dim=0)).mean().item()
 
         return {'loss': loss.item(), 'rmsd': rmsd}
 
