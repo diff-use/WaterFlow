@@ -293,13 +293,10 @@ class ProteinWaterDataset(Dataset):
         protein_elements = [str(e).upper() for e in protein_atoms.element]
         protein_x = element_onehot(protein_elements)
         
-        #compute residue indices
+        #compute residue indices (using chain_id, res_id only - matches SLAE's atomarray_to_tensors)
         res_id = protein_atoms.res_id
         chain_id_arr = protein_atoms.chain_id
-        ins_code = getattr(
-            protein_atoms, "ins_code", np.array([""] * len(protein_atoms))
-        )
-        residue_keys = list(zip(chain_id_arr, res_id, ins_code))
+        residue_keys = list(zip(chain_id_arr, res_id))
         unique_res = {k: i for i, k in enumerate(dict.fromkeys(residue_keys))}
         protein_res_idx = torch.tensor(
             [unique_res[k] for k in residue_keys], dtype=torch.long
@@ -361,26 +358,19 @@ class ProteinWaterDataset(Dataset):
         
         cached = torch.load(cache_path, weights_only=False)
 
-        # When SLAE embeddings are present, use atom37-derived atoms to match
-        # exactly what SLAE encoder used (handles insertion codes correctly)
         if 'protein_slae_embedding' in cached and 'protein_atom37_coords' in cached:
-
-            #reconstruct protein atoms from atom37 coords (matches SLAE preprocessing)
             atom37_coords = cached['protein_atom37_coords']
             protein_pos, residue_idx_per_atom, atom_types = atom37_to_atoms(atom37_coords)
 
-            # recenter (inefficient kinda, will optimize this later, most likely need to center in precompute script)
+            # recenter (TODO: optimize by centering in precompute script)
             center = protein_pos.mean(dim=0, keepdim=True)
             protein_pos = protein_pos - center
 
             protein_x = F.one_hot(atom_types, num_classes=37).float()
-
-            # Create residue index from atom37 data
             protein_res_idx = residue_idx_per_atom
-
             num_asu_protein = protein_pos.size(0)
         else:
-            # Use original protein atoms from cache (no SLAE or old cache format)
+            # use original protein atoms from cache (no SLAE or old cache format)
             protein_pos = cached['protein_pos']
             protein_x = cached['protein_x']
             protein_res_idx = cached['protein_res_idx']
@@ -394,7 +384,7 @@ class ProteinWaterDataset(Dataset):
             protein_pos = torch.cat([protein_pos, mate_pos], dim=0)
             protein_x = torch.cat([protein_x, mate_x], dim=0)
             
-            #assign unique residue IDs to mates
+            # assign unique residue IDs to mates
             max_res_idx = protein_res_idx.max().item() if protein_res_idx.numel() > 0 else -1
             mate_res_idx = torch.arange(
                 max_res_idx + 1,
@@ -413,10 +403,10 @@ class ProteinWaterDataset(Dataset):
         data['protein'].residue_index = protein_res_idx
         data['protein'].num_nodes = protein_pos.size(0)
 
-        # Load SLAE embeddings if available (precomputed by scripts/precompute_slae_embeddings.py)
+        # load SLAE embeddings if available (precomputed by scripts/precompute_slae_embeddings.py)
         if 'protein_slae_embedding' in cached:
             slae_emb = cached['protein_slae_embedding']
-            # Handle mates: if mates were concatenated during preprocessing, embeddings include them
+            # handle mates: if mates were concatenated during preprocessing, embeddings include them
             if self.include_mates and 'mate_slae_embedding' in cached:
                 mate_emb = cached['mate_slae_embedding']
                 slae_emb = torch.cat([slae_emb, mate_emb], dim=0)
@@ -442,7 +432,7 @@ class ProteinWaterDataset(Dataset):
             data['protein', 'pp', 'protein'].edge_rbf = torch.empty((0, self.num_rbf), dtype=torch.float32)
             data['protein', 'pp', 'protein'].edge_vec = torch.empty((0, 3), dtype=torch.float32)
         
-        #store metadata
+        # store metadata
         data.pdb_id = entry['cache_key']
         data.num_asu_protein_atoms = num_asu_protein
         

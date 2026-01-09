@@ -1,4 +1,3 @@
-# encoder_adapters.py
 """
 Adapter modules to convert between different encoder output formats.
 """
@@ -32,7 +31,7 @@ class SLAEToGVPAdapter(nn.Module):
         super().__init__()
         s_dim, v_dim = out_dims
 
-        # Project scalars from SLAE dimension to target dimension
+        # project scalars from SLAE dimension to target dimension
         self.scalar_proj = nn.Sequential(
             nn.Linear(slae_dim, s_dim),
             nn.LayerNorm(s_dim),
@@ -53,8 +52,8 @@ class SLAEToGVPAdapter(nn.Module):
         """
         s = self.scalar_proj(embeddings)
 
-        # Initialize with zero vectors
-        # The encoder_to_flow GVP layer will generate non-zero vectors from scalars
+        # initialize with zero vectors
+        # the encoder_to_flow GVP layer will generate non-zero vectors from scalars
         V = torch.zeros(
             embeddings.size(0), self.v_dim, 3,
             device=embeddings.device,

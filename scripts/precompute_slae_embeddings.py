@@ -2,7 +2,7 @@
 Precompute SLAE embeddings for protein structures and save to cache files.
 
 This script:
-1. Loads a trained SLAE encoder from checkpoint
+1. Loads a trained SLAE encoder from a checkpoint
 2. Iterates over all cached protein structures
 3. For each structure:
    - Parses protein atoms from PDB
@@ -29,11 +29,9 @@ from tqdm import tqdm
 import yaml
 import numpy as np
 
-# Biotite for PDB parsing
 import biotite.structure as bts
 from biotite.structure.io.pdb import PDBFile, get_structure
 
-# SLAE imports
 from SLAE.model.encoder import ProteinEncoder
 from SLAE.features.graph_featurizer import ProteinGraphFeaturizer
 from SLAE.io.atom_tensor import atomarray_to_tensors, atom37_to_atoms
@@ -75,12 +73,11 @@ def parse_pdb_to_atom37(pdb_path, chain_filter=None):
         mask = np.isin(atoms.chain_id, np.array(chain_filter, dtype=atoms.chain_id.dtype))
         atoms = atoms[mask]
 
-    # Filter hydrogen and non-protein atoms
     atoms = atoms[atoms.element != "H"]
     protein_mask = bts.filter_canonical_amino_acids(atoms)
     protein_atoms = atoms[protein_mask]
 
-    # Convert to atom37 representation
+    #convert to atom37 representation
     coords, residue_type, chains, residue_id = atomarray_to_tensors(protein_atoms)
 
     return coords, residue_type, chains, residue_id, protein_atoms
@@ -101,12 +98,12 @@ def compute_slae_embeddings_batch(coords_list, residue_type_list, residue_id_lis
     Returns:
         embeddings_list: List of (N_atoms, 128) node embeddings tensors
     """
-    # Create Data objects for all structures
+    # create Data objects for all structures
     data_list = []
     num_atoms_list = []
 
     for coords, residue_type, residue_id in zip(coords_list, residue_type_list, residue_id_list):
-        # Create PyG Data object with atom37 coords (featurizer will convert to flat)
+        # create PyG Data object with atom37 coords (featurizer will convert to flat)
         data = Data(
             coords=coords,
             residue_type=residue_type,
@@ -114,23 +111,19 @@ def compute_slae_embeddings_batch(coords_list, residue_type_list, residue_id_lis
         )
         data_list.append(data)
 
-        # Track number of atoms for later splitting (after featurizer converts to flat)
+        # track number of atoms for later splitting (after featurizer converts to flat)
         pos, _, _ = atom37_to_atoms(coords)
         num_atoms_list.append(pos.size(0))
 
-    # Batch all structures together
     batch = Batch.from_data_list(data_list)
-
-    # Move to device and build graph
     batch = batch.to(device)
     batch = featurizer(batch)
 
-    # Run encoder on batched data
     with torch.no_grad():
         outputs = encoder(batch)
         embeddings = outputs['node_embedding']  # (total_atoms, 128)
 
-    # Split embeddings back into individual structures
+    # split embeddings back into individual structures
     embeddings_list = []
     start_idx = 0
     for num_atoms in num_atoms_list:
@@ -153,10 +146,7 @@ def prepare_cache_data(cache_path, pdb_path, chain_filter=None):
         Tuple of (cached_dict, coords, residue_type, chains, residue_id) or None if error
     """
     try:
-        # Load existing cache
         cached = torch.load(cache_path, weights_only=False)
-
-        # Parse PDB and get atom37 representation for ASU protein
         coords, residue_type, chains, residue_id, protein_atoms = parse_pdb_to_atom37(
             pdb_path, chain_filter=chain_filter
         )
@@ -182,19 +172,18 @@ def save_cache_with_embeddings(cache_path, cached, coords, residue_type, chains,
         embeddings: computed SLAE embeddings
     """
     try:
-        # Save atom37 data and embeddings for ASU
+        # save atom37 data and embeddings for ASU
         cached['protein_atom37_coords'] = coords
         cached['protein_residue_type'] = residue_type
         cached['protein_chains'] = chains
         cached['protein_residue_id'] = residue_id
         cached['protein_slae_embedding'] = embeddings
 
-        # Set mate embeddings to zero (will be improved later)
+        # set mate embeddings to zero (the residue index here becomes annoying wrt slae, will fix in future pr)
         if 'mate_pos' in cached and cached['mate_pos'].size(0) > 0:
             mate_pos = cached['mate_pos']
             cached['mate_slae_embedding'] = torch.zeros(mate_pos.size(0), 128)
 
-        # Save updated cache
         torch.save(cached, cache_path)
         return True
 
@@ -230,7 +219,7 @@ def main():
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Load SLAE encoder
+    # load SLAE encoder
     print("Loading SLAE encoder...")
     enc_config = load_yaml_dict(args.slae_config)
     encoder = ProteinEncoder(**enc_config).to(device).eval()
@@ -243,10 +232,10 @@ def main():
 
     print(f"Loaded encoder from {args.slae_ckpt}")
 
-    # Create featurizer
+    # create featurizer
     featurizer = ProteinGraphFeaturizer(radius=8.0, use_atom37=True)
 
-    # Find all cache files
+    # find all cache files
     processed_dir = Path(args.processed_dir)
     cache_files = sorted(processed_dir.glob("*.pt"))
     print(f"Found {len(cache_files)} cache files")
@@ -255,7 +244,7 @@ def main():
         cache_files = cache_files[:args.batch_limit]
         print(f"Processing first {args.batch_limit} files")
 
-    # Filter files that need processing
+    # filter files that need processing
     if not args.overwrite:
         to_process = []
         for cache_path in cache_files:
@@ -265,7 +254,7 @@ def main():
         cache_files = to_process
         print(f"{len(cache_files)} files need SLAE embeddings")
 
-    # Process cache files in batches
+    # process cache files in batches
     success_count = 0
     total_batches = (len(cache_files) + args.batch_size - 1) // args.batch_size
 
@@ -274,12 +263,10 @@ def main():
         desc="Computing embeddings",
         total=total_batches
     )):
-        # Prepare data for batch
         batch_data = []
         batch_info = []
 
         for cache_path in cache_batch:
-            # Parse cache key to get PDB info
             cache_key = cache_path.stem
             parts = cache_key.split('_')
             if len(parts) < 2:
@@ -289,13 +276,12 @@ def main():
             pdb_id = parts[0]
             chain_id = parts[-1] if len(parts) >= 3 else None
 
-            # Construct PDB path
+            # construct PDB path
             pdb_path = Path(args.base_pdb_dir) / pdb_id / f"{pdb_id}_final.pdb"
             if not pdb_path.exists():
                 print(f"  Warning: PDB file not found: {pdb_path}")
                 continue
 
-            # Prepare data
             chain_filter = [chain_id] if chain_id and chain_id != "final" else None
             result = prepare_cache_data(cache_path, str(pdb_path), chain_filter)
 
@@ -304,7 +290,7 @@ def main():
                 batch_data.append((coords, residue_type, residue_id))
                 batch_info.append((cache_path, cached, coords, residue_type, chains, residue_id))
 
-        # Compute embeddings for batch
+        # compute embeddings for batch
         if batch_data:
             try:
                 coords_list = [item[0] for item in batch_data]
@@ -315,7 +301,6 @@ def main():
                     coords_list, residue_type_list, residue_id_list, encoder, featurizer, device
                 )
 
-                # Save results
                 for (cache_path, cached, coords, residue_type, chains, residue_id), embeddings in zip(batch_info, embeddings_list):
                     success = save_cache_with_embeddings(
                         cache_path, cached, coords, residue_type, chains, residue_id, embeddings

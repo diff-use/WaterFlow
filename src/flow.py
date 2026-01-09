@@ -23,7 +23,7 @@ import numpy as np
 from torch import Tensor
 from tqdm.auto import tqdm
 
-from src.utils import condot_pair_hard_hungarian, compute_rmsd, cov_prec_at_threshold, rbf
+from src.utils import condot_pair_hard_hungarian, compute_rmsd, recall_precision, rbf
 from src.encoder import ProteinGVPEncoder
 from src.gvp import GVP, GVPMultiEdgeConv
 
@@ -745,7 +745,7 @@ class FlowMatcher:
         if return_trajectory:
             trajectory = [x.detach().cpu().numpy().copy()]
             rmsd_values = [compute_rmsd(x, x1_true)]
-            cov0, prec0 = cov_prec_at_threshold(x, x1_true, thresh=1.0)
+            cov0, prec0 = recall_precision(x, x1_true, thresh=1.0)
             cov_values, prec_values = [cov0], [prec0]
 
         # RK4 integration
@@ -774,7 +774,7 @@ class FlowMatcher:
             if return_trajectory:
                 trajectory.append(x.detach().cpu().numpy().copy())
                 rmsd_values.append(compute_rmsd(x, x1_true))
-                cov_i, prec_i = cov_prec_at_threshold(x, x1_true, thresh=1.0)
+                cov_i, prec_i = recall_precision(x, x1_true, thresh=1.0)
                 cov_values.append(cov_i)
                 prec_values.append(prec_i)
 

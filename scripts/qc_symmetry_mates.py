@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Quality control script for symmetry mates.
 

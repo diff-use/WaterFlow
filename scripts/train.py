@@ -102,19 +102,19 @@ def build_model(args, device):
         print("Building model with SLAE encoder (using cached embeddings)")
         print(f"  SLAE dim: {args.slae_dim}, Adapter output dims: {args.slae_adapter_dims or f'{args.hidden_s},{args.hidden_v}'}")
 
-        # Parse adapter dimensions
+        # parse adapter dimensions
         if args.slae_adapter_dims is not None:
             s_dim, v_dim = map(int, args.slae_adapter_dims.split(','))
         else:
             s_dim, v_dim = args.hidden_s, args.hidden_v
 
-        # Create adapter to convert SLAE embeddings to GVP format
+        # create adapter to convert SLAE embeddings to GVP format
         adapter = SLAEToGVPAdapter(
             slae_dim=args.slae_dim,
             out_dims=(s_dim, v_dim)
         ).to(device)
 
-        # Dummy encoder (not used, embeddings are cached)
+        # dummy encoder (not used, slae embeddings are cached), flowgvp needs an encoder object
         encoder = nn.Identity()
 
         model = FlowWaterGVP(
@@ -124,7 +124,7 @@ def build_model(args, device):
             layers=args.flow_layers,
             k_pw=args.k_pw,
             k_ww=args.k_ww,
-            freeze_encoder=True,  # Encoder is dummy, embeddings are precomputed
+            freeze_encoder=True,  # encoder is dummy, embeddings are precomputed
             encoder_type="slae",
             use_cached_slae=True,
             slae_adapter=adapter,
@@ -181,7 +181,7 @@ def run_eval_sampling(flow_matcher, val_loader, args, epoch, device, global_step
             return_trajectory=True,
         )
 
-        # Compute comprehensive metrics
+        # compute metrics
         final_metrics = compute_placement_metrics(
             pred=out['water_pred'],
             true=out['water_true'],
@@ -215,7 +215,7 @@ def run_eval_sampling(flow_matcher, val_loader, args, epoch, device, global_step
         plt.savefig(plot_path, dpi=150)
         plt.close()
 
-        # Save GIF if requested
+        # save GIF if requested
         if args.save_gifs and 'trajectory' in out:
             gif_path = run_dir / "gifs" / f"epoch{epoch}_sample{i}.gif"
             gif_path.parent.mkdir(parents=True, exist_ok=True)
@@ -259,11 +259,11 @@ def train_epoch(flow_matcher, train_loader, optimizer, args, epoch):
             use_self_conditioning=args.use_self_cond,
         )
 
-        # Print per-sample losses if batch loss exceeded 1000.0
+        # print per-sample losses if batch loss exceeded 100.0
         if metrics['per_sample_info'] is not None:
             per_sample_losses = metrics['per_sample_info']['losses'].cpu()
             num_graphs = metrics['per_sample_info']['num_graphs']
-            # Get PDB IDs for each sample in the batch
+
             if hasattr(batch, 'pdb_id'):
                 # pdb_id might be a list when batched
                 pdb_ids = batch.pdb_id if isinstance(batch.pdb_id, list) else [batch.pdb_id]
@@ -286,7 +286,7 @@ def train_epoch(flow_matcher, train_loader, optimizer, args, epoch):
             "train/iter_rmsd": metrics['rmsd'],
         }
 
-        # Log gradient norms every 10 steps for debugging
+        # log gradient norms every 10 steps for debugging
         if step % 10 == 0:
             total_grad_norm = 0.0
             for p in flow_matcher.model.parameters():
@@ -298,7 +298,7 @@ def train_epoch(flow_matcher, train_loader, optimizer, args, epoch):
         wandb.log(log_dict, step=global_step)
 
     n = len(train_loader)
-    # Return metrics and the last global_step for epoch-level logging
+
     final_global_step = (epoch - 1) * len(train_loader) + len(train_loader) - 1
     return {'train/epoch_loss': total_loss / n, 'train/epoch_rmsd': total_rmsd / n}, final_global_step
 
@@ -342,13 +342,12 @@ def check_slae_embeddings(loader, device):
     print(f"  SLAE embedding shape: {emb.shape}")
     print(f"  SLAE embedding stats: mean={emb.mean():.4f}, std={emb.std():.4f}, min={emb.min():.4f}, max={emb.max():.4f}")
 
-    # Check if embeddings are all zeros or constant
+    # check if embeddings are all zeros or constant
     if emb.std() < 1e-6:
         print("  WARNING: SLAE embeddings appear to be constant/zero!")
         return False
 
     return True
-
 
 def save_checkpoint(model, optimizer, scheduler, epoch, path, best=False):
     """Save model checkpoint."""
@@ -366,11 +365,9 @@ def main():
     args = parse_args()
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
-    # Generate or use provided run name
     if args.run_name is None:
         args.run_name = generate_run_name(args)
 
-    # Create run directory structure
     run_dir = Path(args.save_dir) / args.run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "checkpoints").mkdir(exist_ok=True)
@@ -382,7 +379,6 @@ def main():
     print(f"Run directory: {run_dir}")
     print(f"{'='*60}\n")
 
-    # Save run configuration
     import json
     config_file = run_dir / "config.json"
     with open(config_file, 'w') as f:
@@ -407,15 +403,15 @@ def main():
         duplicate_single_sample=1,  # Don't duplicate for validation
     )
 
-    # Sample fixed eval indices (same proteins evaluated every epoch)
-    np.random.seed(42)  # Fixed seed for reproducibility
+    # sample fixed eval indices (same proteins evaluated every epoch)
+    np.random.seed(42)  
     eval_indices = np.random.choice(
         len(val_loader.dataset),
         min(args.n_eval_samples, len(val_loader.dataset)),
         replace=False
     ).tolist()
 
-    # Save eval indices for reproducibility
+    # save eval indices for reproducibility
     eval_indices_file = run_dir / "eval_indices.txt"
     with open(eval_indices_file, 'w') as f:
         f.write("# Fixed evaluation sample indices\n")
@@ -426,7 +422,6 @@ def main():
     print(f"Fixed eval indices saved to: {eval_indices_file}")
     print(f"Evaluating on {len(eval_indices)} proteins at each eval epoch\n")
 
-    # wandb init
     wandb.init(
         project=args.wandb_project,
         dir=args.wandb_dir,
@@ -434,16 +429,13 @@ def main():
         config=vars(args),
     )
 
-    # model
     model = build_model(args, device)
-
-    # Print model statistics
     trainable_params, total_params = count_parameters(model)
     print(f"\nModel statistics:")
     print(f"  Trainable parameters: {trainable_params:,}")
     print(f"  Total parameters: {total_params:,}")
 
-    # Check SLAE embeddings if using SLAE mode
+    # check SLAE embeddings if using SLAE mode
     if args.use_slae:
         embeddings_ok = check_slae_embeddings(train_loader, device)
         if not embeddings_ok:
@@ -454,12 +446,12 @@ def main():
             print(f"  --processed_dir {args.processed_dir}")
             return
 
-        # Test forward pass to check if adapter is working
+        # test forward pass to check if adapter is working
         print("\nTesting forward pass with SLAE...")
         model.eval()
         batch = next(iter(train_loader)).to(device)
         with torch.no_grad():
-            # Determine number of graphs in batch
+            # determine number of graphs in batch
             num_graphs = int(batch['protein'].batch.max().item()) + 1
             t = torch.zeros(num_graphs, device=device)
             try:
@@ -472,8 +464,6 @@ def main():
                 print(f"  ERROR in forward pass: {e}")
                 return
         model.train()
-
-    # wandb.watch(model, log="none")  # Uncomment to track architecture only
     
     # flow matcher
     flow_matcher = FlowMatcher(
@@ -495,6 +485,7 @@ def main():
     best_val_loss = float('inf')
 
     for epoch in range(1, args.epochs + 1):
+        
         # train
         train_metrics, global_step = train_epoch(flow_matcher, train_loader, optimizer, args, epoch)
         wandb.log(train_metrics, step=global_step)
