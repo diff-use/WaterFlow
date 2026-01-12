@@ -344,7 +344,7 @@ def create_trajectory_gif(
         plt.close(fig)
 
     if frames:
-        last_frame_copies = [frames[-1]] * 10
+        last_frame_copies = [frames[-1]] * 30
         all_frames = frames + last_frame_copies
         all_frames[0].save(
             save_path,
@@ -371,7 +371,7 @@ def save_protein_plot(
     P = P - P.mean(axis=0)
     Q = Q - Q.mean(axis=0)
 
-    # Kabsch alignment
+    # kabsch alignment
     H = np.dot(P.T, Q)
     U, S, Vt = np.linalg.svd(H)
     R = np.dot(Vt.T, U.T)

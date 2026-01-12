@@ -21,7 +21,7 @@ from src.dataset import get_dataloader
 from src.encoder import ProteinGVPEncoder, load_encoder_from_checkpoint
 from src.encoder_adapters import SLAEToGVPAdapter
 from src.flow import FlowWaterGVP, FlowMatcher
-from src.utils import plot_3d_frame, compute_placement_metrics, create_trajectory_gif
+from src.utils import plot_3d_frame, compute_placement_metrics, create_trajectory_gif, compute_rmsd
 from datetime import datetime
 
 
@@ -95,7 +95,7 @@ def parse_args():
     return p.parse_args()
 
 
-def build_model(args, device):
+def build_model(args, device, node_scalar_in=16):
     """Build encoder and flow model."""
     if args.use_slae:
         # SLAE mode: use cached embeddings with adapter
@@ -135,11 +135,14 @@ def build_model(args, device):
         print("Building model with GVP encoder")
         if args.encoder_ckpt:
             encoder, enc_args = load_encoder_from_checkpoint(
-                args.encoder_ckpt, device=device, freeze=args.freeze_encoder
+                args.encoder_ckpt,
+                node_scalar_in=node_scalar_in,
+                device=device,
+                freeze=args.freeze_encoder,
             )
         else:
             encoder = ProteinGVPEncoder(
-                node_scalar_in=16,
+                node_scalar_in=node_scalar_in,
                 hidden_dims=(args.hidden_s, args.hidden_v),
                 edge_scalar_in=16,
             ).to(device)
@@ -179,7 +182,7 @@ def run_eval_sampling(flow_matcher, val_loader, args, epoch, device, global_step
             use_sc=args.use_self_cond,
             device=device,
             return_trajectory=True,
-        )
+        )[0]  # rk4_integrate returns a list, get the single result
 
         # compute metrics
         final_metrics = compute_placement_metrics(
@@ -188,7 +191,7 @@ def run_eval_sampling(flow_matcher, val_loader, args, epoch, device, global_step
             threshold=1.0
         )
 
-        final_rmsd = out['rmsd'][-1]
+        final_rmsd = compute_rmsd(out['water_pred'], out['water_true'])
 
         results.append({
             'rmsd': final_rmsd,
@@ -268,7 +271,7 @@ def train_epoch(flow_matcher, train_loader, optimizer, args, epoch):
                 # pdb_id might be a list when batched
                 pdb_ids = batch.pdb_id if isinstance(batch.pdb_id, list) else [batch.pdb_id]
                 print(f"\n{'='*60}")
-                print(f"WARNING: Batch loss {metrics['loss']:.2f} exceeded 1000.0!")
+                print(f"WARNING: Batch loss {metrics['loss']:.2f} exceeded 100.0!")
                 print(f"Per-sample losses ({num_graphs} samples):")
                 for i in range(num_graphs):
                     pdb_id = pdb_ids[i] if i < len(pdb_ids) else 'unknown'
@@ -281,21 +284,10 @@ def train_epoch(flow_matcher, train_loader, optimizer, args, epoch):
         pbar.set_postfix(loss=f"{metrics['loss']:.4f}", rmsd=f"{metrics['rmsd']:.2f}")
 
         global_step = (epoch - 1) * len(train_loader) + step
-        log_dict = {
+        wandb.log({
             "train/iter_loss": metrics['loss'],
             "train/iter_rmsd": metrics['rmsd'],
-        }
-
-        # log gradient norms every 10 steps for debugging
-        if step % 10 == 0:
-            total_grad_norm = 0.0
-            for p in flow_matcher.model.parameters():
-                if p.grad is not None:
-                    total_grad_norm += p.grad.data.norm(2).item() ** 2
-            total_grad_norm = total_grad_norm ** 0.5
-            log_dict["train/grad_norm"] = total_grad_norm
-
-        wandb.log(log_dict, step=global_step)
+        }, step=global_step)
 
     n = len(train_loader)
 
@@ -429,7 +421,12 @@ def main():
         config=vars(args),
     )
 
-    model = build_model(args, device)
+    # detect input dimension from data (16 for element_onehot, 37 for atom37 format)
+    sample_data = train_loader.dataset[0]
+    node_scalar_in = sample_data['protein'].x.shape[-1]
+    print(f"Detected protein input dimension: {node_scalar_in}")
+
+    model = build_model(args, device, node_scalar_in=node_scalar_in)
     trainable_params, total_params = count_parameters(model)
     print(f"\nModel statistics:")
     print(f"  Trainable parameters: {trainable_params:,}")

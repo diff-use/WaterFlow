@@ -11,9 +11,10 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from torch_geometric.nn import knn
-from torch_geometric.data import HeteroData, Data
+from torch_geometric.data import HeteroData, Data, Batch
+from typing import List, Union
 
-from torch_scatter import scatter_mean
+from torch_scatter import scatter_mean, scatter_add
 import e3nn
 from e3nn.math import soft_one_hot_linspace
 
@@ -516,6 +517,34 @@ class FlowMatcher:
         pos = data['protein'].pos
         return float(pos.std().item())
 
+    @staticmethod
+    def compute_sigma_per_graph(data: HeteroData, device: torch.device) -> torch.Tensor:
+        """
+        Compute sigma (std of protein coordinates) per graph in a batch.
+
+        Returns:
+            sigma: (num_graphs,) tensor of sigma values per graph
+        """
+        pos = data['protein'].pos  # (N_total, 3)
+        batch_p = data['protein'].batch  # (N_total,)
+        num_graphs = int(batch_p.max().item()) + 1
+
+        # Compute per-graph mean
+        mean_pos = scatter_mean(pos, batch_p, dim=0)  # (num_graphs, 3)
+
+        # Compute variance: E[(x - mu)^2]
+        centered = pos - mean_pos[batch_p]  # (N_total, 3)
+        sq_diff = (centered ** 2).sum(dim=-1)  # (N_total,)
+
+        # Count atoms per graph
+        counts = scatter_add(torch.ones(pos.size(0), device=device), batch_p, dim=0)
+
+        # Variance per graph
+        var_per_graph = scatter_add(sq_diff, batch_p, dim=0) / (counts * 3)  # divide by 3 for xyz
+        sigma = torch.sqrt(var_per_graph + 1e-8)  # (num_graphs,)
+
+        return sigma
+
     def training_step(
         self,
         batch: HeteroData,
@@ -566,12 +595,6 @@ class FlowMatcher:
         # forward pass
         batch['water'].pos = x_t
         v_pred = self.model(batch, t, sc=sc)
-
-        if torch.isnan(v_pred).any():
-            print(f"NaN in v_pred! sigma={sigma}, t_range=[{t.min():.3f}, {t.max():.3f}]")
-            print(f"  x_t has NaN: {torch.isnan(x_t).any()}")
-            print(f"  protein.pos has NaN: {torch.isnan(batch['protein'].pos).any()}")
-            return {'loss': 0.0, 'rmsd': float('nan'), 'sigma': sigma}
 
         # target velocity
         v_target = x1_star - x0_star
@@ -651,175 +674,234 @@ class FlowMatcher:
     @torch.no_grad()
     def euler_integrate(
         self,
-        graph: HeteroData,
+        graphs: Union[HeteroData, List[HeteroData]],
         num_steps: int = 100,
         use_sc: bool = True,
         sc_ema_alpha: float = 0.2,
         device: str = "cuda",
-    ) -> np.ndarray:
+    ) -> List[np.ndarray]:
         """
         Euler integration from noise to final positions.
-        
+
+        Args:
+            graphs: Single HeteroData or list of HeteroData graphs to process
+            num_steps: Number of integration steps
+            use_sc: Whether to use self-conditioning
+            sc_ema_alpha: EMA decay for self-conditioning
+            device: Device to run on
+
         Returns:
-            water_pred: (Nw, 3) final predicted water positions
+            List of (Nw_i, 3) predicted water positions for each input graph
         """
         self.model.eval()
         device = torch.device(device if torch.cuda.is_available() else "cpu")
 
-        g = copy.deepcopy(graph).to(device)
+        # Handle single graph input
+        if isinstance(graphs, HeteroData):
+            graphs = [graphs]
 
-        sigma = self.compute_sigma(g)
-        x = torch.randn(g['water'].num_nodes, 3, device=device) * sigma
+        # Batch graphs together
+        g = Batch.from_data_list([copy.deepcopy(graph) for graph in graphs]).to(device)
+
+        batch_w = g['water'].batch
+        num_graphs = int(batch_w.max().item()) + 1
+
+        # Compute per-graph sigma and scale noise accordingly
+        sigma_per_graph = self.compute_sigma_per_graph(g, device)  # (num_graphs,)
+        sigma_per_water = sigma_per_graph[batch_w]  # (N_water_total,)
+
+        x = torch.randn(g['water'].num_nodes, 3, device=device) * sigma_per_water.unsqueeze(-1)
         x1_pred_ema = x.clone()
-
-        # ensure batch tensors exist
-        if 'batch' not in g['protein']:
-            g['protein'].batch = torch.zeros(g['protein'].num_nodes, dtype=torch.long, device=device)
-        if 'batch' not in g['water']:
-            g['water'].batch = torch.zeros(g['water'].num_nodes, dtype=torch.long, device=device)
 
         ts = torch.linspace(0, 1, num_steps, device=device)
         dt = ts[1] - ts[0]
 
         for i in range(num_steps - 1):
-            t = ts[i]
+            t_scalar = ts[i]
+            t = t_scalar.expand(num_graphs)  # (num_graphs,) all same value
+
             g['water'].pos = x
             sc = {'x1_pred': x1_pred_ema} if use_sc else None
-            v = self.model(g, t.view(1), sc=sc)
+            v = self.model(g, t, sc=sc)
             x = x + dt * v
 
             if use_sc:
-                t_next = ts[i + 1]
+                t_next_scalar = ts[i + 1]
+                t_next = t_next_scalar.expand(num_graphs)
                 g['water'].pos = x
-                v_next = self.model(g, t_next.view(1), sc={'x1_pred': x1_pred_ema})
-                x1_pred_now = x + (1.0 - t_next) * v_next
+                v_next = self.model(g, t_next, sc={'x1_pred': x1_pred_ema})
+                x1_pred_now = x + (1.0 - t_next_scalar) * v_next
                 x1_pred_ema = (1.0 - sc_ema_alpha) * x1_pred_ema + sc_ema_alpha * x1_pred_now
 
-        return x.detach().cpu().numpy()
+        # Split results by graph
+        x_cpu = x.detach().cpu()
+        results = []
+        for i in range(num_graphs):
+            mask = batch_w.cpu() == i
+            results.append(x_cpu[mask].numpy())
+
+        return results
 
     @torch.no_grad()
     def rk4_integrate(
         self,
-        graph: HeteroData,
+        graphs: Union[HeteroData, List[HeteroData]],
         num_steps: int = 500,
         use_sc: bool = True,
         sc_ema_alpha: float = 0.2,
         device: str = "cuda",
         return_trajectory: bool = True,
-    ) -> Dict[str, np.ndarray]:
+    ) -> List[Dict[str, np.ndarray]]:
         """
         RK4 integration from noise to final positions.
-        
+
+        Args:
+            graphs: Single HeteroData or list of HeteroData graphs to process
+            num_steps: Number of integration steps
+            use_sc: Whether to use self-conditioning
+            sc_ema_alpha: EMA decay for self-conditioning
+            device: Device to run on
+            return_trajectory: Whether to return full trajectory and metrics
+
         Returns:
-            dict with keys:
+            List of dicts, one per input graph, each with keys:
                 'protein_pos': (Np, 3) - includes both ASU and mate atoms
                 'water_true': (Nw, 3)
                 'water_pred': (Nw, 3) final prediction
                 'trajectory': list of (Nw, 3) at each step (if return_trajectory=True)
-                'rmsd': list of RMSD values (if return_trajectory=True)
-                'coverage': list of coverage values (if return_trajectory=True)
-                'precision': list of precision values (if return_trajectory=True)
         """
         self.model.eval()
         device = torch.device(device if torch.cuda.is_available() else "cpu")
 
-        g = copy.deepcopy(graph).to(device)
+        # Handle single graph input
+        if isinstance(graphs, HeteroData):
+            graphs = [graphs]
 
-        protein_pos = g['protein'].pos.detach().cpu().numpy()
+        # Store original pdb_ids before batching
+        pdb_ids = [getattr(g, 'pdb_id', None) for g in graphs]
+
+        # Batch graphs together
+        g = Batch.from_data_list([copy.deepcopy(graph) for graph in graphs]).to(device)
+
+        batch_p = g['protein'].batch
+        batch_w = g['water'].batch
+        num_graphs = int(batch_w.max().item()) + 1
+
+        # Store ground truth before modifying
         x1_true = g['water'].pos.clone()
-        water_true = x1_true.detach().cpu().numpy()
 
-        sigma = self.compute_sigma(g)
-        x = torch.randn_like(x1_true) * sigma
+        # Compute per-graph sigma and scale noise accordingly
+        sigma_per_graph = self.compute_sigma_per_graph(g, device)  # (num_graphs,)
+        sigma_per_water = sigma_per_graph[batch_w]  # (N_water_total,)
+
+        x = torch.randn_like(x1_true) * sigma_per_water.unsqueeze(-1)
         x1_pred_ema = x.clone()
-
-        # ensure batch tensors exist
-        if 'batch' not in g['protein']:
-            g['protein'].batch = torch.zeros(g['protein'].num_nodes, dtype=torch.long, device=device)
-        if 'batch' not in g['water']:
-            g['water'].batch = torch.zeros(g['water'].num_nodes, dtype=torch.long, device=device)
 
         ts = torch.linspace(0, 1, num_steps, device=device)
         dt = ts[1] - ts[0]
 
         if return_trajectory:
-            trajectory = [x.detach().cpu().numpy().copy()]
-            rmsd_values = [compute_rmsd(x, x1_true)]
-            cov0, prec0 = recall_precision(x, x1_true, thresh=1.0)
-            cov_values, prec_values = [cov0], [prec0]
+            # Store trajectory per-graph
+            trajectories = [[] for _ in range(num_graphs)]
+            x_cpu = x.detach().cpu()
+            batch_w_cpu = batch_w.cpu()
+            for i in range(num_graphs):
+                mask = batch_w_cpu == i
+                trajectories[i].append(x_cpu[mask].numpy().copy())
 
         # RK4 integration
-        for i in tqdm(range(num_steps - 1), desc="RK4 integration", leave=False):
-            t0 = ts[i]
+        for step in tqdm(range(num_steps - 1), desc="RK4 integration", leave=False):
+            t0_scalar = ts[step]
+            t0 = t0_scalar.expand(num_graphs)  # (num_graphs,) all same value
 
-            def f(xpos, t_scalar):
+            def f(xpos, t_tensor):
                 g['water'].pos = xpos
                 sc = {'x1_pred': x1_pred_ema} if use_sc else None
-                return self.model(g, t_scalar.view(1), sc=sc)
+                return self.model(g, t_tensor, sc=sc)
 
             k1 = f(x, t0)
-            k2 = f(x + 0.5 * dt * k1, t0 + 0.5 * dt)
-            k3 = f(x + 0.5 * dt * k2, t0 + 0.5 * dt)
-            k4 = f(x + dt * k3, t0 + dt)
+            k2 = f(x + 0.5 * dt * k1, (t0_scalar + 0.5 * dt).expand(num_graphs))
+            k3 = f(x + 0.5 * dt * k2, (t0_scalar + 0.5 * dt).expand(num_graphs))
+            k4 = f(x + dt * k3, (t0_scalar + dt).expand(num_graphs))
 
             x = x + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
 
             if use_sc:
-                t1 = ts[i + 1]
+                t1_scalar = ts[step + 1]
+                t1 = t1_scalar.expand(num_graphs)
                 g['water'].pos = x
-                v_next = self.model(g, t1.view(1), sc={'x1_pred': x1_pred_ema})
-                x1_pred_now = x + (1.0 - t1) * v_next
+                v_next = self.model(g, t1, sc={'x1_pred': x1_pred_ema})
+                x1_pred_now = x + (1.0 - t1_scalar) * v_next
                 x1_pred_ema = (1.0 - sc_ema_alpha) * x1_pred_ema + sc_ema_alpha * x1_pred_now
 
             if return_trajectory:
-                trajectory.append(x.detach().cpu().numpy().copy())
-                rmsd_values.append(compute_rmsd(x, x1_true))
-                cov_i, prec_i = recall_precision(x, x1_true, thresh=1.0)
-                cov_values.append(cov_i)
-                prec_values.append(prec_i)
+                x_cpu = x.detach().cpu()
+                for i in range(num_graphs):
+                    mask = batch_w_cpu == i
+                    trajectories[i].append(x_cpu[mask].numpy().copy())
 
-        result = {
-            'protein_pos': protein_pos,
-            'water_true': water_true,
-            'water_pred': x.detach().cpu().numpy(),
-        }
+        # Split results by graph
+        x_cpu = x.detach().cpu()
+        protein_pos_cpu = g['protein'].pos.detach().cpu()
+        x1_true_cpu = x1_true.detach().cpu()
+        batch_w_cpu = batch_w.cpu()
+        batch_p_cpu = batch_p.cpu()
 
-        if return_trajectory:
-            result.update({
-                'trajectory': trajectory,
-                'rmsd': rmsd_values,
-                'coverage': cov_values,
-                'precision': prec_values,
-            })
+        results = []
+        for i in range(num_graphs):
+            mask_w = batch_w_cpu == i
+            mask_p = batch_p_cpu == i
 
-        return result
+            result = {
+                'protein_pos': protein_pos_cpu[mask_p].numpy(),
+                'water_true': x1_true_cpu[mask_w].numpy(),
+                'water_pred': x_cpu[mask_w].numpy(),
+                'pdb_id': pdb_ids[i],
+            }
+
+            if return_trajectory:
+                result['trajectory'] = trajectories[i]
+
+            results.append(result)
+
+        return results
 
     def sample(
         self,
-        graph: HeteroData,
+        graphs: Union[HeteroData, List[HeteroData]],
         num_steps: int = 100,
         method: str = "euler",
         use_sc: bool = True,
         device: str = "cuda",
-    ) -> np.ndarray:
+    ) -> Union[np.ndarray, List[np.ndarray]]:
         """
-        Sample water positions for a single graph.
-        
+        Sample water positions for one or more graphs.
+
         Args:
-            graph: HeteroData with 'protein' and 'water' node types
+            graphs: Single HeteroData or list of HeteroData graphs
             num_steps: Number of integration steps
             method: 'euler' or 'rk4'
             use_sc: Whether to use self-conditioning
             device: Device to run on
-            
+
         Returns:
-            (Nw, 3) predicted water positions
+            If single graph input: (Nw, 3) predicted water positions
+            If list input: List of (Nw_i, 3) predicted water positions
         """
+        single_input = isinstance(graphs, HeteroData)
+
         if method == "euler":
-            return self.euler_integrate(graph, num_steps, use_sc, device=device)
+            results = self.euler_integrate(graphs, num_steps, use_sc, device=device)
         elif method == "rk4":
-            result = self.rk4_integrate(
-                graph, num_steps, use_sc, device=device, return_trajectory=False
+            results = self.rk4_integrate(
+                graphs, num_steps, use_sc, device=device, return_trajectory=False
             )
-            return result['water_pred']
+            results = [r['water_pred'] for r in results]
+        else:
+            raise ValueError(f"Unknown method: {method}")
+
+        # Return single array if single graph was provided
+        if single_input:
+            return results[0]
+        return results
         
