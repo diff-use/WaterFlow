@@ -24,33 +24,9 @@ import numpy as np
 from torch import Tensor
 from tqdm.auto import tqdm
 
-from src.utils import condot_pair_hard_hungarian, compute_rmsd, recall_precision, rbf
+from src.utils import ot_coupling, compute_rmsd, recall_precision, rbf
 from src.encoder import ProteinGVPEncoder
 from src.gvp import GVP, GVPMultiEdgeConv
-
-
-class SinusoidalTimeEmbedding(nn.Module):
-    """Sinusoidal positional encoding for timestep t in [0, 1]."""
-
-    def __init__(self, dim, max_period=10000):
-        super().__init__()
-        self.dim = dim
-        self.max_period = max_period
-
-    def forward(self, t):
-        """
-        Args:
-            t: (B,) tensor of timesteps in [0, 1]
-        Returns:
-            (B, dim) tensor of sinusoidal embeddings
-        """
-        half_dim = self.dim // 2
-        freqs = torch.exp(
-            -math.log(self.max_period) * torch.arange(half_dim, device=t.device, dtype=torch.float32) / half_dim
-        )
-        args = t[:, None] * freqs[None, :]
-        embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
-        return embedding
 
 def build_knn_edges(src_pos: torch.Tensor,
                     dst_pos: torch.Tensor,
@@ -103,9 +79,9 @@ def make_protein_encoder_data(
         disp = pos[s_idx] - pos[d_idx]
         dist = torch.clamp(disp.norm(dim=-1, keepdim=True), 1e-8)
         r = dist.squeeze(-1)
-        # FIX: use correct parameter names for rbf()
         edge_rbf = rbf(r, num_gaussians=num_rbf, cutoff=rbf_dmax)
         edge_unit_vec = (disp / dist)
+
     else:
         edge_rbf = torch.empty(0, num_rbf, device=device)
         edge_unit_vec = torch.empty(0, 3, device=device)
@@ -374,7 +350,7 @@ class FlowWaterGVP(nn.Module):
             nn.LayerNorm(s_h),
         )
 
-        # water vector field head: (s,v) -> (0,1) => single vector channel
+        # water vector field head: (s,v) -> (0,1) -> single vector channel
         self.vfield_head = GVP(
             in_dims=hidden_dims,
             out_dims=(0, 1),
@@ -395,9 +371,9 @@ class FlowWaterGVP(nn.Module):
         """
         device = data['protein'].pos.device
 
-        # Get protein embeddings (conditional on encoder type)
+        # get protein embeddings (conditional on encoder type)
         if self.encoder_type == "gvp":
-            # Original GVP encoder path
+            # original GVP encoder path
             enc_data = make_protein_encoder_data(
                 data,
                 num_rbf=self.encoder.edge_scalar_in,
@@ -412,18 +388,10 @@ class FlowWaterGVP(nn.Module):
             s_p_latent, v_p_latent = self.encoder_to_flow((s_all, v_all))
 
         elif self.encoder_type == "slae":
-            # SLAE encoder path (uses precomputed embeddings)
             if self.use_cached_slae and 'slae_embedding' in data['protein']:
-                # Use precomputed embeddings (fast path)
                 embeddings = data['protein'].slae_embedding
-            else:
-                # On-the-fly SLAE encoding not implemented yet
-                raise NotImplementedError(
-                    "On-the-fly SLAE encoding not yet implemented. "
-                    "Please precompute embeddings using scripts/precompute_slae_embeddings.py"
-                )
 
-            # Adapter: 128-dim embeddings -> (s, V) tuple
+            # adapter: 128-dim embeddings -> (s, V) tuple
             s_all, v_all = self.slae_adapter(embeddings)
 
             # bridge adapter output -> flow dims
@@ -527,21 +495,12 @@ class FlowMatcher:
         """
         pos = data['protein'].pos  # (N_total, 3)
         batch_p = data['protein'].batch  # (N_total,)
-        num_graphs = int(batch_p.max().item()) + 1
 
-        # Compute per-graph mean
+        # Var(X) = E[X^2] - E[X]^2
         mean_pos = scatter_mean(pos, batch_p, dim=0)  # (num_graphs, 3)
-
-        # Compute variance: E[(x - mu)^2]
-        centered = pos - mean_pos[batch_p]  # (N_total, 3)
-        sq_diff = (centered ** 2).sum(dim=-1)  # (N_total,)
-
-        # Count atoms per graph
-        counts = scatter_add(torch.ones(pos.size(0), device=device), batch_p, dim=0)
-
-        # Variance per graph
-        var_per_graph = scatter_add(sq_diff, batch_p, dim=0) / (counts * 3)  # divide by 3 for xyz
-        sigma = torch.sqrt(var_per_graph + 1e-8)  # (num_graphs,)
+        mean_sq = scatter_mean(pos ** 2, batch_p, dim=0)  # (num_graphs, 3)
+        var_per_dim = mean_sq - mean_pos ** 2  # (num_graphs, 3)
+        sigma = torch.sqrt(var_per_dim.mean(dim=-1).clamp(min=1e-8))  # (num_graphs,)
 
         return sigma
 
@@ -568,7 +527,7 @@ class FlowMatcher:
         sigma = self.compute_sigma(batch)
 
         x0 = torch.randn_like(x1) * sigma
-        x0_star, x1_star = condot_pair_hard_hungarian(x1=x1, batch=batch_w, x0=x0)
+        x0_star, x1_star = ot_coupling(x1=x1, batch=batch_w, x0=x0)
 
         t = torch.rand(num_graphs, device=device)
         t_per_atom = t[batch_w].unsqueeze(-1)
@@ -604,13 +563,13 @@ class FlowMatcher:
         per_atom_mse = (v_pred - v_target).pow(2).mean(dim=-1, keepdim=True)
         loss = (w * per_atom_mse).sum() / w.sum()
 
-        # Check for high loss and compute per-sample losses for debugging
+        # check for high loss and compute per-sample losses for debugging
         per_sample_info = None
         if loss.item() > 100.0:
             with torch.no_grad():
                 from torch_scatter import scatter_add
                 weighted_mse = (w * per_atom_mse).squeeze(-1)
-                # Compute per-graph loss: sum(weighted_mse) / sum(w) for each graph
+                # compute per-graph loss: sum(weighted_mse) / sum(w) for each graph
                 numerator = scatter_add(weighted_mse, batch_w, dim=0)
                 denominator = scatter_add(w.squeeze(-1), batch_w, dim=0)
                 per_sample_loss = numerator / (denominator + 1e-8)
@@ -629,7 +588,7 @@ class FlowMatcher:
         # training RMSD
         with torch.no_grad():
             x1_hat = x_t + (1.0 - t_per_atom) * v_pred
-            # rmsd = compute_rmsd(x1_hat, x1_star)
+            # rmsd = compute_rmsd(x1_hat, x1_star) 
 
             # on-gpu version of rmsd
             diff2 = ((x1_hat - x1_star) ** 2).sum(-1)  # (Nw,)
@@ -650,7 +609,7 @@ class FlowMatcher:
 
         sigma = self.compute_sigma(batch)
         x0 = torch.randn_like(x1) * sigma
-        x0_star, x1_star = condot_pair_hard_hungarian(x1=x1, batch=batch_w, x0=x0)
+        x0_star, x1_star = ot_coupling(x1=x1, batch=batch_w, x0=x0)
 
         t = torch.rand(num_graphs, device=device)
         t_per_atom = t[batch_w].unsqueeze(-1)
@@ -664,7 +623,7 @@ class FlowMatcher:
         per_atom_mse = (v_pred - v_target).pow(2).mean(dim=-1, keepdim=True)
         loss = (w * per_atom_mse).sum() / w.sum()
 
-        # Fast GPU RMSD (same as training)
+        # GPU RMSD
         x1_hat = x_t + (1.0 - t_per_atom) * v_pred
         diff2 = ((x1_hat - x1_star) ** 2).sum(-1)  # (Nw,)
         rmsd = torch.sqrt(scatter_mean(diff2, batch_w, dim=0)).mean().item()
@@ -696,17 +655,17 @@ class FlowMatcher:
         self.model.eval()
         device = torch.device(device if torch.cuda.is_available() else "cpu")
 
-        # Handle single graph input
+        # handle single graph input
         if isinstance(graphs, HeteroData):
             graphs = [graphs]
 
-        # Batch graphs together
+        # batch graphs together
         g = Batch.from_data_list([copy.deepcopy(graph) for graph in graphs]).to(device)
 
         batch_w = g['water'].batch
         num_graphs = int(batch_w.max().item()) + 1
 
-        # Compute per-graph sigma and scale noise accordingly
+        # compute per-graph sigma and scale noise accordingly
         sigma_per_graph = self.compute_sigma_per_graph(g, device)  # (num_graphs,)
         sigma_per_water = sigma_per_graph[batch_w]  # (N_water_total,)
 
@@ -733,7 +692,7 @@ class FlowMatcher:
                 x1_pred_now = x + (1.0 - t_next_scalar) * v_next
                 x1_pred_ema = (1.0 - sc_ema_alpha) * x1_pred_ema + sc_ema_alpha * x1_pred_now
 
-        # Split results by graph
+        # split results by graph
         x_cpu = x.detach().cpu()
         results = []
         for i in range(num_graphs):
@@ -773,24 +732,24 @@ class FlowMatcher:
         self.model.eval()
         device = torch.device(device if torch.cuda.is_available() else "cpu")
 
-        # Handle single graph input
+        # handle single graph input
         if isinstance(graphs, HeteroData):
             graphs = [graphs]
 
-        # Store original pdb_ids before batching
+        # store original pdb_ids before batching
         pdb_ids = [getattr(g, 'pdb_id', None) for g in graphs]
 
-        # Batch graphs together
+        # batch graphs together
         g = Batch.from_data_list([copy.deepcopy(graph) for graph in graphs]).to(device)
 
         batch_p = g['protein'].batch
         batch_w = g['water'].batch
         num_graphs = int(batch_w.max().item()) + 1
 
-        # Store ground truth before modifying
+        # store ground truth before modifying
         x1_true = g['water'].pos.clone()
 
-        # Compute per-graph sigma and scale noise accordingly
+        # compute per-graph sigma and scale noise accordingly
         sigma_per_graph = self.compute_sigma_per_graph(g, device)  # (num_graphs,)
         sigma_per_water = sigma_per_graph[batch_w]  # (N_water_total,)
 
@@ -801,7 +760,7 @@ class FlowMatcher:
         dt = ts[1] - ts[0]
 
         if return_trajectory:
-            # Store trajectory per-graph
+            # store trajectory per-graph
             trajectories = [[] for _ in range(num_graphs)]
             x_cpu = x.detach().cpu()
             batch_w_cpu = batch_w.cpu()
@@ -809,7 +768,7 @@ class FlowMatcher:
                 mask = batch_w_cpu == i
                 trajectories[i].append(x_cpu[mask].numpy().copy())
 
-        # RK4 integration
+        # rK4 integration
         for step in tqdm(range(num_steps - 1), desc="RK4 integration", leave=False):
             t0_scalar = ts[step]
             t0 = t0_scalar.expand(num_graphs)  # (num_graphs,) all same value
@@ -840,7 +799,7 @@ class FlowMatcher:
                     mask = batch_w_cpu == i
                     trajectories[i].append(x_cpu[mask].numpy().copy())
 
-        # Split results by graph
+        # split results by graph
         x_cpu = x.detach().cpu()
         protein_pos_cpu = g['protein'].pos.detach().cpu()
         x1_true_cpu = x1_true.detach().cpu()
@@ -900,7 +859,7 @@ class FlowMatcher:
         else:
             raise ValueError(f"Unknown method: {method}")
 
-        # Return single array if single graph was provided
+        # return single array if single graph was provided
         if single_input:
             return results[0]
         return results

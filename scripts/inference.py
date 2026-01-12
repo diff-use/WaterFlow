@@ -44,7 +44,6 @@ from src.utils import (
 def parse_args():
     p = argparse.ArgumentParser(description="Run WaterFlow inference on PDB files")
 
-    # Required arguments
     p.add_argument(
         "--run_dir",
         type=str,
@@ -64,7 +63,7 @@ def parse_args():
         help="Directory to save inference outputs",
     )
 
-    # Data arguments
+    # data arguments
     p.add_argument(
         "--processed_dir",
         type=str,
@@ -111,7 +110,6 @@ def parse_args():
         help="Use self-conditioning during integration",
     )
 
-    # Output arguments
     p.add_argument(
         "--save_gifs",
         action="store_true",
@@ -124,7 +122,6 @@ def parse_args():
         help="Distance threshold in Angstroms for precision/recall (default: 1.0)",
     )
 
-    # Device
     p.add_argument(
         "--device",
         type=str,
@@ -132,7 +129,6 @@ def parse_args():
         help="Device to run inference on (default: cuda)",
     )
 
-    # Batching
     p.add_argument(
         "--batch_size",
         type=int,
@@ -370,7 +366,7 @@ def main():
 
     print(f"Found {len(dataset)} PDB entries")
 
-    # Run inference
+    # run inference
     print(f"\nRunning inference with method={args.method}, steps={args.num_steps}")
     print(f"Self-conditioning: {args.use_sc}")
     print(f"Threshold for metrics: {args.threshold}Å")
@@ -379,7 +375,7 @@ def main():
 
     all_metrics = []
 
-    # Collect valid graphs (those with waters)
+    # collect valid graphs (those with waters)
     valid_graphs = []
     skipped_pdbs = []
     for idx in range(len(dataset)):
@@ -392,7 +388,7 @@ def main():
     if skipped_pdbs:
         print(f"Skipping {len(skipped_pdbs)} PDBs with no water molecules")
 
-    # Process in batches
+    # process in batches
     num_batches = (len(valid_graphs) + args.batch_size - 1) // args.batch_size
 
     for batch_idx in tqdm(range(num_batches), desc="Processing batches"):
@@ -400,7 +396,7 @@ def main():
         end_idx = min(start_idx + args.batch_size, len(valid_graphs))
         batch_graphs = valid_graphs[start_idx:end_idx]
 
-        # Run batched inference
+        # run batched inference
         batch_results = run_inference_batch(
             flow_matcher,
             batch_graphs,
@@ -410,11 +406,11 @@ def main():
             device=args.device,
         )
 
-        # Process each result in the batch
+        # process each result in the batch
         for result in batch_results:
             pdb_id = result.get("pdb_id", f"unknown_{len(all_metrics)}")
 
-            # Compute metrics
+            # compute metrics
             metrics = compute_placement_metrics(
                 pred=result["water_pred"],
                 true=result["water_true"],
@@ -427,11 +423,10 @@ def main():
 
             all_metrics.append(metrics)
 
-            # Save plot
             plot_path = output_dir / "plots" / f"{pdb_id}.png"
             save_plot(result, pdb_id, plot_path, metrics)
 
-            # Save GIF if requested and trajectory available
+            # save GIF if requested and trajectory available
             if args.save_gifs and result.get("trajectory") is not None:
                 gif_path = output_dir / "gifs" / f"{pdb_id}.gif"
                 create_trajectory_gif(
@@ -444,14 +439,14 @@ def main():
                     pdb_id=pdb_id,
                 )
 
-            # Print per-sample metrics
+            # print per-sample metrics
             tqdm.write(
                 f"  {pdb_id}: RMSD={metrics['rmsd']:.2f}Å | "
                 f"P={metrics['precision']:.2%} R={metrics['recall']:.2%} "
                 f"F1={metrics['f1']:.3f} AUC-PR={metrics['auc_pr']:.3f}"
             )
 
-    # Compute and save summary metrics
+    # compute and save summary metrics
     if all_metrics:
         summary = {
             "n_samples": len(all_metrics),

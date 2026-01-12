@@ -5,7 +5,7 @@ Tests for src/utils.py utility functions.
 
 Organized by category to match utils.py structure:
 1. Feature encoding (rbf, atom37_to_atoms)
-2. Optimal transport (condot_pair_hard_hungarian)
+2. Optimal transport (ot_coupling)
 3. Metrics (recall_precision, compute_rmsd, compute_placement_metrics)
 4. Visualization (plot_3d_frame, save_protein_plot, create_trajectory_gif)
 """
@@ -27,7 +27,7 @@ from src.utils import (
     atom37_to_atoms,
     ATOM37_FILL,
     # Optimal transport
-    condot_pair_hard_hungarian,
+    ot_coupling,
     # Metrics
     recall_precision,
     compute_rmsd,
@@ -184,7 +184,7 @@ class TestCondotPairHardHungarian:
         x0 = torch.rand(10, 3)
         batch = torch.tensor([0, 0, 0, 1, 1, 1, 2, 2, 2, 2])
 
-        x0_star, x1_star = condot_pair_hard_hungarian(x1, batch, x0)
+        x0_star, x1_star = ot_coupling(x1, batch, x0)
 
         assert x0_star.shape == (10, 3)
         assert x1_star.shape == (10, 3)
@@ -195,7 +195,7 @@ class TestCondotPairHardHungarian:
         x0 = torch.rand(5, 3)
         batch = torch.zeros(5, dtype=torch.long)
 
-        x0_star, x1_star = condot_pair_hard_hungarian(x1, batch, x0)
+        x0_star, x1_star = ot_coupling(x1, batch, x0)
 
         assert x0_star.shape == x1.shape
         assert x1_star.shape == x1.shape
@@ -206,7 +206,7 @@ class TestCondotPairHardHungarian:
         x0 = torch.rand(4, 3)
         batch = torch.tensor([0, 0, 1, 1])
 
-        x0_star, _ = condot_pair_hard_hungarian(x1, batch, x0)
+        x0_star, _ = ot_coupling(x1, batch, x0)
 
         assert torch.allclose(x0_star, x0)
 
@@ -216,8 +216,8 @@ class TestCondotPairHardHungarian:
         x0 = torch.rand(10, 3)
         batch = torch.zeros(10, dtype=torch.long)
 
-        x0_star_1, x1_star_1 = condot_pair_hard_hungarian(x1, batch, x0)
-        x0_star_2, x1_star_2 = condot_pair_hard_hungarian(x1, batch, x0)
+        x0_star_1, x1_star_1 = ot_coupling(x1, batch, x0)
+        x0_star_2, x1_star_2 = ot_coupling(x1, batch, x0)
 
         assert torch.allclose(x0_star_1, x0_star_2)
         assert torch.allclose(x1_star_1, x1_star_2)
@@ -228,7 +228,7 @@ class TestCondotPairHardHungarian:
         x0 = torch.rand(5, 3)
         batch = torch.zeros(5, dtype=torch.long)
 
-        _, x1_star = condot_pair_hard_hungarian(x1, batch, x0)
+        _, x1_star = ot_coupling(x1, batch, x0)
 
         # Every point in x1_star should exist in x1
         for i in range(len(x1_star)):
@@ -251,7 +251,7 @@ class TestCondotPairHardHungarian:
             torch.ones(5, dtype=torch.long)
         ])
 
-        _, x1_star = condot_pair_hard_hungarian(x1, batch, x0)
+        _, x1_star = ot_coupling(x1, batch, x0)
 
         # Points from graph 0 shouldn't match to graph 1
         x1_star_g0 = x1_star[:5]
@@ -268,7 +268,7 @@ class TestCondotPairHardHungarian:
         x1 = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
         batch = torch.zeros(2, dtype=torch.long)
 
-        _, x1_star = condot_pair_hard_hungarian(x1, batch, x0)
+        _, x1_star = ot_coupling(x1, batch, x0)
 
         # Optimal: [0,0,0] -> [0,0,0], [0.9,0,0] -> [1,0,0]
         # x1_star[0] should be [0,0,0]

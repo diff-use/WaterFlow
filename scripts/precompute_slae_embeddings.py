@@ -15,13 +15,14 @@ Usage:
         --processed_dir /path/to/cache \
         --base_pdb_dir /path/to/pdbs \
         --slae_ckpt checkpoints/autoencoder.ckpt \
-        --slae_config SLAE/configs/encoder/protein_encoder.yaml
+        --slae_config ../SLAE/configs/encoder/protein_encoder.yaml
 """
 
 import argparse
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))  # For SLAE imports
 
 import torch
 from torch_geometric.data import Data, Batch
@@ -203,7 +204,7 @@ def main():
                        default="/home/srivasv/SLAE_Internal/checkpoints/autoencoder.ckpt",
                        help="Path to SLAE checkpoint")
     parser.add_argument("--slae_config", type=str,
-                       default="SLAE/configs/encoder/protein_encoder.yaml",
+                       default="../SLAE/configs/encoder/protein_encoder.yaml",
                        help="Path to SLAE encoder config")
     parser.add_argument("--device", type=str, default="cuda",
                        help="Device to use (cuda/cpu)")

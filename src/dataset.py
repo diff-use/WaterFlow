@@ -178,7 +178,7 @@ class ProteinWaterDataset(Dataset):
         if preprocess:
             self._preprocess_all()
 
-        # If single sample and duplication requested, set effective length
+        # if single sample and duplication requested, set effective length [this is for experiments to check if the model can memorize a sample]
         if len(self.entries) == 1 and duplicate_single_sample > 1:
             self._effective_length = duplicate_single_sample
             print(f"Single sample detected. Duplicating {duplicate_single_sample}x ")
@@ -345,7 +345,7 @@ class ProteinWaterDataset(Dataset):
         - ('protein', 'pp', 'protein') edges with edge_index, edge_rbf, edge_vec
         - NO water edges
         """
-        # Map idx to actual entry index (handles duplication)
+        # map idx to actual entry index (handles duplication)
         actual_idx = idx % len(self.entries)
         entry = self.entries[actual_idx]
         cache_path = self.processed_dir / f"{entry['cache_key']}.pt"

@@ -3,7 +3,7 @@
 """
 Utility functions organized by category:
 1. Feature encoding (rbf, atom37_to_atoms)
-2. Optimal transport (condot_pair_hard_hungarian)
+2. Optimal transport (ot_coupling)
 3. Metrics (recall_precision, compute_rmsd, compute_placement_metrics)
 4. Visualization (plot_3d_frame, create_trajectory_gif, save_protein_plot)
 """
@@ -16,6 +16,9 @@ from scipy.optimize import linear_sum_assignment
 import scipy.spatial.distance as spdist
 
 from e3nn.math import soft_one_hot_linspace
+import matplotlib.pyplot as plt
+
+from PIL import Image
 
 ATOM37_FILL = 1e-5
 
@@ -56,7 +59,7 @@ def atom37_to_atoms(atom_tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tens
     return coords, residue_index, atom_type
 
 @torch.no_grad()
-def condot_pair_hard_hungarian(
+def ot_coupling(
     x1: torch.Tensor,
     batch: torch.Tensor,
     x0: torch.Tensor,
@@ -211,7 +214,7 @@ def compute_placement_metrics(
     precision = float((D.min(axis=0) <= threshold).mean())
     f1 = 2 * precision * recall / (precision + recall + 1e-8)
 
-    # AUC-PR: sweep over thresholds
+    # sweep over thresholds
     thresholds = np.linspace(0.1, 3.0, 50)
     recalls, precisions = [], []
 
@@ -239,8 +242,6 @@ def plot_3d_frame(
     zlim: Tuple[float, float] = None,
 ):
     """Plot a single 3D frame showing protein, mates, and waters."""
-    import matplotlib.pyplot as plt
-
     ax.clear()
 
     if protein_pos.size > 0:
@@ -300,9 +301,6 @@ def create_trajectory_gif(
         fps: frames per second
         pdb_id: PDB ID to include in title
     """
-    from PIL import Image
-    import matplotlib.pyplot as plt
-
     frames = []
 
     # compute fixed axis limits
@@ -362,8 +360,7 @@ def save_protein_plot(
     save_dir: str,
 ):
     """Align and plot CA traces with Kabsch alignment."""
-    import matplotlib.pyplot as plt
-
+    
     P = pred_ca.detach().float().cpu().numpy()
     Q = true_ca.detach().float().cpu().numpy()
 

@@ -397,15 +397,15 @@ class TestHungarianMatchingConsistency:
 
     def test_hungarian_is_deterministic(self, device):
         """Hungarian matching should be deterministic for same x0, x1."""
-        from src.utils import condot_pair_hard_hungarian
+        from src.utils import ot_coupling
 
         x1 = torch.randn(10, 3, device=device)
         x0 = torch.randn(10, 3, device=device)
         batch = torch.zeros(10, dtype=torch.long, device=device)
 
         # Run matching twice
-        x0_star_1, x1_star_1 = condot_pair_hard_hungarian(x1, batch, x0)
-        x0_star_2, x1_star_2 = condot_pair_hard_hungarian(x1, batch, x0)
+        x0_star_1, x1_star_1 = ot_coupling(x1, batch, x0)
+        x0_star_2, x1_star_2 = ot_coupling(x1, batch, x0)
 
         # Should be identical
         assert torch.allclose(x0_star_1, x0_star_2, atol=1e-6), "Hungarian matching is non-deterministic!"
@@ -413,13 +413,13 @@ class TestHungarianMatchingConsistency:
 
     def test_hungarian_is_permutation(self, device):
         """Hungarian matching is a permutation (reordering)."""
-        from src.utils import condot_pair_hard_hungarian
+        from src.utils import ot_coupling
 
         x1 = torch.randn(10, 3, device=device)
         x0 = torch.randn(10, 3, device=device)
         batch = torch.zeros(10, dtype=torch.long, device=device)
 
-        x0_star, x1_star = condot_pair_hard_hungarian(x1, batch, x0)
+        x0_star, x1_star = ot_coupling(x1, batch, x0)
 
         # x1_star should be a permutation of x1 (same set of points)
         for i in range(len(x1_star)):
@@ -429,7 +429,7 @@ class TestHungarianMatchingConsistency:
 
     def test_hungarian_batched_no_cross_contamination(self, device):
         """Hungarian matching doesn't cross batch boundaries."""
-        from src.utils import condot_pair_hard_hungarian
+        from src.utils import ot_coupling
 
         # Two separate graphs
         x1 = torch.cat([
@@ -445,7 +445,7 @@ class TestHungarianMatchingConsistency:
             torch.ones(7, dtype=torch.long)
         ]).to(device)
 
-        x0_star, x1_star = condot_pair_hard_hungarian(x1, batch, x0)
+        x0_star, x1_star = ot_coupling(x1, batch, x0)
 
         # Check graph 1 points don't match to graph 2
         x1_star_g1 = x1_star[:5]
@@ -528,13 +528,13 @@ class TestFlowIntegrationCorrectness:
 
     def test_interpolation_at_boundaries(self, device):
         """Interpolation x_t = (1-t)*x0 + t*x1 gives correct values at boundaries."""
-        from src.utils import condot_pair_hard_hungarian
+        from src.utils import ot_coupling
 
         x1 = torch.randn(10, 3, device=device)
         batch = torch.zeros(10, dtype=torch.long, device=device)
 
         x0 = torch.randn(10, 3, device=device)
-        x0_star, x1_star = condot_pair_hard_hungarian(x1, batch, x0)
+        x0_star, x1_star = ot_coupling(x1, batch, x0)
 
         # At t=0: x_t should equal x0_star
         t0 = torch.zeros(1, device=device)
@@ -626,7 +626,7 @@ class TestTargetVelocityScale:
         For random noise x0 ~ N(0, sigma²) and target x1, we expect:
         ||x1 - x0|| to be on order of sigma
         """
-        from src.utils import condot_pair_hard_hungarian
+        from src.utils import ot_coupling
 
         data = make_batched_hetero(device, n_graphs=1, n_protein_per=50, n_water_per=20)
 
@@ -636,7 +636,7 @@ class TestTargetVelocityScale:
         sigma = FlowMatcher.compute_sigma(data)
         x0 = torch.randn_like(x1) * sigma
 
-        x0_star, x1_star = condot_pair_hard_hungarian(x1, batch, x0)
+        x0_star, x1_star = ot_coupling(x1, batch, x0)
         v_target = x1_star - x0_star
 
         # Average magnitude

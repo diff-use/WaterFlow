@@ -40,7 +40,7 @@ def _edge_vectors(pos: torch.Tensor, edge_index: torch.Tensor):
 class ProteinGVPEncoder(nn.Module):
     def __init__(
         self,
-        node_scalar_in: int = 17,  # input feature dim from data.x (e.g., 17 for element one-hot)
+        node_scalar_in: int = 17,  # input feature dim from data.x
         node_vec_in: int = 1,
         hidden_dims: Tuple[int, int] = (256, 32),
         edge_scalar_in: int = 16,
