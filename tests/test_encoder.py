@@ -95,6 +95,7 @@ class TestFlowEncoder:
         """Create flow encoder (without checkpoint)."""
         return FlowEncoder(
             checkpoint_path="",  # No checkpoint, random init
+            node_scalar_in=16,
             device="cpu",
             freeze=False,
         )
@@ -130,8 +131,8 @@ class TestFlowEncoder:
     
     def test_flow_encoder_freeze(self):
         """Test that freeze parameter works."""
-        encoder_frozen = FlowEncoder(checkpoint_path="", device="cpu", freeze=True)
-        encoder_unfrozen = FlowEncoder(checkpoint_path="", device="cpu", freeze=False)
+        encoder_frozen = FlowEncoder(checkpoint_path="", node_scalar_in=16, device="cpu", freeze=True)
+        encoder_unfrozen = FlowEncoder(checkpoint_path="", node_scalar_in=16, device="cpu", freeze=False)
         
         # Check frozen encoder has no gradients
         for p in encoder_frozen.encoder.parameters():

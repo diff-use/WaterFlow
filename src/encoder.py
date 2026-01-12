@@ -40,7 +40,7 @@ def _edge_vectors(pos: torch.Tensor, edge_index: torch.Tensor):
 class ProteinGVPEncoder(nn.Module):
     def __init__(
         self,
-        node_scalar_in: int = 16,
+        node_scalar_in: int = 17,  # input feature dim from data.x
         node_vec_in: int = 1,
         hidden_dims: Tuple[int, int] = (256, 32),
         edge_scalar_in: int = 16,
@@ -170,6 +170,7 @@ class ProteinGVPEncoder(nn.Module):
 
     def forward(self, data: Batch):
         x_scalar = self.input_scalar_encoder(data.x)
+
         if self.init_vec_zero or not hasattr(data, "node_v"):
             node_features = self._initial_node_tuple(x_scalar)
         else:
@@ -199,6 +200,7 @@ class ProteinGVPEncoder(nn.Module):
 
 def load_encoder_from_checkpoint(
     checkpoint_path: str,
+    node_scalar_in: int,
     device: str = "cuda",
     freeze: bool = True,
     default_hidden_dims: Tuple[int, int] = (256, 64),
@@ -210,6 +212,10 @@ def load_encoder_from_checkpoint(
     """
     Load pretrained ProteinGVPEncoder from SLAE checkpoint.
     Falls back to blank encoder if checkpoint doesn't exist or fails to load.
+
+    Args:
+        checkpoint_path: Path to checkpoint file
+        node_scalar_in: Input feature dimension (from data.x.shape[-1])
     """
     args = {
         "hidden_dims": list(default_hidden_dims),
@@ -218,10 +224,10 @@ def load_encoder_from_checkpoint(
         "radius": default_radius,
         "max_neighbors": default_max_neighbors,
     }
-    
+
     loaded = False
     state_dict = None
-    
+
     if checkpoint_path and Path(checkpoint_path).exists():
         try:
             ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
@@ -236,9 +242,9 @@ def load_encoder_from_checkpoint(
         print(f"Checkpoint not found at {checkpoint_path}, initializing blank encoder.")
 
     hidden_dims = tuple(args.get("hidden_dims", list(default_hidden_dims)))
-    
+
     encoder = ProteinGVPEncoder(
-        node_scalar_in=16,
+        node_scalar_in=node_scalar_in,
         hidden_dims=hidden_dims,
         edge_scalar_in=args.get("num_edge_rbf", default_num_edge_rbf),
         edge_vec_in=1,
@@ -270,16 +276,17 @@ class FlowEncoder(nn.Module):
     Wrapper that loads pretrained encoder and provides forward pass
     for combined protein+mate homogeneous graphs.
     """
-    
+
     def __init__(
         self,
         checkpoint_path: str,
+        node_scalar_in: int,
         device: str = "cuda",
         freeze: bool = True,
     ):
         super().__init__()
         self.encoder, self.args = load_encoder_from_checkpoint(
-            checkpoint_path, device, freeze
+            checkpoint_path, node_scalar_in, device, freeze
         )
         self.freeze = freeze
         self.hidden_dims = self.encoder.hidden_dims
