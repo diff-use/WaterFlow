@@ -7,6 +7,8 @@ Tests:
 3. FlowWaterGVP forward pass with SLAE
 4. No NaNs in outputs
 5. Gradient flow through adapter
+
+All test cases created with assistance from Claude Code and refined.
 """
 
 import pytest

@@ -1,5 +1,7 @@
 """
 Integration-ish tests to catch NaNs/Infs during forward/training.
+
+All test cases created with assistance from Claude Code and refined.
 """
 
 import os

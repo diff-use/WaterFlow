@@ -8,6 +8,8 @@ Organized by category to match utils.py structure:
 2. Optimal transport (ot_coupling)
 3. Metrics (recall_precision, compute_rmsd, compute_placement_metrics)
 4. Visualization (plot_3d_frame, save_protein_plot, create_trajectory_gif)
+
+All test cases created with assistance from Claude Code and refined.
 """
 
 import pytest
@@ -37,11 +39,6 @@ from src.utils import (
     save_protein_plot,
     create_trajectory_gif,
 )
-
-
-# =============================================================================
-# Feature Encoding Tests
-# =============================================================================
 
 @pytest.mark.unit
 class TestRBF:
@@ -170,12 +167,8 @@ class TestAtom37ToAtoms:
         assert torch.allclose(coords[0], expected_coord)
 
 
-# =============================================================================
-# Optimal Transport Tests
-# =============================================================================
-
 @pytest.mark.unit
-class TestCondotPairHardHungarian:
+class TestOTCoupling:
     """Tests for Hungarian matching in flow matching."""
 
     def test_output_shapes(self):
@@ -276,10 +269,6 @@ class TestCondotPairHardHungarian:
         assert torch.allclose(x1_star[0], torch.tensor([0.0, 0.0, 0.0]))
         assert torch.allclose(x1_star[1], torch.tensor([1.0, 0.0, 0.0]))
 
-
-# =============================================================================
-# Metrics Tests
-# =============================================================================
 
 @pytest.mark.unit
 class TestRecallPrecision:
@@ -461,10 +450,6 @@ class TestComputePlacementMetrics:
         )
         assert metrics['f1'] == pytest.approx(expected_f1, abs=1e-6)
 
-
-# =============================================================================
-# Visualization Tests
-# =============================================================================
 
 @pytest.mark.unit
 class TestPlot3DFrame:
