@@ -235,6 +235,38 @@ def check_chain_interactions(
     return True, "", "Interacting"
 
 
+def check_water_residue_ratio(
+    num_waters: int,
+    num_residues: int,
+    min_ratio: float = 0.8,
+) -> Tuple[bool, str]:
+    """
+    Check if water/residue ratio meets minimum threshold.
+
+    Structures with too few waters relative to protein size may be
+    poorly resolved or have incomplete solvent modeling.
+
+    Args:
+        num_waters: Number of water molecules
+        num_residues: Number of protein residues
+        min_ratio: Minimum required waters/residues ratio
+
+    Returns:
+        (is_valid, reason) tuple
+    """
+    if num_residues == 0:
+        return False, "No residues found"
+
+    ratio = num_waters / num_residues
+
+    if ratio < min_ratio:
+        return False, (
+            f"Water/residue ratio {ratio:.2f} ({num_waters}/{num_residues}) "
+            f"below threshold {min_ratio}"
+        )
+    return True, ""
+
+
 class ProteinWaterDataset(Dataset):
     """
     Dataset for protein crystal contact prediction.
@@ -258,6 +290,7 @@ class ProteinWaterDataset(Dataset):
         max_clash_fraction: float = 0.05,
         clash_dist: float = 2.0,
         interface_dist_threshold: float = 4.0,
+        min_water_residue_ratio: float = 0.8,
     ):
         """
         Args:
@@ -276,6 +309,8 @@ class ProteinWaterDataset(Dataset):
             interface_dist_threshold: For multi-chain proteins, min inter-chain distance
                                       must be <= this to be considered interacting.
                                       Structures with larger distances are filtered (ASU copies).
+            min_water_residue_ratio: Minimum ratio of waters/residues required.
+                                     Structures below this are filtered (poor solvent modeling).
         """
         self.processed_dir = Path(processed_dir)
         self.base_pdb_dir = Path(base_pdb_dir)
@@ -287,6 +322,7 @@ class ProteinWaterDataset(Dataset):
         self.max_clash_fraction = max_clash_fraction
         self.clash_dist = clash_dist
         self.interface_dist_threshold = interface_dist_threshold
+        self.min_water_residue_ratio = min_water_residue_ratio
 
         self.entries = self._parse_pdb_list(pdb_list_file)
 
@@ -463,7 +499,18 @@ class ProteinWaterDataset(Dataset):
         protein_res_idx = torch.tensor(
             [unique_res[k] for k in residue_keys], dtype=torch.long
         )
-        
+
+        # check water/residue ratio
+        num_residues = len(unique_res)
+        num_waters = len(water_atoms)
+        ratio_valid, ratio_reason = check_water_residue_ratio(
+            num_waters,
+            num_residues,
+            min_ratio=self.min_water_residue_ratio,
+        )
+        if not ratio_valid:
+            raise ValueError(f"Quality filter failed: {ratio_reason}")
+
         # process water atoms
         if len(water_atoms) > 0:
             water_pos = torch.tensor(water_atoms.coord, dtype=torch.float32) - center
