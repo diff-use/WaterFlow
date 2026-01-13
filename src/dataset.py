@@ -389,7 +389,7 @@ class ProteinWaterDataset(Dataset):
         """
         Preprocess a single PDB file.
 
-        Runs expensive PyMOL crystal contact detection and caches:
+        Runs PyMOL crystal contact detection and caches:
         - Protein positions, features, residue indices
         - Water positions and features (if any)
         - Symmetry mate positions and features (if any)
@@ -640,9 +640,7 @@ def get_dataloader(
     Note:
         For single-protein overfitting, use duplicate_single_sample parameter:
         - duplicate_single_sample=100 creates 100 copies of the sample in the dataset
-        - Then batch_size works normally (e.g., batch_size=4 gives 25 batches/epoch)
-        - This gives more gradient updates per epoch without changing batch size
-
+        - Then batch_size works normally 
     """
     dataset = ProteinWaterDataset(
         pdb_list_file=pdb_list_file,
