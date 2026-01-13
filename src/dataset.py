@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import List, Optional, Sequence, Tuple, Dict
 from pathlib import Path
+import itertools
 import numpy as np
 
 import sys
@@ -23,34 +24,12 @@ from torch_cluster import radius_graph
 import e3nn
 from e3nn.math import soft_one_hot_linspace
 
-from src.utils import rbf, atom37_to_atoms
+from src.utils import atom37_to_atoms
 
 ELEMENT_VOCAB = [
     "C", "N", "O", "S", "P", "SE", "MG", "ZN", "CA", "FE", "NA", "K", "CL", "F", "BR",
 ]
 ELEM_IDX = {e: i for i, e in enumerate(ELEMENT_VOCAB)}
-
-def edge_features(
-    src_pos: torch.Tensor,
-    dst_pos: torch.Tensor,
-    edge_index: torch.Tensor,
-    num_rbf: int = 16,
-    cutoff: float = 8.0
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Return (edge_rbf, edge_vec) = (RBF(dist), unit displacement vectors)."""
-    if edge_index.numel() == 0:
-        return (
-            torch.empty(0, num_rbf, device=src_pos.device),
-            torch.empty(0, 1, 3, device=src_pos.device)
-        )
-    
-    s_idx, d_idx = edge_index
-    
-    disp = src_pos[s_idx] - dst_pos[d_idx]
-    dist = torch.clamp(disp.norm(dim=-1, keepdim=True), min=1e-8)
-    e_rbf = rbf(dist.squeeze(-1), num_gaussians=num_rbf, cutoff=cutoff)
-    e_vec = (disp / dist).unsqueeze(1)
-    return e_rbf, e_vec
 
 
 def element_onehot(symbols: List[str]) -> Tensor:
@@ -133,6 +112,128 @@ def _make_undirected(edge_index: torch.Tensor) -> torch.Tensor:
     ei = torch.unique(ei.T, dim=0).T  # drop duplicates
     return ei
 
+def check_com_distance(
+    protein_coords: torch.Tensor,
+    water_coords: torch.Tensor,
+    max_com_dist: float = 25.0,
+) -> Tuple[bool, str]:
+    """
+    Check if protein and water centers of mass are within acceptable distance.
+
+    Large CoM differences indicate atoms are in different frames of reference.
+
+    Args:
+        protein_coords: (N, 3) protein atom coordinates
+        water_coords: (M, 3) water atom coordinates
+        max_com_dist: Maximum allowed distance between CoMs (Angstroms)
+
+    Returns:
+        (is_valid, reason) tuple
+    """
+    if water_coords.size(0) == 0:
+        return True, ""
+
+    protein_com = protein_coords.mean(dim=0)
+    water_com = water_coords.mean(dim=0)
+    com_dist = torch.linalg.norm(protein_com - water_com).item()
+
+    if com_dist > max_com_dist:
+        return False, f"CoM distance {com_dist:.1f}A exceeds threshold {max_com_dist}A"
+    return True, ""
+
+
+def check_water_clashes(
+    protein_coords: torch.Tensor,
+    water_coords: torch.Tensor,
+    clash_dist: float = 2.0,
+    max_clash_fraction: float = 0.05,
+) -> Tuple[bool, str]:
+    """
+    Check if too many waters clash with the protein surface (within a threshold).
+
+    Waters within clash_dist of any protein atom are considered clashing.
+
+    Args:
+        protein_coords: (N, 3) protein atom coordinates
+        water_coords: (M, 3) water atom coordinates
+        clash_dist: Distance threshold for clash detection (Angstroms)
+        max_clash_fraction: Maximum allowed fraction of clashing waters (0-1)
+
+    Returns:
+        (is_valid, reason) tuple
+    """
+    if water_coords.size(0) == 0:
+        return True, ""
+
+    # compute pairwise distances: (M, N)
+    dists = torch.cdist(water_coords, protein_coords)
+    min_dists = dists.min(dim=1).values  # closest protein atom to each water
+
+    n_clashing = (min_dists < clash_dist).sum().item()
+    clash_fraction = n_clashing / water_coords.size(0)
+
+    if clash_fraction > max_clash_fraction:
+        return False, (
+            f"Water clash fraction {clash_fraction:.1%} ({n_clashing}/{water_coords.size(0)}) "
+            f"exceeds threshold {max_clash_fraction:.0%}"
+        )
+    return True, ""
+
+
+def check_chain_interactions(
+    protein_atoms: "bts.AtomArray",
+    interface_dist_threshold: float = 4.0,
+) -> Tuple[bool, str, str]:
+    """
+    Check if multi-chain proteins have interacting chains (PPI) vs ASU copies.
+
+    For proteins with >=2 chains, computes minimum inter-chain distance.
+    If min distance > threshold, chains are likely ASU copies, not a true PPI.
+
+    Args:
+        protein_atoms: biotite AtomArray with chain_id and coord attributes
+        interface_dist_threshold: Chains must be within this distance to be
+            considered interacting (Angstroms)
+
+    Returns:
+        (is_valid, reason, interaction_status) tuple where interaction_status
+        is one of: "Single Chain", "Interacting", "Non-Interacting (ASU Copies)"
+    """
+    chain_ids = np.unique(protein_atoms.chain_id)
+    num_chains = len(chain_ids)
+
+    if num_chains < 2:
+        return True, "", "Single Chain"
+
+    # get coordinates per chain
+    chain_coords = {
+        cid: torch.tensor(protein_atoms[protein_atoms.chain_id == cid].coord, dtype=torch.float32)
+        for cid in chain_ids
+    }
+
+    min_interface_dist = float('inf')
+
+    for chain_a, chain_b in itertools.combinations(chain_ids, 2):
+        coords_a = chain_coords[chain_a]
+        coords_b = chain_coords[chain_b]
+
+        # compute pairwise distances between chains
+        dists = torch.cdist(coords_a, coords_b)
+        min_d = dists.min().item()
+
+        if min_d < min_interface_dist:
+            min_interface_dist = min_d
+
+    if min_interface_dist > interface_dist_threshold:
+        return (
+            False,
+            f"Multi-chain ({num_chains} chains) min interface distance {min_interface_dist:.1f}A "
+            f"> {interface_dist_threshold}A (likely ASU copies, not PPI)",
+            "Non-Interacting (ASU Copies)"
+        )
+
+    return True, "", "Interacting"
+
 
 class ProteinWaterDataset(Dataset):
     """
@@ -149,29 +250,43 @@ class ProteinWaterDataset(Dataset):
         pdb_list_file: str,
         processed_dir: str,
         base_pdb_dir: str = "/sb/wankowicz_lab/data/srivasv/pdb_redo_data",
-        cutoff: float = 3.0,
-        num_rbf: int = 16,
+        cutoff: float = 8.0,
         include_mates: bool = True,
         preprocess: bool = True,
         duplicate_single_sample: int = 1,
+        max_com_dist: float = 25.0,
+        max_clash_fraction: float = 0.05,
+        clash_dist: float = 2.0,
+        interface_dist_threshold: float = 4.0,
     ):
         """
         Args:
             pdb_list_file: Text file with lines like "<pdb_id>_final_<chainID>"
             processed_dir: Directory to cache preprocessed .pt files
             base_pdb_dir: Base directory containing PDB subdirectories
-            cutoff: Distance cutoff for edges and crystal contacts (Angstroms)
-            num_rbf: Number of RBF bins for edge distance encoding
+            cutoff: Distance cutoff for PP edges and crystal contacts (Angstroms)
             include_mates: If True, include symmetry mate atoms as protein nodes
             preprocess: If True, run preprocessing on missing cached files
             duplicate_single_sample: If dataset has 1 sample, duplicate it this many times
+            max_com_dist: Max allowed distance between protein and water CoM (Angstroms).
+                          Structures exceeding this are filtered (different reference frames).
+            max_clash_fraction: Max fraction of waters allowed within clash_dist of protein.
+                                Structures exceeding this are filtered.
+            clash_dist: Distance threshold for water-protein clashes (Angstroms).
+            interface_dist_threshold: For multi-chain proteins, min inter-chain distance
+                                      must be <= this to be considered interacting.
+                                      Structures with larger distances are filtered (ASU copies).
         """
         self.processed_dir = Path(processed_dir)
         self.base_pdb_dir = Path(base_pdb_dir)
         self.cutoff = cutoff
-        self.num_rbf = num_rbf
         self.include_mates = include_mates
         self.duplicate_single_sample = duplicate_single_sample
+
+        self.max_com_dist = max_com_dist
+        self.max_clash_fraction = max_clash_fraction
+        self.clash_dist = clash_dist
+        self.interface_dist_threshold = interface_dist_threshold
 
         self.entries = self._parse_pdb_list(pdb_list_file)
 
@@ -232,23 +347,33 @@ class ProteinWaterDataset(Dataset):
     def _preprocess_all(self):
         """Preprocess all PDB files that don't have cached results."""
         self.processed_dir.mkdir(parents=True, exist_ok=True)
-        
+
         to_process = [
             e for e in self.entries
             if not (self.processed_dir / f"{e['cache_key']}.pt").exists()
         ]
-        
+
         if not to_process:
             print("All entries already preprocessed.")
             return
-        
+
         print(f"Preprocessing {len(to_process)} entries...")
+        failures = []
         for entry in tqdm(to_process, desc="Preprocessing"):
             cache_path = self.processed_dir / f"{entry['cache_key']}.pt"
             try:
                 self._preprocess_one(entry, cache_path)
             except Exception as e:
                 print(f"\nFailed to preprocess {entry['cache_key']}: {e}")
+                failures.append((entry['cache_key'], str(e)))
+
+        # Write failures to log file
+        if failures:
+            failure_log_path = self.processed_dir / "preprocessing_failures.log"
+            with open(failure_log_path, 'a') as f:
+                for pdb_id, reason in failures:
+                    f.write(f"{pdb_id}\t{reason}\n")
+            print(f"Logged {len(failures)} failures to {failure_log_path}")
 
         valid_entries = [
             e for e in self.entries
@@ -268,14 +393,25 @@ class ProteinWaterDataset(Dataset):
         - Protein positions, features, residue indices
         - Water positions and features (if any)
         - Symmetry mate positions and features (if any)
+
+        Raises ValueError if structure fails quality filters.
         """
         pdb_path = str(entry['pdb_path'])
         chain_filter = [entry['chain_id']] if entry['chain_id'] is not None else None
 
         protein_atoms, water_atoms = parse_asu_with_biotite(pdb_path, chain_filter)
+
+        # check inter-chain interactions for multi-chain proteins
+        chain_valid, chain_reason, _ = check_chain_interactions(
+            protein_atoms,
+            interface_dist_threshold=self.interface_dist_threshold,
+        )
+        if not chain_valid:
+            raise ValueError(f"Quality filter failed: {chain_reason}")
+
         crystal_data = get_crystal_contacts_pymol(pdb_path, self.cutoff)
-        
-        #filter water atoms to only those in ASU
+
+        # filter water atoms to only those in ASU
         asu_water_indices = match_atoms_to_coords(
             water_atoms, crystal_data["asu_coords"]
         )
@@ -285,15 +421,41 @@ class ProteinWaterDataset(Dataset):
             water_atoms = water_atoms[asu_water_mask]
         else:
             water_atoms = water_atoms[:0]
-        
+
         protein_pos = torch.tensor(protein_atoms.coord, dtype=torch.float32)
+        water_pos_raw = (
+            torch.tensor(water_atoms.coord, dtype=torch.float32)
+            if len(water_atoms) > 0
+            else torch.zeros((0, 3), dtype=torch.float32)
+        )
+
+        # check center-of-mass distance of protein atoms and water atoms (before centering)
+        com_valid, com_reason = check_com_distance(
+            protein_pos,
+            water_pos_raw,
+            max_com_dist=self.max_com_dist,
+        )
+        if not com_valid:
+            raise ValueError(f"Quality filter failed: {com_reason}")
+
+        # check water clashes with protein atoms 
+        clash_valid, clash_reason = check_water_clashes(
+            protein_pos,
+            water_pos_raw,
+            clash_dist=self.clash_dist,
+            max_clash_fraction=self.max_clash_fraction,
+        )
+        if not clash_valid:
+            raise ValueError(f"Quality filter failed: {clash_reason}")
+
+        # center protein positions
         center = protein_pos.mean(dim=0, keepdim=True)
         protein_pos = protein_pos - center
         
         protein_elements = [str(e).upper() for e in protein_atoms.element]
         protein_x = element_onehot(protein_elements)
         
-        #compute residue indices (using chain_id, res_id only - matches SLAE's atomarray_to_tensors)
+        # compute residue indices (using chain_id, res_id only - matches SLAE's atomarray_to_tensors)
         res_id = protein_atoms.res_id
         chain_id_arr = protein_atoms.chain_id
         residue_keys = list(zip(chain_id_arr, res_id))
@@ -302,7 +464,7 @@ class ProteinWaterDataset(Dataset):
             [unique_res[k] for k in residue_keys], dtype=torch.long
         )
         
-        #process water atoms
+        # process water atoms
         if len(water_atoms) > 0:
             water_pos = torch.tensor(water_atoms.coord, dtype=torch.float32) - center
             water_elements = [str(e).upper() for e in water_atoms.element]
@@ -311,17 +473,26 @@ class ProteinWaterDataset(Dataset):
             water_pos = torch.zeros((0, 3), dtype=torch.float32)
             water_x = torch.zeros((0, len(ELEMENT_VOCAB) + 1), dtype=torch.float32)
         
-        #process symmetry mate atoms
+        # process symmetry mate atoms
         mate_coords = crystal_data["mate_coords"]
         if mate_coords.shape[0] > 0:
             mate_pos = torch.tensor(mate_coords, dtype=torch.float32) - center
             mate_elements = [a.symbol.upper() for a in crystal_data["mate_atoms"]]
             mate_x = element_onehot(mate_elements)
+
+            # compute mate residue indices (group atoms by actual residue)
+            mate_residue_keys = [(a.chain, a.resi) for a in crystal_data["mate_atoms"]]
+            unique_mate_res = list(dict.fromkeys(mate_residue_keys))  # preserves order
+            mate_res_map = {k: i for i, k in enumerate(unique_mate_res)}
+            mate_res_idx = torch.tensor(
+                [mate_res_map[k] for k in mate_residue_keys], dtype=torch.long
+            )
         else:
             mate_pos = torch.zeros((0, 3), dtype=torch.float32)
             mate_x = torch.zeros((0, len(ELEMENT_VOCAB) + 1), dtype=torch.float32)
-        
-        #cache all data
+            mate_res_idx = torch.empty(0, dtype=torch.long)
+
+        # cache all data
         torch.save({
             'protein_pos': protein_pos,
             'protein_x': protein_x,
@@ -330,6 +501,7 @@ class ProteinWaterDataset(Dataset):
             'water_x': water_x,
             'mate_pos': mate_pos,
             'mate_x': mate_x,
+            'mate_res_idx': mate_res_idx,
         }, cache_path)
     
     def __len__(self) -> int:
@@ -342,8 +514,8 @@ class ProteinWaterDataset(Dataset):
         Returns HeteroData with:
         - 'protein' node type with pos, x, residue_index
         - 'water' node type with pos, x
-        - ('protein', 'pp', 'protein') edges with edge_index, edge_rbf, edge_vec
-        - NO water edges
+        - ('protein', 'pp', 'protein') edges with edge_index (topology only)
+        - NO water edges (built dynamically in flow model)
         """
         # map idx to actual entry index (handles duplication)
         actual_idx = idx % len(self.entries)
@@ -370,27 +542,35 @@ class ProteinWaterDataset(Dataset):
             protein_res_idx = residue_idx_per_atom
             num_asu_protein = protein_pos.size(0)
         else:
-            # use original protein atoms from cache (no SLAE or old cache format)
+            # use original protein atoms from cache 
             protein_pos = cached['protein_pos']
             protein_x = cached['protein_x']
             protein_res_idx = cached['protein_res_idx']
             num_asu_protein = protein_pos.size(0)
         
-        #concatenate symmetry mate atoms to protein if mates are included
+        # compute num_residues for protein (before adding mates)
+        num_protein_residues = int(protein_res_idx.max().item() + 1) if protein_res_idx.numel() > 0 else 0
+
+        # concatenate symmetry mate atoms to protein if mates are included
         if self.include_mates and cached['mate_pos'].size(0) > 0:
             mate_pos = cached['mate_pos']
             mate_x = cached['mate_x']
-            
+
             protein_pos = torch.cat([protein_pos, mate_pos], dim=0)
             protein_x = torch.cat([protein_x, mate_x], dim=0)
-            
-            # assign unique residue IDs to mates
+
+            # load mate residue indices (properly grouped by residue)
+            # offset by max protein residue index
             max_res_idx = protein_res_idx.max().item() if protein_res_idx.numel() > 0 else -1
-            mate_res_idx = torch.arange(
-                max_res_idx + 1,
-                max_res_idx + 1 + mate_pos.size(0),
-                dtype=torch.long
-            )
+            if 'mate_res_idx' in cached:
+                mate_res_idx = cached['mate_res_idx'] + max_res_idx + 1
+            else:
+                # fallback for old cache files without mate_res_idx
+                mate_res_idx = torch.arange(
+                    max_res_idx + 1,
+                    max_res_idx + 1 + mate_pos.size(0),
+                    dtype=torch.long
+                )
             protein_res_idx = torch.cat([protein_res_idx, mate_res_idx], dim=0)
         
         water_pos = cached['water_pos']
@@ -398,10 +578,15 @@ class ProteinWaterDataset(Dataset):
 
         data = HeteroData()
 
+        # compute total num_residues (protein + mates)
+        num_residues = int(protein_res_idx.max().item() + 1) if protein_res_idx.numel() > 0 else 0
+
         data['protein'].x = protein_x
         data['protein'].pos = protein_pos
         data['protein'].residue_index = protein_res_idx
         data['protein'].num_nodes = protein_pos.size(0)
+        data['protein'].num_residues = num_residues
+        data['protein'].num_protein_residues = num_protein_residues  # excludes mates
 
         # load SLAE embeddings if available (precomputed by scripts/precompute_slae_embeddings.py)
         if 'protein_slae_embedding' in cached:
@@ -419,18 +604,9 @@ class ProteinWaterDataset(Dataset):
         if protein_pos.size(0) > 0:
             pp_edge_index = radius_graph(protein_pos, r=self.cutoff, loop=False)
             pp_edge_index = _make_undirected(pp_edge_index)
-            
-            pp_edge_rbf, pp_edge_vec = edge_features(
-                protein_pos, protein_pos, pp_edge_index, self.num_rbf, self.cutoff
-            )
-            
             data['protein', 'pp', 'protein'].edge_index = pp_edge_index
-            data['protein', 'pp', 'protein'].edge_rbf = pp_edge_rbf
-            data['protein', 'pp', 'protein'].edge_vec = pp_edge_vec.squeeze(1)
         else:
             data['protein', 'pp', 'protein'].edge_index = torch.empty((2, 0), dtype=torch.long)
-            data['protein', 'pp', 'protein'].edge_rbf = torch.empty((0, self.num_rbf), dtype=torch.float32)
-            data['protein', 'pp', 'protein'].edge_vec = torch.empty((0, 3), dtype=torch.float32)
         
         # store metadata
         data.pdb_id = entry['cache_key']
@@ -456,7 +632,7 @@ def get_dataloader(
         processed_dir: Directory for cached preprocessed files
         batch_size: Number of graphs per batch
         **dataset_kwargs: Additional arguments passed to ProteinWaterDataset
-                         (e.g., cutoff, num_rbf, include_mates, duplicate_single_sample)
+                         (e.g., cutoff, include_mates, duplicate_single_sample)
 
     Returns:
         DataLoader that yields batched HeteroData objects
