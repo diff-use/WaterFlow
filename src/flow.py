@@ -368,6 +368,11 @@ class FlowWaterGVP(nn.Module):
         elif self.encoder_type == "slae":
             if self.use_cached_slae and 'slae_embedding' in data['protein']:
                 embeddings = data['protein'].slae_embedding
+            else:
+                raise NotImplementedError(
+                    "SLAE encoder without cached embeddings is not yet implemented. "
+                    "Please provide pre-computed slae_embedding in data['protein']."
+                )
 
             # adapter: 128-dim embeddings -> (s, V) tuple
             s_all, v_all = self.slae_adapter(embeddings)

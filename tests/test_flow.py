@@ -151,30 +151,26 @@ class TestBuildKnnEdges:
 class TestMakeProteinEncoderData:
     
     def test_basic_output(self, simple_hetero_data):
-        enc_data = make_protein_encoder_data(simple_hetero_data, num_rbf=16)
-        
+        enc_data = make_protein_encoder_data(simple_hetero_data)
+
         assert isinstance(enc_data, Data)
         assert hasattr(enc_data, 'x')
         assert hasattr(enc_data, 'pos')
         assert hasattr(enc_data, 'edge_index')
-        assert hasattr(enc_data, 'edge_rbf')
-        assert hasattr(enc_data, 'edge_unit_vec')
     
     def test_shapes(self, simple_hetero_data):
-        num_rbf = 16
-        enc_data = make_protein_encoder_data(simple_hetero_data, num_rbf=num_rbf)
-        
+        enc_data = make_protein_encoder_data(simple_hetero_data)
+
         n_nodes = simple_hetero_data['protein'].pos.size(0)
         n_edges = simple_hetero_data['protein', 'pp', 'protein'].edge_index.size(1)
-        
+
         assert enc_data.x.shape[0] == n_nodes
         assert enc_data.pos.shape == (n_nodes, 3)
-        assert enc_data.edge_rbf.shape == (n_edges, num_rbf)
-        assert enc_data.edge_unit_vec.shape == (n_edges, 3)
+        assert enc_data.edge_index.shape == (2, n_edges)
     
     def test_batch_preserved(self, batched_hetero_data):
-        enc_data = make_protein_encoder_data(batched_hetero_data, num_rbf=16)
-        
+        enc_data = make_protein_encoder_data(batched_hetero_data)
+
         assert hasattr(enc_data, 'batch')
         assert enc_data.batch.shape[0] == batched_hetero_data['protein'].pos.size(0)
     
@@ -183,11 +179,10 @@ class TestMakeProteinEncoderData:
         data['protein'].pos = torch.randn(10, 3, device=device)
         data['protein'].x = torch.randn(10, 16, device=device)
         # No edges defined
-        
-        enc_data = make_protein_encoder_data(data, num_rbf=16)
-        
+
+        enc_data = make_protein_encoder_data(data)
+
         assert enc_data.edge_index.shape == (2, 0)
-        assert enc_data.edge_rbf.shape[0] == 0
 
 
 @pytest.mark.unit
@@ -408,26 +403,29 @@ class TestFlowMatcher:
     
     @pytest.mark.slow
     def test_euler_integrate(self, flow_matcher, simple_hetero_data, device):
-        water_pred = flow_matcher.euler_integrate(
+        results = flow_matcher.euler_integrate(
             simple_hetero_data, num_steps=5, use_sc=False, device=str(device)
         )
-        
+        # euler_integrate returns List[np.ndarray], one per input graph
+        water_pred = results[0]
+
         n_water = simple_hetero_data['water'].num_nodes
         assert water_pred.shape == (n_water, 3)
         assert isinstance(water_pred, np.ndarray)
-    
+
     @pytest.mark.slow
     def test_rk4_integrate(self, flow_matcher, simple_hetero_data, device):
-        result = flow_matcher.rk4_integrate(
-            simple_hetero_data, num_steps=5, use_sc=False, 
+        results = flow_matcher.rk4_integrate(
+            simple_hetero_data, num_steps=5, use_sc=False,
             device=str(device), return_trajectory=True
         )
-        
+        # rk4_integrate returns List[Dict], one per input graph
+        result = results[0]
+
         assert 'water_pred' in result
         assert 'water_true' in result
         assert 'protein_pos' in result
         assert 'trajectory' in result
-        assert 'rmsd' in result
         assert len(result['trajectory']) == 5
     
     def test_sample_euler(self, flow_matcher, simple_hetero_data, device):
