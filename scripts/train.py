@@ -52,9 +52,9 @@ def parse_args():
     p.add_argument("--freeze_encoder", action="store_true")
     p.add_argument("--hidden_s", type=int, default=256)
     p.add_argument("--hidden_v", type=int, default=64)
-    p.add_argument("--flow_layers", type=int, default=5)
-    p.add_argument("--k_pw", type=int, default=24)
-    p.add_argument("--k_ww", type=int, default=24)
+    p.add_argument("--flow_layers", type=int, default=3)
+    p.add_argument("--k_pw", type=int, default=16)
+    p.add_argument("--k_ww", type=int, default=16)
 
     # SLAE encoder options
     p.add_argument("--use_slae", action="store_true", help="Use SLAE encoder instead of GVP")
@@ -65,7 +65,7 @@ def parse_args():
     # training
     p.add_argument("--epochs", type=int, default=100)
     p.add_argument("--batch_size", type=int, default=4)
-    p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--lr", type=float, default=5e-4)
     p.add_argument("--weight_decay", type=float, default=1e-3)
     p.add_argument("--grad_clip", type=float, default=1.0)
     p.add_argument("--num_workers", type=int, default=4)
