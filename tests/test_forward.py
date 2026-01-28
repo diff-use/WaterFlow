@@ -190,9 +190,7 @@ def test_forward_pass_no_nan_with_module_hooks(device):
     ).to(device)
 
     # Quick pre-check: protein encoder input features created from pp edges
-    enc_data = make_protein_encoder_data(data, num_rbf=16, rbf_dmax=20.0)
-    assert torch.isfinite(enc_data.edge_rbf).all(), "enc_data.edge_rbf has NaN/Inf"
-    assert torch.isfinite(enc_data.edge_unit_vec).all(), "enc_data.edge_unit_vec has NaN/Inf"
+    enc_data = make_protein_encoder_data(data)
     assert_edge_index_in_range(enc_data.edge_index, enc_data.x.size(0), enc_data.x.size(0), "pp edge_index")
 
     # Also validate knn edges are sane (catches orientation / k issues)
@@ -365,10 +363,10 @@ def test_forward_with_duplicate_protein_coords_localizes_nan(device):
         freeze_encoder=False,
     ).to(device)
 
-    # ---- Pre-check: encoder input edges/RBFs ----
-    enc_data = make_protein_encoder_data(data, num_rbf=16, rbf_dmax=20.0)
-    assert torch.isfinite(enc_data.edge_rbf).all(), "enc_data.edge_rbf has NaN/Inf"
-    assert torch.isfinite(enc_data.edge_unit_vec).all(), "enc_data.edge_unit_vec has NaN/Inf"
+    # ---- Pre-check: encoder input edges ----
+    enc_data = make_protein_encoder_data(data)
+    for tensor in _iter_tensors(enc_data):
+        assert torch.isfinite(tensor).all()
 
     t = torch.tensor([0.5], device=device)
 
@@ -518,15 +516,15 @@ class TestFlowIntegrationCorrectness:
         fm = FlowMatcher(model, p_self_cond=0.0)
 
         num_steps = 20
-        result = fm.rk4_integrate(
+        results = fm.rk4_integrate(
             data, num_steps=num_steps, use_sc=False,
             device=str(device), return_trajectory=True
         )
+        # rk4_integrate returns List[Dict], one per input graph
+        result = results[0]
 
         assert len(result['trajectory']) == num_steps, \
             f"Expected {num_steps} trajectory steps, got {len(result['trajectory'])}"
-        assert len(result['rmsd']) == num_steps, \
-            f"Expected {num_steps} RMSD values, got {len(result['rmsd'])}"
 
     def test_interpolation_at_boundaries(self, device):
         """Interpolation x_t = (1-t)*x0 + t*x1 gives correct values at boundaries."""

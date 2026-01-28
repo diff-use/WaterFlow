@@ -14,15 +14,22 @@ Usage:
     python scripts/precompute_slae_embeddings.py \
         --processed_dir /path/to/cache \
         --base_pdb_dir /path/to/pdbs \
-        --slae_ckpt checkpoints/autoencoder.ckpt \
-        --slae_config ../SLAE/configs/encoder/protein_encoder.yaml
+        [--slae_ckpt /path/to/checkpoint] \
+        [--slae_config /path/to/config]
 """
 
 import argparse
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))  # For SLAE imports
+
+# SLAE paths - derive from home directory for portability
+SLAE_ROOT = Path.home() / "SLAE_wl"
+sys.path.insert(0, str(SLAE_ROOT))  # For SLAE imports
+
+# Default paths for SLAE config and checkpoint
+DEFAULT_SLAE_CONFIG = SLAE_ROOT / "SLAE" / "configs" / "encoder" / "protein_encoder.yaml"
+DEFAULT_SLAE_CKPT = SLAE_ROOT / "checkpoints" / "autoencoder.ckpt"
 
 import torch
 from torch_geometric.data import Data, Batch
@@ -201,10 +208,10 @@ def main():
                        default="/sb/wankowicz_lab/data/srivasv/pdb_redo_data",
                        help="Base directory containing PDB files")
     parser.add_argument("--slae_ckpt", type=str,
-                       default="/home/srivasv/SLAE_Internal/checkpoints/autoencoder.ckpt",
+                       default=str(DEFAULT_SLAE_CKPT),
                        help="Path to SLAE checkpoint")
     parser.add_argument("--slae_config", type=str,
-                       default="../SLAE/configs/encoder/protein_encoder.yaml",
+                       default=str(DEFAULT_SLAE_CONFIG),
                        help="Path to SLAE encoder config")
     parser.add_argument("--device", type=str, default="cuda",
                        help="Device to use (cuda/cpu)")

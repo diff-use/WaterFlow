@@ -24,7 +24,7 @@ import numpy as np
 from torch import Tensor
 from tqdm.auto import tqdm
 
-from src.utils import ot_coupling, compute_rmsd, recall_precision, rbf
+from src.utils import ot_coupling
 from src.encoder import ProteinGVPEncoder
 from src.gvp import GVP, GVPMultiEdgeConv
 
@@ -49,17 +49,15 @@ def build_knn_edges(src_pos: torch.Tensor,
     return idx.unique(dim=1)
 
 
-def make_protein_encoder_data(
-    data: HeteroData,
-    num_rbf: int,
-    rbf_dmin: float = 0.0,
-    rbf_dmax: float = 20.0,
-) -> Data:
+def make_protein_encoder_data(data: HeteroData) -> Data:
     """
     Build a homogeneous Data with protein nodes (including any mates).
-    
+
+    Extracts protein subgraph from HeteroData for use with ProteinGVPEncoder.
+    Edge features are computed by the encoder itself.
+
     Returns:
-        enc_data: Data with x, pos, edge_index, edge_rbf, edge_unit_vec
+        enc_data: Data with x, pos, edge_index
     """
     device = data['protein'].pos.device
     prot = data['protein']
@@ -67,31 +65,16 @@ def make_protein_encoder_data(
     x = prot.x
     pos = prot.pos
 
-    # protein-protein edges
+    # protein-protein edges (topology only - features computed by encoder)
     if ('protein', 'pp', 'protein') in data.edge_types:
         edge_index = data['protein', 'pp', 'protein'].edge_index
     else:
         edge_index = torch.empty(2, 0, dtype=torch.long, device=device)
 
-    # geometric edge features for encoder
-    if edge_index.numel() > 0:
-        s_idx, d_idx = edge_index
-        disp = pos[s_idx] - pos[d_idx]
-        dist = torch.clamp(disp.norm(dim=-1, keepdim=True), 1e-8)
-        r = dist.squeeze(-1)
-        edge_rbf = rbf(r, num_gaussians=num_rbf, cutoff=rbf_dmax)
-        edge_unit_vec = (disp / dist)
-
-    else:
-        edge_rbf = torch.empty(0, num_rbf, device=device)
-        edge_unit_vec = torch.empty(0, 3, device=device)
-
     enc_data = Data(
         x=x,
         pos=pos,
         edge_index=edge_index,
-        edge_rbf=edge_rbf,
-        edge_unit_vec=edge_unit_vec,
     )
 
     # batch for multi-complex batches
@@ -374,12 +357,7 @@ class FlowWaterGVP(nn.Module):
         # get protein embeddings (conditional on encoder type)
         if self.encoder_type == "gvp":
             # original GVP encoder path
-            enc_data = make_protein_encoder_data(
-                data,
-                num_rbf=self.encoder.edge_scalar_in,
-                rbf_dmin=0.0,
-                rbf_dmax=20.0,
-            )
+            enc_data = make_protein_encoder_data(data)
 
             with torch.set_grad_enabled(not self.freeze_encoder):
                 s_all, v_all = self.encoder(enc_data)
@@ -390,6 +368,11 @@ class FlowWaterGVP(nn.Module):
         elif self.encoder_type == "slae":
             if self.use_cached_slae and 'slae_embedding' in data['protein']:
                 embeddings = data['protein'].slae_embedding
+            else:
+                raise NotImplementedError(
+                    "SLAE encoder without cached embeddings is not yet implemented. "
+                    "Please provide pre-computed slae_embedding in data['protein']."
+                )
 
             # adapter: 128-dim embeddings -> (s, V) tuple
             s_all, v_all = self.slae_adapter(embeddings)

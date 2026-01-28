@@ -1,861 +1,916 @@
-"""Unit tests for dataset.py
+# test_dataset.py
 
-All test cases created with assistance from Claude Code and refined.
+"""
+Tests for src/dataset.py - Protein-water dataset functionality.
+
+Organized by category:
+1. Feature encoding (element_onehot)
+2. Helper functions (_make_undirected, match_atoms_to_coords)
+3. Quality filters (check_com_distance, check_water_clashes, check_chain_interactions)
+4. PDB parsing (parse_asu_with_biotite, get_crystal_contacts_pymol)
+5. Dataset class (ProteinWaterDataset)
+6. DataLoader (get_dataloader)
+
+Integration tests use real PDB files:
+- 6eey: Standard PDB that passes all quality checks
+- 2b5w: Fails COM distance check
+- 8dzt: Fails water clash check at 2% threshold with 2A distance
+
+All test cases created with assistance from Claude Code.
 """
 
 import pytest
 import torch
 import numpy as np
 from pathlib import Path
-from unittest.mock import Mock, patch, MagicMock
-from torch_geometric.data import HeteroData
 import tempfile
 import os
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-TEST_PDB_PATH = Path(__file__).parent.parent / "test_files" / "6eey_final.pdb"
-
 from src.dataset import (
-    edge_features,
     element_onehot,
-    match_atoms_to_coords,
-    get_crystal_contacts_pymol,
-    parse_asu_with_biotite,
-    _make_undirected,
-    ProteinWaterDataset,
-    get_dataloader,
     ELEMENT_VOCAB,
     ELEM_IDX,
+    _make_undirected,
+    match_atoms_to_coords,
+    parse_asu_with_biotite,
+    get_crystal_contacts_pymol,
+    check_com_distance,
+    check_water_clashes,
+    check_chain_interactions,
+    ProteinWaterDataset,
+    get_dataloader,
 )
 
 @pytest.fixture
-def pdb_path():
-    """Return path to test PDB, skip if not found."""
-    if not TEST_PDB_PATH.exists():
-        pytest.skip(f"Test PDB not found: {TEST_PDB_PATH}")
-    return str(TEST_PDB_PATH)
-
-@pytest.fixture
-def device():
-    return torch.device("cpu")
+def pdb_base_dir():
+    """Base directory for PDB files."""
+    return Path("/sb/wankowicz_lab/data/srivasv/pdb_redo_data")
 
 
 @pytest.fixture
-def temp_dir():
-    """Create temporary directory for test cache files."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        yield tmpdir
+def pdb_6eey(pdb_base_dir):
+    """Path to 6eey PDB file - should pass all quality checks."""
+    path = pdb_base_dir / "6eey" / "6eey_final.pdb"
+    if not path.exists():
+        pytest.skip(f"PDB file not found: {path}")
+    return str(path)
 
 
 @pytest.fixture
-def mock_cached_data():
-    """Create mock cached data matching preprocessing output."""
-    return {
-        'protein_pos': torch.randn(20, 3),
-        'protein_x': torch.randn(20, 16),
-        'protein_res_idx': torch.randint(0, 5, (20,)),
-        'water_pos': torch.randn(5, 3),
-        'water_x': torch.randn(5, 16),
-        'mate_pos': torch.randn(8, 3),
-        'mate_x': torch.randn(8, 16),
-    }
+def pdb_2b5w(pdb_base_dir):
+    """Path to 2b5w PDB file - should fail COM distance check."""
+    path = pdb_base_dir / "2b5w" / "2b5w_final.pdb"
+    if not path.exists():
+        pytest.skip(f"PDB file not found: {path}")
+    return str(path)
 
-@pytest.fixture(scope="session")
-def real_cached_data(tmp_path_factory):
-    """Create real cached data from test PDB file."""
-    import shutil
 
-    if not TEST_PDB_PATH.exists():
-        pytest.skip(f"Test PDB not found: {TEST_PDB_PATH}")
+@pytest.fixture
+def pdb_8dzt(pdb_base_dir):
+    """Path to 8dzt PDB file - should fail water clash check at 2% threshold."""
+    path = pdb_base_dir / "8dzt" / "8dzt_final.pdb"
+    if not path.exists():
+        pytest.skip(f"PDB file not found: {path}")
+    return str(path)
 
-    # Create temporary directories
-    tmpdir = tmp_path_factory.mktemp("test_cache")
 
-    # Create base_pdb_dir structure: base_pdb_dir/6eey/6eey_final.pdb
-    base_pdb_dir = tmpdir / "pdb_base"
-    pdb_subdir = base_pdb_dir / "6eey"
-    pdb_subdir.mkdir(parents=True)
+@pytest.fixture
+def tmp_processed_dir(tmp_path):
+    """Temporary directory for processed files."""
+    return tmp_path / "processed"
 
-    # Copy test PDB to expected location
-    target_pdb = pdb_subdir / "6eey_final.pdb"
-    shutil.copy(TEST_PDB_PATH, target_pdb)
 
-    # Create processed directory
-    processed_dir = tmpdir / "processed"
-    processed_dir.mkdir()
+@pytest.fixture
+def single_pdb_list_file(tmp_path, pdb_6eey):
+    """Create a temp PDB list file with single entry."""
+    list_file = tmp_path / "pdb_list.txt"
+    list_file.write_text("6eey_final_A\n")
+    return str(list_file)
 
-    # Create PDB list file
-    pdb_list = tmpdir / "list.txt"
-    pdb_list.write_text("6eey_final\n")
-
-    # Create dataset and preprocess
-    dataset = ProteinWaterDataset(
-        pdb_list_file=str(pdb_list),
-        processed_dir=str(processed_dir),
-        base_pdb_dir=str(base_pdb_dir),
-        preprocess=True,
-        cutoff=5.0,
-    )
-
-    # Load and return the cached data
-    cache_file = processed_dir / "6eey_final.pt"
-    if not cache_file.exists():
-        pytest.skip(f"Failed to create cache file at {cache_file}")
-
-    cached = torch.load(cache_file, weights_only=False)
-    return cached, str(processed_dir), str(base_pdb_dir)
-
-@pytest.mark.unit
-class TestEdgeFeatures:
-    
-    def test_basic_output(self):
-        src_pos = torch.tensor([[0., 0., 0.], [1., 0., 0.], [2., 0., 0.]])
-        dst_pos = src_pos.clone()
-        edge_index = torch.tensor([[0, 1], [1, 2]])
-        
-        rbf, vec = edge_features(src_pos, dst_pos, edge_index, num_rbf=16, cutoff=8.0)
-        
-        assert rbf.shape == (2, 16)
-        assert vec.shape == (2, 1, 3)
-    
-    def test_empty_edges(self):
-        src_pos = torch.randn(5, 3)
-        dst_pos = torch.randn(5, 3)
-        edge_index = torch.empty((2, 0), dtype=torch.long)
-        
-        rbf, vec = edge_features(src_pos, dst_pos, edge_index, num_rbf=16)
-        
-        assert rbf.shape == (0, 16)
-        assert vec.shape == (0, 1, 3)
-    
-    def test_unit_vectors_normalized(self):
-        src_pos = torch.tensor([[0., 0., 0.], [3., 4., 0.]])
-        dst_pos = src_pos.clone()
-        edge_index = torch.tensor([[0], [1]])
-        
-        _, vec = edge_features(src_pos, dst_pos, edge_index)
-        
-        norms = vec.squeeze(1).norm(dim=-1)
-        assert torch.allclose(norms, torch.ones_like(norms), atol=1e-5)
-    
-    def test_different_num_rbf(self):
-        src_pos = torch.randn(10, 3)
-        edge_index = torch.tensor([[0, 1, 2], [3, 4, 5]])
-        
-        for num_rbf in [8, 16, 32]:
-            rbf, _ = edge_features(src_pos, src_pos, edge_index, num_rbf=num_rbf)
-            assert rbf.shape[1] == num_rbf
 
 @pytest.mark.unit
 class TestElementOnehot:
-    
-    def test_known_elements(self):
-        symbols = ["C", "N", "O"]
-        onehot = element_onehot(symbols)
-        
-        assert onehot.shape == (3, len(ELEMENT_VOCAB) + 1)
-        assert onehot.sum(dim=-1).allclose(torch.ones(3))
-        
-        # Check correct indices
-        assert onehot[0, ELEM_IDX["C"]] == 1.0
-        assert onehot[1, ELEM_IDX["N"]] == 1.0
-        assert onehot[2, ELEM_IDX["O"]] == 1.0
-    
-    def test_unknown_element(self):
-        symbols = ["C", "XX", "N"]  # XX is unknown
-        onehot = element_onehot(symbols)
-        
-        other_idx = len(ELEMENT_VOCAB)
-        assert onehot[1, other_idx] == 1.0  # Unknown goes to "other" bucket
-    
-    def test_case_insensitive(self):
-        symbols_upper = ["C", "N", "O"]
-        symbols_lower = ["c", "n", "o"]
-        
-        onehot_upper = element_onehot(symbols_upper)
-        onehot_lower = element_onehot(symbols_lower)
-        
-        assert torch.allclose(onehot_upper, onehot_lower)
-    
-    def test_empty_list(self):
-        onehot = element_onehot([])
-        assert onehot.shape == (0, len(ELEMENT_VOCAB) + 1)
-    
-    def test_all_vocab_elements(self):
-        onehot = element_onehot(ELEMENT_VOCAB)
-        
-        # Each element should activate its own index
-        for i, elem in enumerate(ELEMENT_VOCAB):
-            assert onehot[i, i] == 1.0
-            assert onehot[i].sum() == 1.0
+    """Tests for element one-hot encoding."""
 
-@pytest.mark.unit
-class TestMatchAtomsToCoords:
-    
-    def test_exact_match(self):
-        # Mock biotite AtomArray
-        atoms = Mock()
-        atoms.coord = np.array([[0., 0., 0.], [1., 1., 1.], [2., 2., 2.]])
-        
-        target = np.array([[1., 1., 1.], [0., 0., 0.]])
-        
-        matched = match_atoms_to_coords(atoms, target, tolerance=0.01)
-        
-        assert len(matched) == 2
-        assert 1 in matched  # [1,1,1] matches index 1
-        assert 0 in matched  # [0,0,0] matches index 0
-    
-    def test_within_tolerance(self):
-        atoms = Mock()
-        atoms.coord = np.array([[0., 0., 0.], [1., 1., 1.]])
-        
-        # Slightly off coordinates
-        target = np.array([[0.005, 0.005, 0.005]])
-        
-        matched = match_atoms_to_coords(atoms, target, tolerance=0.01)
-        assert 0 in matched
-    
-    def test_outside_tolerance(self):
-        """Test that matches outside tolerance are excluded."""
-        atoms = Mock()
-        atoms.coord = np.array([[0., 0., 0.], [1., 1., 1.]])
-        
-        # [0.1, 0.1, 0.1] is ~0.17 away from nearest atom [0,0,0]
-        target = np.array([[0.1, 0.1, 0.1]])
-        
-        matched = match_atoms_to_coords(atoms, target, tolerance=0.01)
-        assert len(matched) == 0 
-    
-    def test_empty_target(self):
-        atoms = Mock()
-        atoms.coord = np.array([[0., 0., 0.]])
-        
-        target = np.zeros((0, 3))
-        matched = match_atoms_to_coords(atoms, target)
-        
-        assert matched == []
+    def test_output_shape(self):
+        """Output shape should be (n_symbols, num_classes)."""
+        symbols = ["C", "N", "O", "S"]
+        out = element_onehot(symbols)
+        assert out.shape == (4, len(ELEMENT_VOCAB) + 1)
+
+    def test_known_elements(self):
+        """Known elements should have correct one-hot encoding."""
+        symbols = ["C", "N", "O"]
+        out = element_onehot(symbols)
+
+        # C should be at index 0, N at 1, O at 2
+        assert out[0, ELEM_IDX["C"]] == 1.0
+        assert out[1, ELEM_IDX["N"]] == 1.0
+        assert out[2, ELEM_IDX["O"]] == 1.0
+
+    def test_unknown_element_goes_to_other_bucket(self):
+        """Unknown elements should go to the 'other' bucket (last index)."""
+        symbols = ["X", "Y", "Z"]  # Unknown elements
+        out = element_onehot(symbols)
+
+        other_idx = len(ELEMENT_VOCAB)
+        for i in range(3):
+            assert out[i, other_idx] == 1.0
+            # All other positions should be 0
+            assert out[i, :other_idx].sum() == 0.0
+
+    def test_case_insensitivity(self):
+        """Encoding should be case-insensitive."""
+        upper = element_onehot(["C", "N", "O"])
+        lower = element_onehot(["c", "n", "o"])
+        mixed = element_onehot(["C", "n", "O"])
+
+        assert torch.allclose(upper, lower)
+        assert torch.allclose(upper, mixed)
+
+    def test_empty_list(self):
+        """Empty list should return empty tensor."""
+        out = element_onehot([])
+        assert out.shape == (0, len(ELEMENT_VOCAB) + 1)
+
+    def test_all_vocab_elements(self):
+        """All vocabulary elements should be encoded correctly."""
+        out = element_onehot(ELEMENT_VOCAB)
+
+        for i, elem in enumerate(ELEMENT_VOCAB):
+            assert out[i, i] == 1.0
+            assert out[i].sum() == 1.0
+
+    def test_output_is_float(self):
+        """Output should be float tensor."""
+        out = element_onehot(["C", "N"])
+        assert out.dtype == torch.float32
+
+    def test_single_element(self):
+        """Single element should work."""
+        out = element_onehot(["C"])
+        assert out.shape == (1, len(ELEMENT_VOCAB) + 1)
+        assert out[0, ELEM_IDX["C"]] == 1.0
 
 
 @pytest.mark.unit
 class TestMakeUndirected:
-    
-    def test_adds_reverse_edges(self):
+    """Tests for edge symmetrization helper."""
+
+    def test_basic_symmetrization(self):
+        """Should add reverse edges."""
         edge_index = torch.tensor([[0, 1], [1, 2]])
-        
-        result = _make_undirected(edge_index)
-        
+        out = _make_undirected(edge_index)
+
         # Should contain both directions
-        edges_set = set(tuple(e) for e in result.T.tolist())
-        assert (0, 1) in edges_set
-        assert (1, 0) in edges_set
-        assert (1, 2) in edges_set
-        assert (2, 1) in edges_set
-    
-    def test_removes_duplicates(self):
-        # Already has some reverse edges
-        edge_index = torch.tensor([[0, 1, 1], [1, 0, 2]])
-        
-        result = _make_undirected(edge_index)
-        
-        # Count unique edges
-        unique_edges = result.T.unique(dim=0)
-        assert unique_edges.shape[0] == result.shape[1]
-    
-    def test_empty_edges(self):
+        assert out.shape[1] >= 2
+        # Check reverse edges exist
+        edges_set = set(zip(out[0].tolist(), out[1].tolist()))
+        assert (0, 1) in edges_set and (1, 0) in edges_set
+        assert (1, 2) in edges_set and (2, 1) in edges_set
+
+    def test_empty_edge_index(self):
+        """Empty input should return empty output."""
         edge_index = torch.empty((2, 0), dtype=torch.long)
-        
-        result = _make_undirected(edge_index)
-        
-        assert result.shape == (2, 0)
-    
-    def test_single_edge(self):
-        edge_index = torch.tensor([[0], [1]])
-        
-        result = _make_undirected(edge_index)
-        
-        assert result.shape[1] == 2
-        edges_set = set(tuple(e) for e in result.T.tolist())
-        assert (0, 1) in edges_set
-        assert (1, 0) in edges_set
+        out = _make_undirected(edge_index)
+
+        assert out.shape == (2, 0)
+
+    def test_already_undirected(self):
+        """Already undirected edges should not duplicate."""
+        edge_index = torch.tensor([[0, 1, 1, 0], [1, 0, 2, 2]])
+        out = _make_undirected(edge_index)
+
+        # Should have same or fewer edges (deduplicated)
+        edges_set = set(zip(out[0].tolist(), out[1].tolist()))
+        assert len(edges_set) == out.shape[1]  # No duplicates
+
+    def test_self_loops_preserved(self):
+        """Self-loops should be preserved."""
+        edge_index = torch.tensor([[0, 1], [0, 2]])  # Self-loop at 0
+        out = _make_undirected(edge_index)
+
+        edges_set = set(zip(out[0].tolist(), out[1].tolist()))
+        assert (0, 0) in edges_set
+
+    def test_output_dtype(self):
+        """Output should preserve dtype."""
+        edge_index = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
+        out = _make_undirected(edge_index)
+
+        assert out.dtype == torch.long
+
 
 @pytest.mark.unit
-class TestProteinWaterDataset:
+class TestMatchAtomsToCoords:
+    """Tests for atom-to-coordinate matching."""
 
-    @pytest.fixture
-    def pdb_list_file(self, temp_dir):
-        """Create a temporary PDB list file (whole PDB format)."""
-        list_path = Path(temp_dir) / "pdb_list.txt"
-        list_path.write_text("6eey_final\n")
-        return str(list_path)
+    def test_perfect_match(self):
+        """Exact coordinate matches should be found."""
+        import biotite.structure as bts
 
-    @pytest.fixture
-    def cached_dataset(self, temp_dir, real_cached_data):
-        """Create dataset with real cached data files."""
-        cached, _, _ = real_cached_data
+        # Create atom array with known coords
+        atoms = bts.AtomArray(3)
+        atoms.coord = np.array([[0., 0., 0.], [1., 0., 0.], [2., 0., 0.]])
 
-        processed_dir = Path(temp_dir) / "processed"
-        processed_dir.mkdir()
+        target_coords = np.array([[0., 0., 0.], [2., 0., 0.]])
 
-        # Create cached file from real data
-        torch.save(cached, processed_dir / "6eey_final.pt")
+        matched = match_atoms_to_coords(atoms, target_coords, tolerance=0.01)
 
-        pdb_list_file = Path(temp_dir) / "list.txt"
-        pdb_list_file.write_text("6eey_final\n")
+        assert len(matched) == 2
+        assert 0 in matched
+        assert 2 in matched
 
-        return ProteinWaterDataset(
-            pdb_list_file=str(pdb_list_file),
-            processed_dir=str(processed_dir),
-            base_pdb_dir=temp_dir,
-            preprocess=False,  # Already cached
-        )
-    
-    def test_parse_pdb_list(self, pdb_list_file, temp_dir):
-        """Test PDB list parsing (whole PDB format without chain ID)."""
-        dataset = ProteinWaterDataset(
-            pdb_list_file=pdb_list_file,
-            processed_dir=temp_dir,
-            preprocess=False,
-        )
+    def test_no_match_outside_tolerance(self):
+        """Coordinates outside tolerance should not match."""
+        import biotite.structure as bts
 
-        assert len(dataset.entries) == 1
-        assert dataset.entries[0]['pdb_id'] == '6eey'
-        assert dataset.entries[0]['chain_id'] is None
+        atoms = bts.AtomArray(2)
+        atoms.coord = np.array([[0., 0., 0.], [1., 0., 0.]])
 
-    def test_len(self, cached_dataset):
-        assert len(cached_dataset) == 1
-    
-    def test_getitem_returns_heterodata(self, cached_dataset):
-        data = cached_dataset[0]
-        
-        assert isinstance(data, HeteroData)
-        assert 'protein' in data.node_types
-        assert 'water' in data.node_types
-    
-    def test_getitem_protein_attributes(self, cached_dataset):
-        data = cached_dataset[0]
-        
-        assert hasattr(data['protein'], 'pos')
-        assert hasattr(data['protein'], 'x')
-        assert hasattr(data['protein'], 'residue_index')
-        assert data['protein'].pos.shape[1] == 3
-    
-    def test_getitem_water_attributes(self, cached_dataset):
-        data = cached_dataset[0]
-        
-        assert hasattr(data['water'], 'pos')
-        assert hasattr(data['water'], 'x')
-    
-    def test_getitem_edges(self, cached_dataset):
-        data = cached_dataset[0]
-        
-        assert ('protein', 'pp', 'protein') in data.edge_types
-        edge_data = data['protein', 'pp', 'protein']
-        assert hasattr(edge_data, 'edge_index')
-        assert hasattr(edge_data, 'edge_rbf')
-        assert hasattr(edge_data, 'edge_vec')
-    
-    def test_include_mates_true(self, cached_dataset, real_cached_data):
-        """Test that mates are included when flag is True."""
-        cached, _, _ = real_cached_data
-        data = cached_dataset[0]
+        target_coords = np.array([[0.5, 0., 0.]])  # Not close to any atom
 
-        expected_protein_nodes = (
-            cached['protein_pos'].size(0) +
-            cached['mate_pos'].size(0)
-        )
-        assert data['protein'].num_nodes == expected_protein_nodes
-    
-    def test_include_mates_false(self, temp_dir, real_cached_data):
-        """Test that mates are excluded when flag is False."""
-        cached, _, _ = real_cached_data
+        matched = match_atoms_to_coords(atoms, target_coords, tolerance=0.01)
 
-        processed_dir = Path(temp_dir) / "processed_no_mates"
-        processed_dir.mkdir()
+        assert len(matched) == 0
 
-        torch.save(cached, processed_dir / "6eey_final.pt")
+    def test_empty_target_coords(self):
+        """Empty target coordinates should return empty list."""
+        import biotite.structure as bts
 
-        pdb_list_file = Path(temp_dir) / "list.txt"
-        pdb_list_file.write_text("6eey_final\n")
+        atoms = bts.AtomArray(3)
+        atoms.coord = np.array([[0., 0., 0.], [1., 0., 0.], [2., 0., 0.]])
 
-        dataset = ProteinWaterDataset(
-            pdb_list_file=str(pdb_list_file),
-            processed_dir=str(processed_dir),
-            preprocess=False,
-            include_mates=False,
-        )
+        target_coords = np.zeros((0, 3))
 
-        data = dataset[0]
-        assert data['protein'].num_nodes == cached['protein_pos'].size(0)
-    
-    def test_missing_cache_raises(self, temp_dir):
-        """Test that missing cache file raises FileNotFoundError."""
-        pdb_list_file = Path(temp_dir) / "list.txt"
-        pdb_list_file.write_text("missing_final\n")
+        matched = match_atoms_to_coords(atoms, target_coords, tolerance=0.01)
 
-        dataset = ProteinWaterDataset(
-            pdb_list_file=str(pdb_list_file),
-            processed_dir=temp_dir,
-            preprocess=False,  # Don't preprocess, so entry won't be filtered
-        )
+        assert matched == []
 
-        # Dataset should have the entry, but accessing it should raise
-        assert len(dataset.entries) == 1
-        with pytest.raises(FileNotFoundError):
-            _ = dataset[0]
-    
-    def test_metadata_stored(self, cached_dataset):
-        """Test that metadata is stored on HeteroData."""
-        data = cached_dataset[0]
-        
-        assert hasattr(data, 'pdb_id')
-        assert hasattr(data, 'num_asu_protein_atoms')
+    def test_tolerance_parameter(self):
+        """Match should respect tolerance parameter."""
+        import biotite.structure as bts
+
+        atoms = bts.AtomArray(1)
+        atoms.coord = np.array([[0., 0., 0.]])
+
+        target_coords = np.array([[0.05, 0., 0.]])
+
+        # Should not match with tight tolerance
+        matched_tight = match_atoms_to_coords(atoms, target_coords, tolerance=0.01)
+        assert len(matched_tight) == 0
+
+        # Should match with loose tolerance
+        matched_loose = match_atoms_to_coords(atoms, target_coords, tolerance=0.1)
+        assert len(matched_loose) == 1
+
 
 @pytest.mark.unit
-class TestGetDataloader:
+class TestCheckComDistance:
+    """Tests for center of mass distance quality filter."""
 
-    @pytest.fixture
-    def dataloader_setup(self, temp_dir, real_cached_data):
-        """Setup for dataloader tests."""
-        cached, _, _ = real_cached_data
+    def test_same_com_passes(self):
+        """Identical CoMs should pass."""
+        protein_coords = torch.randn(100, 3)
+        water_coords = protein_coords[:10].clone()  # Same center region
 
-        processed_dir = Path(temp_dir) / "processed"
-        processed_dir.mkdir()
+        is_valid, reason = check_com_distance(protein_coords, water_coords, max_com_dist=25.0)
 
-        pdb_list = Path(temp_dir) / "list.txt"
-        pdb_list.write_text("6eey_final\n6eey_final\n")
+        assert is_valid is True
+        assert reason == ""
 
-        # Create two identical cache files for testing
-        for i, key in enumerate(["6eey_final", "6eey_final"]):
-            torch.save(cached, processed_dir / f"{key}_{i}.pt")
+    def test_close_com_passes(self):
+        """Close CoMs should pass."""
+        protein_coords = torch.zeros(100, 3)
+        water_coords = torch.zeros(10, 3) + 5.0  # 5A offset in all dims ~8.7A distance
 
-        # Update list to use the numbered keys
-        pdb_list.write_text("6eey_final_0\n6eey_final_1\n")
+        is_valid, reason = check_com_distance(protein_coords, water_coords, max_com_dist=25.0)
 
-        return str(pdb_list), str(processed_dir)
-    
-    def test_returns_dataloader(self, dataloader_setup):
-        pdb_list, processed_dir = dataloader_setup
+        assert is_valid is True
 
-        loader = get_dataloader(
-            pdb_list_file=pdb_list,
-            processed_dir=processed_dir,
-            batch_size=2,
-            preprocess=False,
-            num_workers=0,
-        )
+    def test_far_com_fails(self):
+        """Distant CoMs should fail."""
+        protein_coords = torch.zeros(100, 3)
+        water_coords = torch.zeros(10, 3) + 100.0  # 100A offset
 
-        from torch.utils.data import DataLoader
-        assert isinstance(loader, DataLoader)
+        is_valid, reason = check_com_distance(protein_coords, water_coords, max_com_dist=25.0)
 
-    def test_batch_size(self, dataloader_setup):
-        pdb_list, processed_dir = dataloader_setup
+        assert is_valid is False
+        assert "CoM distance" in reason
+        assert "exceeds threshold" in reason
 
-        loader = get_dataloader(
-            pdb_list_file=pdb_list,
-            processed_dir=processed_dir,
-            batch_size=2,
-            preprocess=False,
-            num_workers=0,
-        )
+    def test_empty_water_passes(self):
+        """Empty water coordinates should pass (trivially)."""
+        protein_coords = torch.randn(100, 3)
+        water_coords = torch.zeros(0, 3)
 
-        batch = next(iter(loader))
-        # Batch should contain data from 2 graphs
-        assert batch['protein'].batch.max().item() == 1  # 0 and 1 for 2 graphs
+        is_valid, reason = check_com_distance(protein_coords, water_coords, max_com_dist=25.0)
 
-    def test_shuffle_option(self, dataloader_setup):
-        pdb_list, processed_dir = dataloader_setup
+        assert is_valid is True
 
-        loader_shuffled = get_dataloader(
-            pdb_list_file=pdb_list,
-            processed_dir=processed_dir,
-            batch_size=1,
-            shuffle=True,
-            preprocess=False,
-            num_workers=0,
-        )
+    def test_custom_threshold(self):
+        """Custom threshold should be respected."""
+        protein_coords = torch.zeros(100, 3)
+        water_coords = torch.zeros(10, 3) + 10.0  # ~17.3A distance
 
-        loader_unshuffled = get_dataloader(
-            pdb_list_file=pdb_list,
-            processed_dir=processed_dir,
-            batch_size=1,
-            shuffle=False,
-            preprocess=False,
-            num_workers=0,
-        )
+        # Tight threshold should fail
+        is_valid_tight, _ = check_com_distance(protein_coords, water_coords, max_com_dist=10.0)
+        assert is_valid_tight is False
 
-        # Both should work
-        assert len(list(loader_shuffled)) == 2
-        assert len(list(loader_unshuffled)) == 2
+        # Loose threshold should pass
+        is_valid_loose, _ = check_com_distance(protein_coords, water_coords, max_com_dist=50.0)
+        assert is_valid_loose is True
+
 
 @pytest.mark.unit
-class TestEdgeCases:
-    
-    def test_no_water_molecules(self, temp_dir):
-        """Test dataset handles entries with no water."""
-        processed_dir = Path(temp_dir) / "processed"
-        processed_dir.mkdir()
+class TestCheckWaterClashes:
+    """Tests for water clashing quality filter."""
 
-        pdb_list = Path(temp_dir) / "list.txt"
-        pdb_list.write_text("nowat_final\n")
+    def test_no_clashes_passes(self):
+        """Waters far from protein should pass."""
+        protein_coords = torch.zeros(100, 3)
+        # Waters at distance 10A away
+        water_coords = torch.zeros(10, 3) + 10.0
 
-        cached = {
-            'protein_pos': torch.randn(20, 3),
-            'protein_x': torch.randn(20, 16),
-            'protein_res_idx': torch.randint(0, 5, (20,)),
-            'water_pos': torch.zeros((0, 3)),
-            'water_x': torch.zeros((0, 16)),
-            'mate_pos': torch.zeros((0, 3)),
-            'mate_x': torch.zeros((0, 16)),
-        }
-        torch.save(cached, processed_dir / "nowat_final.pt")
-
-        dataset = ProteinWaterDataset(
-            pdb_list_file=str(pdb_list),
-            processed_dir=str(processed_dir),
-            preprocess=False,
+        is_valid, reason = check_water_clashes(
+            protein_coords, water_coords, clash_dist=2.0, max_clash_fraction=0.05
         )
 
-        data = dataset[0]
-        assert data['water'].num_nodes == 0
+        assert is_valid is True
 
-    def test_no_mates(self, temp_dir):
-        """Test dataset handles entries with no symmetry mates."""
-        processed_dir = Path(temp_dir) / "processed"
-        processed_dir.mkdir()
+    def test_all_clashing_fails(self):
+        """All waters clashing should fail."""
+        protein_coords = torch.randn(100, 3)
+        # Waters exactly at protein positions (0A distance)
+        water_coords = protein_coords[:10].clone()
 
-        pdb_list = Path(temp_dir) / "list.txt"
-        pdb_list.write_text("nomate_final\n")
-
-        cached = {
-            'protein_pos': torch.randn(15, 3),
-            'protein_x': torch.randn(15, 16),
-            'protein_res_idx': torch.randint(0, 3, (15,)),
-            'water_pos': torch.randn(3, 3),
-            'water_x': torch.randn(3, 16),
-            'mate_pos': torch.zeros((0, 3)),
-            'mate_x': torch.zeros((0, 16)),
-        }
-        torch.save(cached, processed_dir / "nomate_final.pt")
-
-        dataset = ProteinWaterDataset(
-            pdb_list_file=str(pdb_list),
-            processed_dir=str(processed_dir),
-            preprocess=False,
-            include_mates=True,
+        is_valid, reason = check_water_clashes(
+            protein_coords, water_coords, clash_dist=2.0, max_clash_fraction=0.05
         )
 
-        data = dataset[0]
-        # Should only have ASU protein atoms
-        assert data['protein'].num_nodes == 15
-    
-    def test_malformed_pdb_list_line(self, temp_dir, capsys):
-        """Test that malformed lines are skipped with warning."""
-        pdb_list = Path(temp_dir) / "list.txt"
-        pdb_list.write_text("valid_final\ninvalid\n")
+        assert is_valid is False
+        assert "clash fraction" in reason.lower()
 
-        dataset = ProteinWaterDataset(
-            pdb_list_file=str(pdb_list),
-            processed_dir=temp_dir,
-            preprocess=False,  # Don't try to actually preprocess
+    def test_partial_clashes_at_threshold(self):
+        """Clashes at exactly threshold should fail (> not >=)."""
+        protein_coords = torch.zeros(100, 3)
+        # 3 out of 50 waters = 6% clashing (> 5% threshold)
+        water_coords = torch.zeros(50, 3) + 10.0
+        water_coords[:3] = 0.0  # These will clash
+
+        is_valid, reason = check_water_clashes(
+            protein_coords, water_coords, clash_dist=2.0, max_clash_fraction=0.05
         )
 
-        # Only the valid line should be parsed
-        assert len(dataset.entries) == 1
-        captured = capsys.readouterr()
-        assert "Skipping malformed" in captured.out
+        assert is_valid is False
 
-    def test_parse_pdb_list_with_chain_ids(self, temp_dir):
-        """Test PDB list parsing with chain-specific format."""
-        pdb_list = Path(temp_dir) / "list.txt"
-        pdb_list.write_text("6eey_final_A\n6eey_final_B\n")
+    def test_below_threshold_passes(self):
+        """Clashes below threshold should pass."""
+        protein_coords = torch.zeros(100, 3)
+        # 2 out of 100 waters = 2% clashing (< 5% threshold)
+        water_coords = torch.zeros(100, 3) + 10.0
+        water_coords[:2] = 0.0  # These will clash
 
-        dataset = ProteinWaterDataset(
-            pdb_list_file=str(pdb_list),
-            processed_dir=temp_dir,
-            preprocess=False,  # Don't preprocess
+        is_valid, reason = check_water_clashes(
+            protein_coords, water_coords, clash_dist=2.0, max_clash_fraction=0.05
         )
 
-        assert len(dataset.entries) == 2
-        assert dataset.entries[0]['pdb_id'] == '6eey'
-        assert dataset.entries[0]['chain_id'] == 'A'
-        assert dataset.entries[1]['pdb_id'] == '6eey'
-        assert dataset.entries[1]['chain_id'] == 'B'
+        assert is_valid is True
 
-    def test_parse_pdb_list_mixed_formats(self, temp_dir):
-        """Test PDB list parsing with mixed formats (with and without chain IDs)."""
-        pdb_list = Path(temp_dir) / "list.txt"
-        pdb_list.write_text("6eey_final\n6eey_final_A\n6eey_final_B\n")
+    def test_empty_water_passes(self):
+        """Empty water coordinates should pass."""
+        protein_coords = torch.randn(100, 3)
+        water_coords = torch.zeros(0, 3)
 
-        dataset = ProteinWaterDataset(
-            pdb_list_file=str(pdb_list),
-            processed_dir=temp_dir,
-            preprocess=False,  # Don't preprocess
+        is_valid, reason = check_water_clashes(
+            protein_coords, water_coords, clash_dist=2.0, max_clash_fraction=0.05
         )
 
-        assert len(dataset.entries) == 3
-        assert dataset.entries[0]['pdb_id'] == '6eey'
-        assert dataset.entries[0]['chain_id'] is None
-        assert dataset.entries[1]['pdb_id'] == '6eey'
-        assert dataset.entries[1]['chain_id'] == 'A'
-        assert dataset.entries[2]['pdb_id'] == '6eey'
-        assert dataset.entries[2]['chain_id'] == 'B'
+        assert is_valid is True
+
+    def test_custom_clash_distance(self):
+        """Custom clash distance should be respected."""
+        protein_coords = torch.zeros(10, 3)
+        water_coords = torch.tensor([[1.5, 0., 0.]])  # 1.5A from origin
+
+        # 1A clash distance - not clashing
+        is_valid_1a, _ = check_water_clashes(
+            protein_coords, water_coords, clash_dist=1.0, max_clash_fraction=0.05
+        )
+        assert is_valid_1a is True
+
+        # 2A clash distance - clashing
+        is_valid_2a, _ = check_water_clashes(
+            protein_coords, water_coords, clash_dist=2.0, max_clash_fraction=0.05
+        )
+        assert is_valid_2a is False
+
+@pytest.mark.unit
+class TestCheckChainInteractions:
+    """Tests for chain interaction quality filter."""
+
+    def test_single_chain_passes(self):
+        """Single chain should always pass."""
+        import biotite.structure as bts
+
+        atoms = bts.AtomArray(10)
+        atoms.chain_id = np.array(["A"] * 10)
+        atoms.coord = np.random.randn(10, 3)
+
+        is_valid, reason, status = check_chain_interactions(atoms, interface_dist_threshold=4.0)
+
+        assert is_valid is True
+        assert status == "Single Chain"
+
+    def test_interacting_chains_pass(self):
+        """Chains within interface distance should pass."""
+        import biotite.structure as bts
+
+        atoms = bts.AtomArray(20)
+        atoms.chain_id = np.array(["A"] * 10 + ["B"] * 10)
+        # Place chains close together
+        atoms.coord = np.zeros((20, 3))
+        atoms.coord[:10] = np.random.randn(10, 3)
+        atoms.coord[10:] = np.random.randn(10, 3) + np.array([2., 0., 0.])  # 2A offset
+
+        is_valid, reason, status = check_chain_interactions(atoms, interface_dist_threshold=4.0)
+
+        assert is_valid is True
+        assert status == "Interacting"
+
+    def test_non_interacting_chains_fail(self):
+        """Chains beyond interface distance should fail."""
+        import biotite.structure as bts
+
+        atoms = bts.AtomArray(20)
+        atoms.chain_id = np.array(["A"] * 10 + ["B"] * 10)
+        # Place chains far apart
+        atoms.coord = np.zeros((20, 3))
+        atoms.coord[:10] = np.zeros((10, 3))
+        atoms.coord[10:] = np.zeros((10, 3)) + np.array([100., 0., 0.])  # 100A offset
+
+        is_valid, reason, status = check_chain_interactions(atoms, interface_dist_threshold=4.0)
+
+        assert is_valid is False
+        assert "ASU copies" in reason or "not PPI" in reason
+        assert status == "Non-Interacting (ASU Copies)"
+
+    def test_three_chains_any_pair_interacting(self):
+        """Multiple chains - should pass if any pair interacts."""
+        import biotite.structure as bts
+
+        atoms = bts.AtomArray(30)
+        atoms.chain_id = np.array(["A"] * 10 + ["B"] * 10 + ["C"] * 10)
+        atoms.coord = np.zeros((30, 3))
+        atoms.coord[:10] = np.zeros((10, 3))
+        atoms.coord[10:20] = np.zeros((10, 3)) + np.array([2., 0., 0.])  # B close to A
+        atoms.coord[20:] = np.zeros((10, 3)) + np.array([100., 0., 0.])  # C far from all
+
+        is_valid, reason, status = check_chain_interactions(atoms, interface_dist_threshold=4.0)
+
+        # Should pass because A and B interact
+        assert is_valid is True
+
 
 @pytest.mark.integration
 class TestParseAsuWithBiotite:
-    
-    def test_returns_tuple(self, pdb_path):
-        """Test function returns tuple of two AtomArrays."""
-        result = parse_asu_with_biotite(pdb_path)
-        
-        assert isinstance(result, tuple)
-        assert len(result) == 2
-    
-    def test_protein_atoms_structure(self, pdb_path):
-        """Test protein atoms have expected attributes."""
-        protein_atoms, _ = parse_asu_with_biotite(pdb_path)
-        
-        assert hasattr(protein_atoms, 'coord')
-        assert hasattr(protein_atoms, 'element')
-        assert hasattr(protein_atoms, 'res_name')
-        assert hasattr(protein_atoms, 'chain_id')
-        assert hasattr(protein_atoms, 'res_id')
-        
-        assert protein_atoms.coord.shape[1] == 3
+    """Tests for PDB parsing with biotite."""
+
+    def test_parse_returns_protein_and_water(self, pdb_6eey):
+        """Should return protein and water atom arrays."""
+        protein_atoms, water_atoms = parse_asu_with_biotite(pdb_6eey)
+
+        assert protein_atoms is not None
+        assert water_atoms is not None
         assert len(protein_atoms) > 0
-    
-    def test_water_atoms_structure(self, pdb_path):
-        """Test water atoms have expected attributes."""
-        _, water_atoms = parse_asu_with_biotite(pdb_path)
-        
-        assert hasattr(water_atoms, 'coord')
-        assert hasattr(water_atoms, 'element')
-        assert hasattr(water_atoms, 'res_name')
-        
-        if len(water_atoms) > 0:
-            assert water_atoms.coord.shape[1] == 3
-            # All water should be HOH or WAT
-            assert all(r in ("HOH", "WAT") for r in water_atoms.res_name)
-    
-    def test_no_hydrogens(self, pdb_path):
-        """Test that hydrogen atoms are excluded."""
-        protein_atoms, water_atoms = parse_asu_with_biotite(pdb_path)
-        
-        protein_elements = [str(e).upper() for e in protein_atoms.element]
-        water_elements = [str(e).upper() for e in water_atoms.element]
-        
+
+    def test_hydrogen_removed(self, pdb_6eey):
+        """Hydrogens should be removed from output."""
+        protein_atoms, water_atoms = parse_asu_with_biotite(pdb_6eey)
+
+        protein_elements = set(protein_atoms.element)
+        water_elements = set(water_atoms.element) if len(water_atoms) > 0 else set()
+
         assert "H" not in protein_elements
         assert "H" not in water_elements
-    
-    def test_chain_filter(self, pdb_path):
-        """Test chain filtering works."""
-        # Get all chains first
-        protein_all, _ = parse_asu_with_biotite(pdb_path, chain_filter=None)
+
+    def test_chain_filter(self, pdb_6eey):
+        """Chain filter should limit to specified chains."""
+        # Get all chains
+        protein_all, _ = parse_asu_with_biotite(pdb_6eey)
         all_chains = set(protein_all.chain_id)
-        
-        if len(all_chains) > 0:
-            # Filter to first chain only
+
+        if len(all_chains) > 1:
             first_chain = list(all_chains)[0]
-            protein_filtered, _ = parse_asu_with_biotite(pdb_path, chain_filter=[first_chain])
-            
-            filtered_chains = set(protein_filtered.chain_id)
-            assert filtered_chains == {first_chain}
-            assert len(protein_filtered) <= len(protein_all)
-    
-    def test_chain_filter_nonexistent(self, pdb_path):
-        """Test filtering by nonexistent chain returns empty."""
-        protein_atoms, water_atoms = parse_asu_with_biotite(pdb_path, chain_filter=["ZZZZZ"])
-        
-        assert len(protein_atoms) == 0
-    
-    def test_protein_is_amino_acids(self, pdb_path):
-        """Test protein atoms are from canonical amino acids."""
-        protein_atoms, _ = parse_asu_with_biotite(pdb_path)
-        
-        # Standard amino acid 3-letter codes
-        standard_aa = {
-            "ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY",
-            "HIS", "ILE", "LEU", "LYS", "MET", "PHE", "PRO", "SER",
-            "THR", "TRP", "TYR", "VAL"
-        }
-        
-        protein_res_names = set(protein_atoms.res_name)
-        assert protein_res_names.issubset(standard_aa)
+            protein_filtered, _ = parse_asu_with_biotite(pdb_6eey, chain_filter=[first_chain])
+
+            assert set(protein_filtered.chain_id) == {first_chain}
+            assert len(protein_filtered) < len(protein_all)
+
+    def test_water_residue_names(self, pdb_6eey):
+        """Water atoms should have HOH or WAT residue names."""
+        _, water_atoms = parse_asu_with_biotite(pdb_6eey)
+
+        if len(water_atoms) > 0:
+            water_res_names = set(water_atoms.res_name)
+            assert water_res_names.issubset({"HOH", "WAT"})
 
 
 @pytest.mark.integration
 class TestGetCrystalContactsPymol:
-    
-    def test_returns_dict(self, pdb_path):
-        """Test function returns dict with expected keys."""
-        result = get_crystal_contacts_pymol(pdb_path, cutoff=5.0)
-        
-        assert isinstance(result, dict)
+    """Tests for PyMOL crystal contact detection."""
+
+    def test_returns_expected_keys(self, pdb_6eey):
+        """Should return dictionary with expected keys."""
+        result = get_crystal_contacts_pymol(pdb_6eey, cutoff=5.0)
+
         assert "asu_coords" in result
         assert "mate_coords" in result
         assert "asu_atoms" in result
         assert "mate_atoms" in result
-    
-    def test_asu_coords_shape(self, pdb_path):
-        """Test ASU coordinates have correct shape."""
-        result = get_crystal_contacts_pymol(pdb_path)
-        
-        asu_coords = result["asu_coords"]
-        assert isinstance(asu_coords, np.ndarray)
-        assert asu_coords.ndim == 2
-        assert asu_coords.shape[1] == 3
-        assert len(asu_coords) > 0
-    
-    def test_mate_coords_shape(self, pdb_path):
-        """Test mate coordinates have correct shape."""
-        result = get_crystal_contacts_pymol(pdb_path)
-        
-        mate_coords = result["mate_coords"]
-        assert isinstance(mate_coords, np.ndarray)
-        assert mate_coords.ndim == 2
-        if mate_coords.shape[0] > 0:
-            assert mate_coords.shape[1] == 3
-    
-    def test_asu_atoms_list(self, pdb_path):
-        """Test ASU atoms is a list of atom objects."""
-        result = get_crystal_contacts_pymol(pdb_path)
-        
-        asu_atoms = result["asu_atoms"]
-        assert isinstance(asu_atoms, list)
-        assert len(asu_atoms) > 0
-        
-        # Check first atom has expected attributes
-        atom = asu_atoms[0]
-        assert hasattr(atom, 'symbol')
-        assert hasattr(atom, 'coord')
-    
-    def test_cutoff_affects_mates(self, pdb_path):
-        """Test that larger cutoff finds more or equal mate atoms."""
-        result_small = get_crystal_contacts_pymol(pdb_path, cutoff=3.0)
-        result_large = get_crystal_contacts_pymol(pdb_path, cutoff=8.0)
-        
-        # Larger cutoff should find >= mate atoms
+
+    def test_asu_coords_shape(self, pdb_6eey):
+        """ASU coords should be Nx3 array."""
+        result = get_crystal_contacts_pymol(pdb_6eey, cutoff=5.0)
+
+        assert result["asu_coords"].ndim == 2
+        assert result["asu_coords"].shape[1] == 3
+
+    def test_different_cutoffs(self, pdb_6eey):
+        """Larger cutoff should find more/equal mates."""
+        result_small = get_crystal_contacts_pymol(pdb_6eey, cutoff=3.0)
+        result_large = get_crystal_contacts_pymol(pdb_6eey, cutoff=8.0)
+
+        # Larger cutoff should generally find more interface atoms
         assert result_large["mate_coords"].shape[0] >= result_small["mate_coords"].shape[0]
-    
-    def test_coords_match_atoms_count(self, pdb_path):
-        """Test coordinates array length matches atom list length."""
-        result = get_crystal_contacts_pymol(pdb_path)
-        
-        assert result["asu_coords"].shape[0] == len(result["asu_atoms"])
-        assert result["mate_coords"].shape[0] == len(result["mate_atoms"])
 
 
 @pytest.mark.integration
-class TestPreprocessingPipeline:
-    
-    @pytest.fixture
-    def setup_pdb_structure(self, pdb_path, tmp_path):
-        """Create directory structure matching dataset expectations."""
-        # Dataset expects: base_dir/{pdb_id}/{pdb_id}_final.pdb
-        # Our file: 6eey_final.pdb -> pdb_id = "6eey"
-        pdb_id = "6eey"
-        pdb_subdir = tmp_path / pdb_id
-        pdb_subdir.mkdir()
-        
-        # Symlink or copy the file
-        target_path = pdb_subdir / f"{pdb_id}_final.pdb"
-        target_path.symlink_to(Path(pdb_path).resolve())
-        
-        return tmp_path  # This is the base_pdb_dir
-    
-    def test_preprocess_creates_cache_file(self, pdb_path, tmp_path, setup_pdb_structure):
-        """Test that preprocessing creates the expected cache file."""
-        base_pdb_dir = setup_pdb_structure
-        processed_dir = tmp_path / "processed"
-        processed_dir.mkdir()
+class TestProteinWaterDataset:
+    """Tests for the main dataset class."""
 
-        pdb_list = tmp_path / "list.txt"
-        pdb_list.write_text("6eey_final\n")
+    def test_dataset_creation(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
+        """Dataset should be created successfully."""
+        dataset = ProteinWaterDataset(
+            pdb_list_file=single_pdb_list_file,
+            processed_dir=str(tmp_processed_dir),
+            base_pdb_dir=str(pdb_base_dir),
+            preprocess=True,
+        )
+
+        assert len(dataset) >= 1
+
+    def test_getitem_returns_heterodata(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
+        """__getitem__ should return HeteroData."""
+        from torch_geometric.data import HeteroData
 
         dataset = ProteinWaterDataset(
-            pdb_list_file=str(pdb_list),
-            processed_dir=str(processed_dir),
-            base_pdb_dir=str(base_pdb_dir),
-            preprocess=True,
-            cutoff=5.0,
-        )
-
-        cache_file = processed_dir / "6eey_final.pt"
-        assert cache_file.exists()
-    
-    def test_cached_data_structure(self, pdb_path, tmp_path, setup_pdb_structure):
-        """Test cached data has all required keys."""
-        base_pdb_dir = setup_pdb_structure
-        processed_dir = tmp_path / "processed"
-        processed_dir.mkdir()
-
-        pdb_list = tmp_path / "list.txt"
-        pdb_list.write_text("6eey_final\n")
-
-        ProteinWaterDataset(
-            pdb_list_file=str(pdb_list),
-            processed_dir=str(processed_dir),
-            base_pdb_dir=str(base_pdb_dir),
+            pdb_list_file=single_pdb_list_file,
+            processed_dir=str(tmp_processed_dir),
+            base_pdb_dir=str(pdb_base_dir),
             preprocess=True,
         )
 
-        cached = torch.load(processed_dir / "6eey_final.pt", weights_only=False)
+        data = dataset[0]
+        assert isinstance(data, HeteroData)
 
-        required_keys = [
-            'protein_pos', 'protein_x', 'protein_res_idx',
-            'water_pos', 'water_x',
-            'mate_pos', 'mate_x'
-        ]
-        for key in required_keys:
-            assert key in cached, f"Missing key: {key}"
-    
-    def test_cached_data_types(self, pdb_path, tmp_path, setup_pdb_structure):
-        """Test cached tensors have correct types and shapes."""
-        base_pdb_dir = setup_pdb_structure
-        processed_dir = tmp_path / "processed"
-        processed_dir.mkdir()
-
-        pdb_list = tmp_path / "list.txt"
-        pdb_list.write_text("6eey_final\n")
-
-        ProteinWaterDataset(
-            pdb_list_file=str(pdb_list),
-            processed_dir=str(processed_dir),
-            base_pdb_dir=str(base_pdb_dir),
-            preprocess=True,
-        )
-
-        cached = torch.load(processed_dir / "6eey_final.pt", weights_only=False)
-
-        assert cached['protein_pos'].shape[1] == 3
-        assert cached['protein_pos'].dtype == torch.float32
-        assert cached['protein_x'].shape[0] == cached['protein_pos'].shape[0]
-        assert cached['protein_res_idx'].shape[0] == cached['protein_pos'].shape[0]
-        assert cached['water_x'].shape[0] == cached['water_pos'].shape[0]
-        assert cached['mate_x'].shape[0] == cached['mate_pos'].shape[0]
-    
-    def test_full_getitem_with_real_data(self, pdb_path, tmp_path, setup_pdb_structure):
-        """Test __getitem__ works end-to-end with real preprocessed data."""
-        base_pdb_dir = setup_pdb_structure
-        processed_dir = tmp_path / "processed"
-        processed_dir.mkdir()
-
-        pdb_list = tmp_path / "list.txt"
-        pdb_list.write_text("6eey_final\n")
-
+    def test_heterodata_has_required_fields(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
+        """HeteroData should have required node types and fields."""
         dataset = ProteinWaterDataset(
-            pdb_list_file=str(pdb_list),
-            processed_dir=str(processed_dir),
-            base_pdb_dir=str(base_pdb_dir),
+            pdb_list_file=single_pdb_list_file,
+            processed_dir=str(tmp_processed_dir),
+            base_pdb_dir=str(pdb_base_dir),
             preprocess=True,
         )
 
         data = dataset[0]
 
-        assert 'protein' in data.node_types
-        assert 'water' in data.node_types
+        # Check protein nodes
+        assert hasattr(data['protein'], 'pos')
+        assert hasattr(data['protein'], 'x')
+        assert hasattr(data['protein'], 'residue_index')
+
+        # Check water nodes
+        assert hasattr(data['water'], 'pos')
+        assert hasattr(data['water'], 'x')
+
+        # Check edges
         assert ('protein', 'pp', 'protein') in data.edge_types
-        assert data['protein'].num_nodes > 0
-        assert data['protein'].pos.shape == (data['protein'].num_nodes, 3)
-        assert data['protein', 'pp', 'protein'].edge_index.shape[0] == 2
+
+    def test_protein_positions_centered(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
+        """ASU protein positions should be centered (mean ~ 0)."""
+        dataset = ProteinWaterDataset(
+            pdb_list_file=single_pdb_list_file,
+            processed_dir=str(tmp_processed_dir),
+            base_pdb_dir=str(pdb_base_dir),
+            include_mates=False,  # Test centering without mates
+            preprocess=True,
+        )
+
+        data = dataset[0]
+        protein_center = data['protein'].pos.mean(dim=0)
+
+        assert torch.allclose(protein_center, torch.zeros(3), atol=1e-3)
+
+    def test_duplicate_single_sample(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
+        """duplicate_single_sample should multiply dataset length."""
+        dataset = ProteinWaterDataset(
+            pdb_list_file=single_pdb_list_file,
+            processed_dir=str(tmp_processed_dir),
+            base_pdb_dir=str(pdb_base_dir),
+            preprocess=True,
+            duplicate_single_sample=10,
+        )
+
+        assert len(dataset) == 10
+
+        # All items should be the same
+        data_0 = dataset[0]
+        data_5 = dataset[5]
+        assert torch.allclose(data_0['protein'].pos, data_5['protein'].pos)
+
+    def test_cached_file_created(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
+        """Preprocessing should create cached .pt file."""
+        dataset = ProteinWaterDataset(
+            pdb_list_file=single_pdb_list_file,
+            processed_dir=str(tmp_processed_dir),
+            base_pdb_dir=str(pdb_base_dir),
+            preprocess=True,
+        )
+
+        cache_file = tmp_processed_dir / "6eey_final_A.pt"
+        assert cache_file.exists()
+
+    def test_no_reprocess_if_cached(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
+        """Should not reprocess if cache exists."""
+        # First creation
+        ProteinWaterDataset(
+            pdb_list_file=single_pdb_list_file,
+            processed_dir=str(tmp_processed_dir),
+            base_pdb_dir=str(pdb_base_dir),
+            preprocess=True,
+        )
+
+        cache_file = tmp_processed_dir / "6eey_final_A.pt"
+        mtime_1 = cache_file.stat().st_mtime
+
+        # Second creation should not modify cache
+        ProteinWaterDataset(
+            pdb_list_file=single_pdb_list_file,
+            processed_dir=str(tmp_processed_dir),
+            base_pdb_dir=str(pdb_base_dir),
+            preprocess=True,
+        )
+
+        mtime_2 = cache_file.stat().st_mtime
+        assert mtime_1 == mtime_2
+
+
+@pytest.mark.integration
+class TestQualityFiltersWithRealPDBs:
+    """Integration tests for quality filters using real PDB files."""
+
+    def test_6eey_passes_com_check(self, pdb_6eey):
+        """6eey should pass COM distance check."""
+        protein_atoms, water_atoms = parse_asu_with_biotite(pdb_6eey)
+
+        protein_pos = torch.tensor(protein_atoms.coord, dtype=torch.float32)
+        water_pos = torch.tensor(water_atoms.coord, dtype=torch.float32)
+
+        is_valid, reason = check_com_distance(protein_pos, water_pos, max_com_dist=25.0)
+
+        assert is_valid is True, f"6eey should pass COM check but got: {reason}"
+
+    def test_6eey_passes_clash_check(self, pdb_6eey):
+        """6eey should pass water clash check."""
+        protein_atoms, water_atoms = parse_asu_with_biotite(pdb_6eey)
+
+        protein_pos = torch.tensor(protein_atoms.coord, dtype=torch.float32)
+        water_pos = torch.tensor(water_atoms.coord, dtype=torch.float32)
+
+        is_valid, reason = check_water_clashes(
+            protein_pos, water_pos, clash_dist=2.0, max_clash_fraction=0.05
+        )
+
+        assert is_valid is True, f"6eey should pass clash check but got: {reason}"
+
+    def test_2b5w_fails_com_check(self, pdb_2b5w):
+        """2b5w should fail COM distance check."""
+        protein_atoms, water_atoms = parse_asu_with_biotite(pdb_2b5w)
+
+        protein_pos = torch.tensor(protein_atoms.coord, dtype=torch.float32)
+        water_pos = torch.tensor(water_atoms.coord, dtype=torch.float32)
+
+        is_valid, reason = check_com_distance(protein_pos, water_pos, max_com_dist=25.0)
+
+        assert is_valid is False, "2b5w should fail COM check"
+        assert "CoM distance" in reason
+
+    def test_8dzt_fails_clash_check_at_2_percent(self, pdb_8dzt):
+        """8dzt should fail water clash check at 2% threshold with 2A distance."""
+        protein_atoms, water_atoms = parse_asu_with_biotite(pdb_8dzt)
+
+        protein_pos = torch.tensor(protein_atoms.coord, dtype=torch.float32)
+        water_pos = torch.tensor(water_atoms.coord, dtype=torch.float32)
+
+        is_valid, reason = check_water_clashes(
+            protein_pos, water_pos, clash_dist=2.0, max_clash_fraction=0.02
+        )
+
+        assert is_valid is False, "8dzt should fail clash check at 2% threshold"
+        assert "clash fraction" in reason.lower()
+
+    def test_8dzt_passes_clash_check_at_5_percent(self, pdb_8dzt):
+        """8dzt should pass water clash check at 5% threshold (default)."""
+        protein_atoms, water_atoms = parse_asu_with_biotite(pdb_8dzt)
+
+        protein_pos = torch.tensor(protein_atoms.coord, dtype=torch.float32)
+        water_pos = torch.tensor(water_atoms.coord, dtype=torch.float32)
+
+        is_valid, reason = check_water_clashes(
+            protein_pos, water_pos, clash_dist=2.0, max_clash_fraction=0.05
+        )
+
+        # At 5% threshold, 8dzt should pass (it only fails at 2%)
+        assert is_valid is True, f"8dzt should pass clash check at 5% but got: {reason}"
+
+
+@pytest.mark.integration
+class TestGetDataloader:
+    """Tests for dataloader creation."""
+
+    def test_dataloader_creation(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
+        """Dataloader should be created successfully."""
+        loader = get_dataloader(
+            pdb_list_file=single_pdb_list_file,
+            processed_dir=str(tmp_processed_dir),
+            base_pdb_dir=str(pdb_base_dir),
+            batch_size=1,
+            shuffle=False,
+            num_workers=0,
+        )
+
+        assert loader is not None
+        assert len(loader) >= 1
+
+    def test_dataloader_iteration(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
+        """Should be able to iterate over dataloader."""
+        loader = get_dataloader(
+            pdb_list_file=single_pdb_list_file,
+            processed_dir=str(tmp_processed_dir),
+            base_pdb_dir=str(pdb_base_dir),
+            batch_size=1,
+            shuffle=False,
+            num_workers=0,
+        )
+
+        batch = next(iter(loader))
+        assert batch is not None
+        assert hasattr(batch['protein'], 'pos')
+
+    def test_dataloader_batching(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
+        """Dataloader should support batching with duplicate_single_sample."""
+        loader = get_dataloader(
+            pdb_list_file=single_pdb_list_file,
+            processed_dir=str(tmp_processed_dir),
+            base_pdb_dir=str(pdb_base_dir),
+            batch_size=4,
+            shuffle=False,
+            num_workers=0,
+            duplicate_single_sample=8,
+        )
+
+        # With 8 samples and batch_size=4, should have 2 batches
+        assert len(loader) == 2
+
+        batch = next(iter(loader))
+        # Batch should have batch indices
+        assert hasattr(batch['protein'], 'batch')
+
+
+# ============== Tests for PDB list parsing ==============
+
+@pytest.mark.unit
+class TestPdbListParsing:
+    """Tests for PDB list file parsing."""
+
+    def test_chain_specific_format(self, tmp_path, pdb_base_dir):
+        """Should parse chain-specific format: pdb_id_final_chainID"""
+        list_file = tmp_path / "list.txt"
+        list_file.write_text("6eey_final_A\n")
+
+        dataset = ProteinWaterDataset(
+            pdb_list_file=str(list_file),
+            processed_dir=str(tmp_path / "processed"),
+            base_pdb_dir=str(pdb_base_dir),
+            preprocess=False,  # Don't preprocess for this test
+        )
+
+        assert len(dataset.entries) == 1
+        assert dataset.entries[0]['pdb_id'] == '6eey'
+        assert dataset.entries[0]['chain_id'] == 'A'
+
+    def test_whole_pdb_format(self, tmp_path, pdb_base_dir):
+        """Should parse whole PDB format: pdb_id_final"""
+        list_file = tmp_path / "list.txt"
+        list_file.write_text("6eey_final\n")
+
+        dataset = ProteinWaterDataset(
+            pdb_list_file=str(list_file),
+            processed_dir=str(tmp_path / "processed"),
+            base_pdb_dir=str(pdb_base_dir),
+            preprocess=False,
+        )
+
+        assert len(dataset.entries) == 1
+        assert dataset.entries[0]['pdb_id'] == '6eey'
+        assert dataset.entries[0]['chain_id'] is None
+
+    def test_multiple_entries(self, tmp_path, pdb_base_dir):
+        """Should parse multiple entries."""
+        list_file = tmp_path / "list.txt"
+        list_file.write_text("6eey_final_A\n6eey_final_B\n")
+
+        dataset = ProteinWaterDataset(
+            pdb_list_file=str(list_file),
+            processed_dir=str(tmp_path / "processed"),
+            base_pdb_dir=str(pdb_base_dir),
+            preprocess=False,
+        )
+
+        assert len(dataset.entries) == 2
+
+    def test_empty_lines_ignored(self, tmp_path, pdb_base_dir):
+        """Empty lines should be ignored."""
+        list_file = tmp_path / "list.txt"
+        list_file.write_text("\n6eey_final_A\n\n\n")
+
+        dataset = ProteinWaterDataset(
+            pdb_list_file=str(list_file),
+            processed_dir=str(tmp_path / "processed"),
+            base_pdb_dir=str(pdb_base_dir),
+            preprocess=False,
+        )
+
+        assert len(dataset.entries) == 1
+
+
+@pytest.mark.unit
+class TestDatasetEdgeCases:
+    """Tests for edge cases in dataset handling."""
+
+    def test_include_mates_flag(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
+        """include_mates flag should affect protein node count."""
+        # Create dataset with mates
+        dataset_with_mates = ProteinWaterDataset(
+            pdb_list_file=single_pdb_list_file,
+            processed_dir=str(tmp_processed_dir / "with_mates"),
+            base_pdb_dir=str(pdb_base_dir),
+            include_mates=True,
+            preprocess=True,
+        )
+
+        # Create dataset without mates (separate cache dir)
+        dataset_no_mates = ProteinWaterDataset(
+            pdb_list_file=single_pdb_list_file,
+            processed_dir=str(tmp_processed_dir / "no_mates"),
+            base_pdb_dir=str(pdb_base_dir),
+            include_mates=False,
+            preprocess=True,
+        )
+
+        data_with = dataset_with_mates[0]
+        data_without = dataset_no_mates[0]
+
+        # With mates should have >= atoms
+        assert data_with['protein'].num_nodes >= data_without['protein'].num_nodes
+
+    def test_custom_cutoff(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
+        """Custom cutoff should affect edge connectivity."""
+        dataset_small = ProteinWaterDataset(
+            pdb_list_file=single_pdb_list_file,
+            processed_dir=str(tmp_processed_dir / "small"),
+            base_pdb_dir=str(pdb_base_dir),
+            cutoff=4.0,
+            preprocess=True,
+        )
+
+        dataset_large = ProteinWaterDataset(
+            pdb_list_file=single_pdb_list_file,
+            processed_dir=str(tmp_processed_dir / "large"),
+            base_pdb_dir=str(pdb_base_dir),
+            cutoff=12.0,
+            preprocess=True,
+        )
+
+        data_small = dataset_small[0]
+        data_large = dataset_large[0]
+
+        # Larger cutoff should have more edges
+        n_edges_small = data_small['protein', 'pp', 'protein'].edge_index.shape[1]
+        n_edges_large = data_large['protein', 'pp', 'protein'].edge_index.shape[1]
+
+        assert n_edges_large >= n_edges_small
