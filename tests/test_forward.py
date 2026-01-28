@@ -365,6 +365,8 @@ def test_forward_with_duplicate_protein_coords_localizes_nan(device):
 
     # ---- Pre-check: encoder input edges ----
     enc_data = make_protein_encoder_data(data)
+    for tensor in _iter_tensors(enc_data):
+        assert torch.isfinite(tensor).all()
 
     t = torch.tensor([0.5], device=device)
 
