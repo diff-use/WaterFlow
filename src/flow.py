@@ -24,7 +24,7 @@ import numpy as np
 from torch import Tensor
 from tqdm.auto import tqdm
 
-from src.utils import ot_coupling, compute_rmsd, recall_precision
+from src.utils import ot_coupling
 from src.encoder import ProteinGVPEncoder
 from src.gvp import GVP, GVPMultiEdgeConv
 
