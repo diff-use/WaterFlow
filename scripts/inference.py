@@ -136,6 +136,14 @@ def parse_args():
         help="Number of proteins to process in parallel (default: 8)",
     )
 
+    p.add_argument(
+        "--water_ratio",
+        type=float,
+        default=None,
+        help="Sample num_residues * water_ratio waters instead of using ground truth count. "
+             "E.g., --water_ratio 0.5 samples 50 waters for a 100-residue protein.",
+    )
+
     args = p.parse_args()
 
     return args
@@ -242,6 +250,7 @@ def run_inference_batch(
     num_steps: int,
     use_sc: bool,
     device: str,
+    water_ratio: float = None,
 ) -> list:
     """
     Run inference on a batch of graphs.
@@ -253,6 +262,7 @@ def run_inference_batch(
         num_steps: Number of integration steps
         use_sc: Whether to use self-conditioning
         device: Device to run on
+        water_ratio: If provided, sample num_residues * water_ratio waters
 
     Returns:
         List of result dicts, each with:
@@ -267,6 +277,7 @@ def run_inference_batch(
             use_sc=use_sc,
             device=device,
             return_trajectory=True,
+            water_ratio=water_ratio,
         )
     else:  # euler
         water_preds = flow_matcher.euler_integrate(
@@ -274,6 +285,7 @@ def run_inference_batch(
             num_steps=num_steps,
             use_sc=use_sc,
             device=device,
+            water_ratio=water_ratio,
         )
         # build result dicts similar to rk4
         results = []
@@ -371,11 +383,15 @@ def main():
     print(f"Self-conditioning: {args.use_sc}")
     print(f"Threshold for metrics: {args.threshold}Å")
     print(f"Batch size: {args.batch_size}")
+    if args.water_ratio is not None:
+        print(f"Water ratio: {args.water_ratio} (sampling num_residues × {args.water_ratio} waters)")
+    else:
+        print("Water ratio: None (using ground truth water count)")
     print("-" * 60)
 
     all_metrics = []
 
-    # collect valid graphs (those with waters)
+    # collect valid graphs (those with waters for ground truth comparison)
     valid_graphs = []
     skipped_pdbs = []
     for idx in range(len(dataset)):
@@ -404,22 +420,25 @@ def main():
             num_steps=args.num_steps,
             use_sc=args.use_sc,
             device=args.device,
+            water_ratio=args.water_ratio,
         )
 
         # process each result in the batch
         for result in batch_results:
             pdb_id = result.get("pdb_id", f"unknown_{len(all_metrics)}")
+            water_true = result["water_true"]
+            water_pred = result["water_pred"]
 
             # compute metrics
             metrics = compute_placement_metrics(
-                pred=result["water_pred"],
-                true=result["water_true"],
+                pred=water_pred,
+                true=water_true,
                 threshold=args.threshold,
             )
-            metrics["rmsd"] = compute_rmsd(result["water_pred"], result["water_true"])
+            metrics["rmsd"] = compute_rmsd(water_pred, water_true)
             metrics["pdb_id"] = pdb_id
-            metrics["n_waters_true"] = result["water_true"].shape[0]
-            metrics["n_waters_pred"] = result["water_pred"].shape[0]
+            metrics["n_waters_true"] = water_true.shape[0]
+            metrics["n_waters_pred"] = water_pred.shape[0]
 
             all_metrics.append(metrics)
 
@@ -432,7 +451,7 @@ def main():
                 create_trajectory_gif(
                     trajectory=result["trajectory"],
                     protein_pos=result["protein_pos"],
-                    water_true=result["water_true"],
+                    water_true=water_true,
                     save_path=str(gif_path),
                     title="",
                     fps=10,
@@ -450,18 +469,22 @@ def main():
     if all_metrics:
         summary = {
             "n_samples": len(all_metrics),
-            "avg_rmsd": np.mean([m["rmsd"] for m in all_metrics]),
-            "std_rmsd": np.std([m["rmsd"] for m in all_metrics]),
-            "avg_precision": np.mean([m["precision"] for m in all_metrics]),
-            "avg_recall": np.mean([m["recall"] for m in all_metrics]),
-            "avg_f1": np.mean([m["f1"] for m in all_metrics]),
-            "avg_auc_pr": np.mean([m["auc_pr"] for m in all_metrics]),
+            "avg_rmsd": float(np.mean([m["rmsd"] for m in all_metrics])),
+            "std_rmsd": float(np.std([m["rmsd"] for m in all_metrics])),
+            "avg_precision": float(np.mean([m["precision"] for m in all_metrics])),
+            "avg_recall": float(np.mean([m["recall"] for m in all_metrics])),
+            "avg_f1": float(np.mean([m["f1"] for m in all_metrics])),
+            "avg_auc_pr": float(np.mean([m["auc_pr"] for m in all_metrics])),
+            "avg_n_waters_true": float(np.mean([m["n_waters_true"] for m in all_metrics])),
+            "avg_n_waters_pred": float(np.mean([m["n_waters_pred"] for m in all_metrics])),
         }
 
         print("\n" + "=" * 60)
         print("SUMMARY METRICS")
         print("=" * 60)
         print(f"  Samples processed: {summary['n_samples']}")
+        print(f"  Avg waters (true):  {summary['avg_n_waters_true']:.1f}")
+        print(f"  Avg waters (pred):  {summary['avg_n_waters_pred']:.1f}")
         print(f"  Avg RMSD:      {summary['avg_rmsd']:.3f} ± {summary['std_rmsd']:.3f} Å")
         print(f"  Avg Precision: {summary['avg_precision']:.3%}")
         print(f"  Avg Recall:    {summary['avg_recall']:.3%}")
@@ -484,6 +507,7 @@ def main():
                         "use_sc": args.use_sc,
                         "threshold": args.threshold,
                         "include_mates": include_mates,
+                        "water_ratio": args.water_ratio,
                     },
                 },
                 f,
