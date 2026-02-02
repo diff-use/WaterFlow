@@ -613,6 +613,55 @@ class FlowMatcher:
 
         return {'loss': loss.item(), 'rmsd': rmsd}
 
+    def _setup_water_nodes_from_ratio(
+        self,
+        g: Batch,
+        water_ratio: float,
+        device: torch.device,
+    ) -> Tuple[Tensor, Tensor]:
+        """
+        Create water node positions and batch indices based on protein residue count.
+
+        Args:
+            g: Batched HeteroData graph (modified in-place)
+            water_ratio: Ratio of waters to protein residues
+            device: Device to create tensors on
+
+        Returns:
+            x: (N_water_total, 3) initial noise positions
+            batch_w: (N_water_total,) batch indices
+        """
+        num_residues = g['protein'].num_residues  # (num_graphs,)
+        num_graphs = num_residues.size(0)
+
+        # compute waters per graph: num_residues * ratio, minimum 1
+        num_waters = (num_residues.float() * water_ratio).long().clamp(min=1)
+
+        # create batch indices (vectorized)
+        batch_w = torch.repeat_interleave(
+            torch.arange(num_graphs, device=device), num_waters
+        )
+        total_waters = batch_w.size(0)
+
+        # compute sigma per graph and expand to per-water
+        sigma_per_graph = self.compute_sigma_per_graph(g, device)
+        sigma_per_water = sigma_per_graph[batch_w]
+
+        # sample noise
+        x = torch.randn(total_waters, 3, device=device) * sigma_per_water.unsqueeze(-1)
+
+        # create water features (oxygen one-hot, index 2 for 'O' in ELEMENT_VOCAB)
+        water_x = torch.zeros(total_waters, 16, device=device)
+        water_x[:, 2] = 1.0  # oxygen is index 2 in ELEMENT_VOCAB
+
+        # update graph with new water nodes
+        g['water'].pos = x
+        g['water'].x = water_x
+        g['water'].batch = batch_w
+        g['water'].num_nodes = total_waters
+
+        return x, batch_w
+
     @torch.no_grad()
     def euler_integrate(
         self,
@@ -621,6 +670,7 @@ class FlowMatcher:
         use_sc: bool = True,
         sc_ema_alpha: float = 0.2,
         device: str = "cuda",
+        water_ratio: Optional[float] = None,
     ) -> List[np.ndarray]:
         """
         Euler integration from noise to final positions.
@@ -631,6 +681,8 @@ class FlowMatcher:
             use_sc: Whether to use self-conditioning
             sc_ema_alpha: EMA decay for self-conditioning
             device: Device to run on
+            water_ratio: If provided, sample num_residues * water_ratio waters
+                        instead of using ground truth water count
 
         Returns:
             List of (Nw_i, 3) predicted water positions for each input graph
@@ -645,14 +697,18 @@ class FlowMatcher:
         # batch graphs together
         g = Batch.from_data_list([copy.deepcopy(graph) for graph in graphs]).to(device)
 
-        batch_w = g['water'].batch
-        num_graphs = int(batch_w.max().item()) + 1
+        if water_ratio is not None:
+            # sample waters based on residue count
+            x, batch_w = self._setup_water_nodes_from_ratio(g, water_ratio, device)
+            num_graphs = g['protein'].num_residues.size(0)
+        else:
+            # use existing water nodes
+            batch_w = g['water'].batch
+            num_graphs = int(batch_w.max().item()) + 1
+            sigma_per_graph = self.compute_sigma_per_graph(g, device)
+            sigma_per_water = sigma_per_graph[batch_w]
+            x = torch.randn(g['water'].num_nodes, 3, device=device) * sigma_per_water.unsqueeze(-1)
 
-        # compute per-graph sigma and scale noise accordingly
-        sigma_per_graph = self.compute_sigma_per_graph(g, device)  # (num_graphs,)
-        sigma_per_water = sigma_per_graph[batch_w]  # (N_water_total,)
-
-        x = torch.randn(g['water'].num_nodes, 3, device=device) * sigma_per_water.unsqueeze(-1)
         x1_pred_ema = x.clone()
 
         ts = torch.linspace(0, 1, num_steps, device=device)
@@ -693,6 +749,7 @@ class FlowMatcher:
         sc_ema_alpha: float = 0.2,
         device: str = "cuda",
         return_trajectory: bool = True,
+        water_ratio: Optional[float] = None,
     ) -> List[Dict[str, np.ndarray]]:
         """
         RK4 integration from noise to final positions.
@@ -704,11 +761,13 @@ class FlowMatcher:
             sc_ema_alpha: EMA decay for self-conditioning
             device: Device to run on
             return_trajectory: Whether to return full trajectory and metrics
+            water_ratio: If provided, sample num_residues * water_ratio waters
+                        instead of using ground truth water count
 
         Returns:
             List of dicts, one per input graph, each with keys:
                 'protein_pos': (Np, 3) - includes both ASU and mate atoms
-                'water_true': (Nw, 3)
+                'water_true': (Nw, 3) - None if water_ratio is used
                 'water_pred': (Nw, 3) final prediction
                 'trajectory': list of (Nw, 3) at each step (if return_trajectory=True)
         """
@@ -726,17 +785,23 @@ class FlowMatcher:
         g = Batch.from_data_list([copy.deepcopy(graph) for graph in graphs]).to(device)
 
         batch_p = g['protein'].batch
-        batch_w = g['water'].batch
-        num_graphs = int(batch_w.max().item()) + 1
 
-        # store ground truth before modifying
+        # store ground truth water positions and batch indices before modifying
         x1_true = g['water'].pos.clone()
+        batch_w_true = g['water'].batch.clone()
 
-        # compute per-graph sigma and scale noise accordingly
-        sigma_per_graph = self.compute_sigma_per_graph(g, device)  # (num_graphs,)
-        sigma_per_water = sigma_per_graph[batch_w]  # (N_water_total,)
+        if water_ratio is not None:
+            # sample waters based on residue count
+            x, batch_w = self._setup_water_nodes_from_ratio(g, water_ratio, device)
+            num_graphs = g['protein'].num_residues.size(0)
+        else:
+            # use existing water nodes
+            batch_w = g['water'].batch
+            num_graphs = int(batch_w.max().item()) + 1
+            sigma_per_graph = self.compute_sigma_per_graph(g, device)
+            sigma_per_water = sigma_per_graph[batch_w]
+            x = torch.randn_like(x1_true) * sigma_per_water.unsqueeze(-1)
 
-        x = torch.randn_like(x1_true) * sigma_per_water.unsqueeze(-1)
         x1_pred_ema = x.clone()
 
         ts = torch.linspace(0, 1, num_steps, device=device)
@@ -787,16 +852,18 @@ class FlowMatcher:
         protein_pos_cpu = g['protein'].pos.detach().cpu()
         x1_true_cpu = x1_true.detach().cpu()
         batch_w_cpu = batch_w.cpu()
+        batch_w_true_cpu = batch_w_true.cpu()
         batch_p_cpu = batch_p.cpu()
 
         results = []
         for i in range(num_graphs):
             mask_w = batch_w_cpu == i
+            mask_w_true = batch_w_true_cpu == i
             mask_p = batch_p_cpu == i
 
             result = {
                 'protein_pos': protein_pos_cpu[mask_p].numpy(),
-                'water_true': x1_true_cpu[mask_w].numpy(),
+                'water_true': x1_true_cpu[mask_w_true].numpy(),
                 'water_pred': x_cpu[mask_w].numpy(),
                 'pdb_id': pdb_ids[i],
             }
