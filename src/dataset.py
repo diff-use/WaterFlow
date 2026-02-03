@@ -343,7 +343,7 @@ def compute_normalized_bfactors(
         pdb_mean = np.mean(all_bfactors)
         pdb_std = np.std(all_bfactors)
 
-        if pdb_std < 1e-6:
+        if pdb_std < 1e-3:
             # if std is 0, set to 1.0 to avoid division by zero
             pdb_std = 1.0
 
@@ -429,7 +429,6 @@ def filter_waters_by_quality(
         }
 
     n_waters = len(water_atoms)
-    keep_mask = np.ones(n_waters, dtype=bool)
 
     stats = {
         "total": n_waters,
@@ -438,14 +437,17 @@ def filter_waters_by_quality(
         "removed_bfactor": 0,
     }
 
+    # compute failure masks independently for each filter
+    dist_fail = np.zeros(n_waters, dtype=bool)
+    edia_fail = np.zeros(n_waters, dtype=bool)
+    bfactor_fail = np.zeros(n_waters, dtype=bool)
+
     # distance filtering using scipy.spatial.distance.cdist
     if filter_by_distance and len(protein_atoms) > 0:
         dist_matrix = cdist(water_atoms.coord, protein_atoms.coord)
         min_dists = dist_matrix.min(axis=1)
-
         dist_fail = min_dists > max_protein_dist
         stats["removed_distance"] = int(dist_fail.sum())
-        keep_mask &= ~dist_fail
 
     # build water keys array once for EDIA and B-factor filtering
     water_keys = list(zip(
@@ -461,25 +463,19 @@ def filter_waters_by_quality(
         # waters fail if they have EDIA data AND it's below threshold
         # waters without EDIA data (NaN) pass through (NaN < threshold is False)
         edia_fail = edia_values < min_edia
+        stats["removed_edia"] = int(edia_fail.sum())
 
-        # only count newly failed waters (not already filtered)
-        newly_failed = edia_fail & keep_mask
-        stats["removed_edia"] = int(newly_failed.sum())
-        keep_mask &= ~edia_fail
-
-    # bfactor filtering 
+    # bfactor filtering
     if filter_by_bfactor and bfactor_lookup is not None:
         # build B-factor values array (NaN for waters not in lookup)
         bfactor_values = np.array([bfactor_lookup.get(key, np.nan) for key in water_keys])
 
         # waters fail if B-factor > threshold (NaN > threshold is False)
         bfactor_fail = bfactor_values > max_bfactor_zscore
+        stats["removed_bfactor"] = int(bfactor_fail.sum())
 
-        # only count newly failed waters (not already filtered)
-        newly_failed = bfactor_fail & keep_mask
-        stats["removed_bfactor"] = int(newly_failed.sum())
-        keep_mask &= ~bfactor_fail
-
+    # combine all failure masks - water is kept only if it passes all enabled filters
+    keep_mask = ~(dist_fail | edia_fail | bfactor_fail)
     stats["kept"] = int(keep_mask.sum())
 
     return water_atoms[keep_mask], stats
