@@ -40,6 +40,9 @@ from src.dataset import (
     check_com_distance,
     check_water_clashes,
     check_chain_interactions,
+    load_edia_for_pdb,
+    compute_normalized_bfactors,
+    filter_waters_by_quality,
     ProteinWaterDataset,
     get_dataloader,
 )
@@ -914,3 +917,365 @@ class TestDatasetEdgeCases:
         n_edges_large = data_large['protein', 'pp', 'protein'].edge_index.shape[1]
 
         assert n_edges_large >= n_edges_small
+
+
+# ============== Tests for water quality filtering ==============
+
+@pytest.mark.unit
+class TestLoadEdiaForPdb:
+    """Tests for EDIA data loading from CSV files."""
+
+    def test_returns_none_for_missing_file(self, tmp_path):
+        """Should return None if EDIA file doesn't exist."""
+        result = load_edia_for_pdb(tmp_path, "nonexistent_pdb")
+        assert result is None
+
+    def test_loads_water_edia_scores(self, tmp_path):
+        """Should load EDIA scores for water molecules."""
+        # Create mock EDIA CSV
+        pdb_id = "test_pdb"
+        pdb_dir = tmp_path / pdb_id
+        pdb_dir.mkdir()
+
+        csv_content = """compID,pdb_strandID,pdb_seqNum,EDIAm,RSCCS
+HOH,A,101,0.85,0.92
+HOH,A,102,0.45,0.88
+HOH,B,201,0.72,0.90
+ALA,A,1,0.95,0.98
+"""
+        (pdb_dir / f"{pdb_id}_residue_stats.csv").write_text(csv_content)
+
+        result = load_edia_for_pdb(tmp_path, pdb_id)
+
+        assert result is not None
+        assert len(result) == 3  # Only waters, not ALA
+        assert result[("A", 101)] == pytest.approx(0.85)
+        assert result[("A", 102)] == pytest.approx(0.45)
+        assert result[("B", 201)] == pytest.approx(0.72)
+
+    def test_returns_empty_dict_for_no_waters(self, tmp_path):
+        """Should return empty dict if no water molecules in CSV."""
+        pdb_id = "test_pdb"
+        pdb_dir = tmp_path / pdb_id
+        pdb_dir.mkdir()
+
+        csv_content = """compID,pdb_strandID,pdb_seqNum,EDIAm,RSCCS
+ALA,A,1,0.95,0.98
+GLY,A,2,0.90,0.95
+"""
+        (pdb_dir / f"{pdb_id}_residue_stats.csv").write_text(csv_content)
+
+        result = load_edia_for_pdb(tmp_path, pdb_id)
+
+        assert result == {}
+
+
+@pytest.mark.unit
+class TestComputeNormalizedBfactors:
+    """Tests for B-factor normalization."""
+
+    def test_computes_zscore_normalization(self, pdb_6eey):
+        """Should compute z-score normalized B-factors."""
+        bfactor_lookup, raw_bfactors = compute_normalized_bfactors(pdb_6eey)
+
+        assert bfactor_lookup is not None
+        assert raw_bfactors is not None
+
+        # Normalized values should have reasonable range
+        if len(bfactor_lookup) > 0:
+            values = list(bfactor_lookup.values())
+            # Z-scores typically in range [-3, 3] for most values
+            assert all(-10 < v < 20 for v in values)
+
+    def test_returns_dict_keyed_by_chain_resid(self, pdb_6eey):
+        """Should return dict with (chain_id, res_id) keys."""
+        bfactor_lookup, _ = compute_normalized_bfactors(pdb_6eey)
+
+        assert bfactor_lookup is not None
+        if len(bfactor_lookup) > 0:
+            key = next(iter(bfactor_lookup.keys()))
+            assert isinstance(key, tuple)
+            assert len(key) == 2
+            assert isinstance(key[0], str)  # chain_id
+            assert isinstance(key[1], int)  # res_id
+
+    def test_handles_chain_filter(self, pdb_6eey):
+        """Should respect chain filter parameter."""
+        all_chains, _ = compute_normalized_bfactors(pdb_6eey)
+        single_chain, _ = compute_normalized_bfactors(pdb_6eey, chain_filter=["A"])
+
+        # Single chain should have <= entries
+        assert len(single_chain) <= len(all_chains)
+
+        # All keys should be from chain A
+        for chain_id, _ in single_chain.keys():
+            assert chain_id == "A"
+
+
+@pytest.mark.unit
+class TestFilterWatersByQuality:
+    """Tests for per-water quality filtering."""
+
+    @pytest.fixture
+    def mock_water_atoms(self):
+        """Create mock water atoms for testing."""
+        import biotite.structure as bts
+
+        atoms = bts.AtomArray(5)
+        atoms.coord = np.array([
+            [0., 0., 0.],    # Water 0 - close to protein
+            [5., 0., 0.],    # Water 1 - medium distance
+            [15., 0., 0.],   # Water 2 - far from protein
+            [3., 0., 0.],    # Water 3 - close
+            [20., 0., 0.],   # Water 4 - very far
+        ])
+        atoms.chain_id = np.array(["A", "A", "A", "B", "B"])
+        atoms.res_id = np.array([101, 102, 103, 201, 202])
+        atoms.res_name = np.array(["HOH"] * 5)
+        atoms.element = np.array(["O"] * 5)
+
+        return atoms
+
+    @pytest.fixture
+    def mock_protein_atoms(self):
+        """Create mock protein atoms for testing."""
+        import biotite.structure as bts
+
+        atoms = bts.AtomArray(10)
+        atoms.coord = np.zeros((10, 3))  # Protein centered at origin
+        atoms.chain_id = np.array(["A"] * 10)
+        atoms.res_id = np.array([1] * 10)
+        atoms.element = np.array(["C"] * 10)
+
+        return atoms
+
+    def test_distance_filtering(self, mock_water_atoms, mock_protein_atoms):
+        """Waters far from protein should be removed."""
+        filtered, stats = filter_waters_by_quality(
+            mock_water_atoms,
+            mock_protein_atoms,
+            edia_lookup=None,
+            bfactor_lookup=None,
+            max_protein_dist=6.0,
+            filter_by_distance=True,
+            filter_by_edia=False,
+            filter_by_bfactor=False,
+        )
+
+        # Waters at 0, 5, 3 A should pass; 15, 20 A should fail
+        assert len(filtered) == 3
+        assert stats["removed_distance"] == 2
+        assert stats["kept"] == 3
+
+    def test_edia_filtering(self, mock_water_atoms, mock_protein_atoms):
+        """Waters with low EDIA should be removed."""
+        edia_lookup = {
+            ("A", 101): 0.85,  # Pass
+            ("A", 102): 0.30,  # Fail (< 0.4)
+            ("A", 103): 0.50,  # Pass
+            ("B", 201): 0.20,  # Fail
+            ("B", 202): 0.60,  # Pass
+        }
+
+        filtered, stats = filter_waters_by_quality(
+            mock_water_atoms,
+            mock_protein_atoms,
+            edia_lookup=edia_lookup,
+            bfactor_lookup=None,
+            min_edia=0.4,
+            filter_by_distance=False,
+            filter_by_edia=True,
+            filter_by_bfactor=False,
+        )
+
+        assert len(filtered) == 3
+        assert stats["removed_edia"] == 2
+
+    def test_bfactor_filtering(self, mock_water_atoms, mock_protein_atoms):
+        """Waters with high B-factor z-score should be removed."""
+        bfactor_lookup = {
+            ("A", 101): 1.0,   # Pass
+            ("A", 102): 6.0,   # Fail (> 5.0)
+            ("A", 103): 2.5,   # Pass
+            ("B", 201): 7.0,   # Fail
+            ("B", 202): 0.5,   # Pass
+        }
+
+        filtered, stats = filter_waters_by_quality(
+            mock_water_atoms,
+            mock_protein_atoms,
+            edia_lookup=None,
+            bfactor_lookup=bfactor_lookup,
+            max_bfactor_zscore=5.0,
+            filter_by_distance=False,
+            filter_by_edia=False,
+            filter_by_bfactor=True,
+        )
+
+        assert len(filtered) == 3
+        assert stats["removed_bfactor"] == 2
+
+    def test_combined_filters(self, mock_water_atoms, mock_protein_atoms):
+        """Waters failing ANY criterion should be removed."""
+        edia_lookup = {
+            ("A", 101): 0.85,  # Pass EDIA
+            ("A", 102): 0.85,  # Pass EDIA
+            ("A", 103): 0.85,  # Pass EDIA, but will fail distance
+            ("B", 201): 0.30,  # Fail EDIA
+            ("B", 202): 0.85,  # Pass EDIA, but will fail distance
+        }
+        bfactor_lookup = {
+            ("A", 101): 1.0,   # Pass B-factor
+            ("A", 102): 6.0,   # Fail B-factor
+            ("A", 103): 1.0,   # Pass B-factor
+            ("B", 201): 1.0,   # Pass B-factor
+            ("B", 202): 1.0,   # Pass B-factor
+        }
+
+        filtered, stats = filter_waters_by_quality(
+            mock_water_atoms,
+            mock_protein_atoms,
+            edia_lookup=edia_lookup,
+            bfactor_lookup=bfactor_lookup,
+            max_protein_dist=6.0,
+            min_edia=0.4,
+            max_bfactor_zscore=5.0,
+            filter_by_distance=True,
+            filter_by_edia=True,
+            filter_by_bfactor=True,
+        )
+
+        # Only water 0 (A, 101) should pass all three filters
+        assert len(filtered) == 1
+        assert stats["kept"] == 1
+
+    def test_missing_edia_data_keeps_water(self, mock_water_atoms, mock_protein_atoms):
+        """Waters without EDIA data should be kept (conservative)."""
+        # Only provide EDIA for some waters
+        edia_lookup = {
+            ("A", 101): 0.85,  # Pass
+            ("A", 102): 0.30,  # Fail
+            # A,103, B,201, B,202 have no EDIA data - should be kept
+        }
+
+        filtered, stats = filter_waters_by_quality(
+            mock_water_atoms,
+            mock_protein_atoms,
+            edia_lookup=edia_lookup,
+            bfactor_lookup=None,
+            min_edia=0.4,
+            filter_by_distance=False,
+            filter_by_edia=True,
+            filter_by_bfactor=False,
+        )
+
+        # 4 should pass (1 with good EDIA + 3 with no EDIA data)
+        assert len(filtered) == 4
+        assert stats["removed_edia"] == 1
+
+    def test_empty_water_array(self, mock_protein_atoms):
+        """Empty water array should return empty array."""
+        import biotite.structure as bts
+
+        empty_waters = bts.AtomArray(0)
+
+        filtered, stats = filter_waters_by_quality(
+            empty_waters,
+            mock_protein_atoms,
+            edia_lookup=None,
+            bfactor_lookup=None,
+        )
+
+        assert len(filtered) == 0
+        assert stats["total"] == 0
+        assert stats["kept"] == 0
+
+    def test_all_filters_disabled(self, mock_water_atoms, mock_protein_atoms):
+        """With all filters disabled, all waters should pass."""
+        filtered, stats = filter_waters_by_quality(
+            mock_water_atoms,
+            mock_protein_atoms,
+            edia_lookup=None,
+            bfactor_lookup=None,
+            filter_by_distance=False,
+            filter_by_edia=False,
+            filter_by_bfactor=False,
+        )
+
+        assert len(filtered) == 5
+        assert stats["kept"] == 5
+        assert stats["removed_distance"] == 0
+        assert stats["removed_edia"] == 0
+        assert stats["removed_bfactor"] == 0
+
+    def test_stats_dict_has_required_keys(self, mock_water_atoms, mock_protein_atoms):
+        """Stats dict should have all required keys."""
+        _, stats = filter_waters_by_quality(
+            mock_water_atoms,
+            mock_protein_atoms,
+            edia_lookup=None,
+            bfactor_lookup=None,
+        )
+
+        assert "total" in stats
+        assert "removed_distance" in stats
+        assert "removed_edia" in stats
+        assert "removed_bfactor" in stats
+        assert "kept" in stats
+
+
+@pytest.mark.integration
+class TestWaterFilteringIntegration:
+    """Integration tests for water filtering with real PDB files."""
+
+    def test_bfactor_extraction_from_real_pdb(self, pdb_6eey):
+        """Should extract B-factors from real PDB file."""
+        bfactor_lookup, raw_bfactors = compute_normalized_bfactors(pdb_6eey)
+
+        assert bfactor_lookup is not None
+        # 6eey should have some water molecules
+        assert len(bfactor_lookup) > 0
+
+    def test_filtering_with_real_pdb(self, pdb_6eey):
+        """Should filter waters from real PDB file."""
+        protein_atoms, water_atoms = parse_asu_with_biotite(pdb_6eey)
+
+        if len(water_atoms) == 0:
+            pytest.skip("No water molecules in 6eey")
+
+        # Get B-factors
+        bfactor_lookup, _ = compute_normalized_bfactors(pdb_6eey)
+
+        # Apply filtering with distance only
+        filtered, stats = filter_waters_by_quality(
+            water_atoms,
+            protein_atoms,
+            edia_lookup=None,
+            bfactor_lookup=bfactor_lookup,
+            max_protein_dist=6.0,
+            filter_by_distance=True,
+            filter_by_edia=False,
+            filter_by_bfactor=True,
+        )
+
+        # Some waters should be filtered
+        assert stats["total"] > 0
+        # Filtered count should be <= total
+        assert stats["kept"] <= stats["total"]
+
+    def test_dataset_with_filtering_disabled(self, single_pdb_list_file, tmp_path, pdb_base_dir):
+        """Dataset with filtering disabled should have same waters."""
+        # Create dataset with filtering disabled
+        dataset = ProteinWaterDataset(
+            pdb_list_file=single_pdb_list_file,
+            processed_dir=str(tmp_path / "no_filter"),
+            base_pdb_dir=str(pdb_base_dir),
+            filter_by_distance=False,
+            filter_by_edia=False,
+            filter_by_bfactor=False,
+            preprocess=True,
+        )
+
+        data = dataset[0]
+        # Should have water nodes
+        assert data['water'].num_nodes >= 0

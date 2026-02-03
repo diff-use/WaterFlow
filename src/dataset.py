@@ -6,6 +6,8 @@ from typing import List, Optional, Sequence, Tuple, Dict
 from pathlib import Path
 import itertools
 import numpy as np
+import pandas as pd
+from scipy.spatial.distance import cdist
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -267,6 +269,220 @@ def check_water_residue_ratio(
     return True, ""
 
 
+def load_edia_for_pdb(
+    edia_dir: Path,
+    pdb_id: str,
+) -> Optional[Dict[Tuple[str, int], float]]:
+    """
+    Load EDIA scores for water molecules from CSV file.
+
+    Args:
+        edia_dir: Directory containing EDIA results
+        pdb_id: PDB ID to load
+
+    Returns:
+        Dictionary mapping (chain_id, res_id) -> EDIA score for waters,
+        or None if file not found or error
+    """
+    csv_path = edia_dir / pdb_id / f"{pdb_id}_residue_stats.csv"
+
+    if not csv_path.exists():
+        return None
+
+    try:
+        df = pd.read_csv(csv_path)
+
+        # filter for water molecules only
+        water_df = df[df["compID"] == "HOH"]
+
+        if len(water_df) == 0:
+            return {}
+
+        # build lookup dictionary: (chain_id, res_id) -> EDIAm
+        edia_lookup = {}
+        for _, row in water_df.iterrows():
+            key = (str(row["pdb_strandID"]), int(row["pdb_seqNum"]))
+            edia_lookup[key] = float(row["EDIAm"])
+
+        return edia_lookup
+
+    except Exception as e:
+        print(f"Warning: Could not load EDIA data for {pdb_id}: {e}")
+        return None
+
+
+def compute_normalized_bfactors(
+    pdb_path: str,
+    chain_filter: Optional[Sequence[str]] = None,
+) -> Tuple[Optional[Dict[Tuple[str, int], float]], Optional[np.ndarray]]:
+    """
+    Extract and normalize B-factors for water molecules.
+
+    B-factors are z-score normalized using whole-PDB statistics.
+
+    Args:
+        pdb_path: Path to PDB file
+        chain_filter: Optional list of chain IDs to include
+
+    Returns:
+        Tuple of:
+        - Dictionary mapping (chain_id, res_id) -> normalized B-factor for waters
+        - Raw B-factor array for waters (for caching if needed)
+        Returns (None, None) on error
+    """
+    try:
+        pdb_file = PDBFile.read(pdb_path)
+        atoms = pdb_file.get_structure(
+            model=1,
+            altloc="occupancy",
+            extra_fields=["b_factor"]
+        )
+
+        # compute whole-PDB B-factor statistics for normalization
+        all_bfactors = atoms.b_factor
+        pdb_mean = np.mean(all_bfactors)
+        pdb_std = np.std(all_bfactors)
+
+        if pdb_std < 1e-6:
+            # if z-score is 0, set to 1.0 to avoid division by zero
+            pdb_std = 1.0
+
+        # apply chain filter if specified
+        if chain_filter is not None:
+            mask = np.isin(atoms.chain_id, np.array(chain_filter, dtype=atoms.chain_id.dtype))
+            atoms = atoms[mask]
+
+        # filter for water molecules
+        water_mask = (atoms.res_name == "HOH") | (atoms.res_name == "WAT")
+        water_atoms = atoms[water_mask]
+
+        if len(water_atoms) == 0:
+            return {}, np.array([])
+
+        # lookup dictionary with one entry per unique water residue
+        bfactor_lookup = {}
+        seen = set()
+
+        for i in range(len(water_atoms)):
+            chain_id = str(water_atoms.chain_id[i])
+            res_id = int(water_atoms.res_id[i])
+            key = (chain_id, res_id)
+
+            if key not in seen:
+                seen.add(key)
+                raw_bfactor = water_atoms.b_factor[i]
+                normalized = (raw_bfactor - pdb_mean) / pdb_std
+                bfactor_lookup[key] = normalized
+
+        return bfactor_lookup, water_atoms.b_factor
+
+    except Exception as e:
+        print(f"Warning: Could not extract B-factors from {pdb_path}: {e}")
+        return None, None
+
+
+def filter_waters_by_quality(
+    water_atoms: "bts.AtomArray",
+    protein_atoms: "bts.AtomArray",
+    edia_lookup: Optional[Dict[Tuple[str, int], float]],
+    bfactor_lookup: Optional[Dict[Tuple[str, int], float]],
+    max_protein_dist: float = 6.0,
+    min_edia: float = 0.4,
+    max_bfactor_zscore: float = 5.0,
+    filter_by_distance: bool = True,
+    filter_by_edia: bool = True,
+    filter_by_bfactor: bool = True,
+) -> Tuple["bts.AtomArray", Dict[str, int]]:
+    """
+    Filter water atoms based on quality criteria.
+
+    Waters are removed if they fail ANY of the enabled criteria:
+    1. Distance from protein surface > max_protein_dist
+    2. EDIA score < min_edia (if EDIA data available)
+    3. Normalized B-factor > max_bfactor_zscore (if B-factor data available)
+
+    Args:
+        water_atoms: AtomArray of water molecules
+        protein_atoms: AtomArray of protein atoms (for distance calculation)
+        edia_lookup: Dict mapping (chain_id, res_id) -> EDIA score, or None
+        bfactor_lookup: Dict mapping (chain_id, res_id) -> normalized B-factor, or None
+        max_protein_dist: Maximum allowed distance to protein surface
+        min_edia: Minimum allowed EDIA score
+        max_bfactor_zscore: Maximum allowed B-factor z-score
+        filter_by_distance: Enable distance filtering
+        filter_by_edia: Enable EDIA filtering
+        filter_by_bfactor: Enable B-factor filtering
+
+    Returns:
+        Tuple of:
+        - Filtered AtomArray containing only high-quality waters
+        - Dictionary with filtering statistics
+    """
+
+    if len(water_atoms) == 0:
+        return water_atoms, {
+            "total": 0,
+            "removed_distance": 0,
+            "removed_edia": 0,
+            "removed_bfactor": 0,
+            "kept": 0
+        }
+
+    n_waters = len(water_atoms)
+    keep_mask = np.ones(n_waters, dtype=bool)
+
+    stats = {
+        "total": n_waters,
+        "removed_distance": 0,
+        "removed_edia": 0,
+        "removed_bfactor": 0,
+    }
+
+    # distance filtering using scipy.spatial.distance.cdist
+    if filter_by_distance and len(protein_atoms) > 0:
+        dist_matrix = cdist(water_atoms.coord, protein_atoms.coord)
+        min_dists = dist_matrix.min(axis=1)
+
+        dist_fail = min_dists > max_protein_dist
+        stats["removed_distance"] = int(dist_fail.sum())
+        keep_mask &= ~dist_fail
+
+    # EDIA filtering
+    if filter_by_edia and edia_lookup is not None:
+        for i in range(n_waters):
+            if not keep_mask[i]:
+                continue  # Already filtered out
+
+            chain_id = str(water_atoms.chain_id[i])
+            res_id = int(water_atoms.res_id[i])
+            key = (chain_id, res_id)
+
+            if key in edia_lookup:
+                if edia_lookup[key] < min_edia:
+                    keep_mask[i] = False
+                    stats["removed_edia"] += 1
+            # waters without EDIA data are kept
+
+    # b-factor filtering
+    if filter_by_bfactor and bfactor_lookup is not None:
+        for i in range(n_waters):
+            if not keep_mask[i]:
+                continue  # already filtered out
+
+            chain_id = str(water_atoms.chain_id[i])
+            res_id = int(water_atoms.res_id[i])
+            key = (chain_id, res_id)
+
+            if key in bfactor_lookup:
+                if bfactor_lookup[key] > max_bfactor_zscore:
+                    keep_mask[i] = False
+                    stats["removed_bfactor"] += 1
+
+    stats["kept"] = int(keep_mask.sum())
+
+    return water_atoms[keep_mask], stats
+
+
 class ProteinWaterDataset(Dataset):
     """
     Dataset for protein crystal contact prediction.
@@ -291,6 +507,14 @@ class ProteinWaterDataset(Dataset):
         clash_dist: float = 2.0,
         interface_dist_threshold: float = 4.0,
         min_water_residue_ratio: float = 0.8,
+
+        edia_dir: Optional[str] = None,
+        max_protein_dist: float = 6.0,
+        min_edia: float = 0.4,
+        max_bfactor_zscore: float = 5.0,
+        filter_by_distance: bool = True,
+        filter_by_edia: bool = True,
+        filter_by_bfactor: bool = True,
     ):
         """
         Args:
@@ -311,7 +535,15 @@ class ProteinWaterDataset(Dataset):
                                       Structures with larger distances are filtered (ASU copies).
             min_water_residue_ratio: Minimum ratio of waters/residues required.
                                      Structures below this are filtered (poor solvent modeling).
+            edia_dir: Directory containing EDIA CSV files. Structure: {edia_dir}/{pdb_id}/{pdb_id}_residue_stats.csv
+            max_protein_dist: Remove waters farther than this from nearest protein atom (Angstroms).
+            min_edia: Remove waters with EDIA score below this threshold.
+            max_bfactor_zscore: Remove waters with normalized B-factor (z-score) above this.
+            filter_by_distance: Enable/disable distance-from-protein filtering.
+            filter_by_edia: Enable/disable EDIA score filtering.
+            filter_by_bfactor: Enable/disable B-factor z-score filtering.
         """
+
         self.processed_dir = Path(processed_dir)
         self.base_pdb_dir = Path(base_pdb_dir)
         self.cutoff = cutoff
@@ -323,6 +555,14 @@ class ProteinWaterDataset(Dataset):
         self.clash_dist = clash_dist
         self.interface_dist_threshold = interface_dist_threshold
         self.min_water_residue_ratio = min_water_residue_ratio
+
+        self.edia_dir = Path(edia_dir) if edia_dir is not None else None
+        self.max_protein_dist = max_protein_dist
+        self.min_edia = min_edia
+        self.max_bfactor_zscore = max_bfactor_zscore
+        self.filter_by_distance = filter_by_distance
+        self.filter_by_edia = filter_by_edia
+        self.filter_by_bfactor = filter_by_bfactor
 
         self.entries = self._parse_pdb_list(pdb_list_file)
 
@@ -403,7 +643,7 @@ class ProteinWaterDataset(Dataset):
                 print(f"\nFailed to preprocess {entry['cache_key']}: {e}")
                 failures.append((entry['cache_key'], str(e)))
 
-        # Write failures to log file
+        # write failures to log file
         if failures:
             failure_log_path = self.processed_dir / "preprocessing_failures.log"
             with open(failure_log_path, 'a') as f:
@@ -457,6 +697,48 @@ class ProteinWaterDataset(Dataset):
             water_atoms = water_atoms[asu_water_mask]
         else:
             water_atoms = water_atoms[:0]
+
+        # per-water quality filtering
+        any_filter_enabled = (
+            self.filter_by_distance or self.filter_by_edia or self.filter_by_bfactor
+        )
+
+        if any_filter_enabled and len(water_atoms) > 0:
+            # load EDIA data if directory provided and EDIA filtering enabled
+            edia_lookup = None
+            if self.filter_by_edia and self.edia_dir is not None:
+                edia_lookup = load_edia_for_pdb(self.edia_dir, entry['pdb_id'])
+
+            # compute normalized B-factors if B-factor filtering enabled
+            bfactor_lookup = None
+            if self.filter_by_bfactor:
+                bfactor_lookup, _ = compute_normalized_bfactors(
+                    pdb_path,
+                    chain_filter=chain_filter
+                )
+
+            # apply quality filters
+            water_atoms, filter_stats = filter_waters_by_quality(
+                water_atoms,
+                protein_atoms,
+                edia_lookup,
+                bfactor_lookup,
+                max_protein_dist=self.max_protein_dist,
+                min_edia=self.min_edia,
+                max_bfactor_zscore=self.max_bfactor_zscore,
+                filter_by_distance=self.filter_by_distance,
+                filter_by_edia=self.filter_by_edia,
+                filter_by_bfactor=self.filter_by_bfactor,
+            )
+
+            # log filtering statistics
+            if filter_stats["total"] > 0:
+                removed = filter_stats["total"] - filter_stats["kept"]
+                if removed > 0:
+                    print(f"  {entry['cache_key']}: Filtered {removed}/{filter_stats['total']} waters "
+                          f"(dist:{filter_stats['removed_distance']}, "
+                          f"edia:{filter_stats['removed_edia']}, "
+                          f"bfactor:{filter_stats['removed_bfactor']})")
 
         protein_pos = torch.tensor(protein_atoms.coord, dtype=torch.float32)
         water_pos_raw = (
