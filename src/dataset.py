@@ -344,7 +344,7 @@ def compute_normalized_bfactors(
         pdb_std = np.std(all_bfactors)
 
         if pdb_std < 1e-6:
-            # if z-score is 0, set to 1.0 to avoid division by zero
+            # if std is 0, set to 1.0 to avoid division by zero
             pdb_std = 1.0
 
         # apply chain filter if specified
@@ -447,36 +447,38 @@ def filter_waters_by_quality(
         stats["removed_distance"] = int(dist_fail.sum())
         keep_mask &= ~dist_fail
 
+    # build water keys array once for EDIA and B-factor filtering
+    water_keys = list(zip(
+        water_atoms.chain_id.astype(str),
+        water_atoms.res_id.astype(int)
+    ))
+
     # EDIA filtering
     if filter_by_edia and edia_lookup is not None:
-        for i in range(n_waters):
-            if not keep_mask[i]:
-                continue  # Already filtered out
+        # build EDIA values array (NaN for waters not in lookup)
+        edia_values = np.array([edia_lookup.get(key, np.nan) for key in water_keys])
 
-            chain_id = str(water_atoms.chain_id[i])
-            res_id = int(water_atoms.res_id[i])
-            key = (chain_id, res_id)
+        # waters fail if they have EDIA data AND it's below threshold
+        # waters without EDIA data (NaN) pass through (NaN < threshold is False)
+        edia_fail = edia_values < min_edia
 
-            if key in edia_lookup:
-                if edia_lookup[key] < min_edia:
-                    keep_mask[i] = False
-                    stats["removed_edia"] += 1
-            # waters without EDIA data are kept
+        # only count newly failed waters (not already filtered)
+        newly_failed = edia_fail & keep_mask
+        stats["removed_edia"] = int(newly_failed.sum())
+        keep_mask &= ~edia_fail
 
-    # b-factor filtering
+    # bfactor filtering 
     if filter_by_bfactor and bfactor_lookup is not None:
-        for i in range(n_waters):
-            if not keep_mask[i]:
-                continue  # already filtered out
+        # build B-factor values array (NaN for waters not in lookup)
+        bfactor_values = np.array([bfactor_lookup.get(key, np.nan) for key in water_keys])
 
-            chain_id = str(water_atoms.chain_id[i])
-            res_id = int(water_atoms.res_id[i])
-            key = (chain_id, res_id)
+        # waters fail if B-factor > threshold (NaN > threshold is False)
+        bfactor_fail = bfactor_values > max_bfactor_zscore
 
-            if key in bfactor_lookup:
-                if bfactor_lookup[key] > max_bfactor_zscore:
-                    keep_mask[i] = False
-                    stats["removed_bfactor"] += 1
+        # only count newly failed waters (not already filtered)
+        newly_failed = bfactor_fail & keep_mask
+        stats["removed_bfactor"] = int(newly_failed.sum())
+        keep_mask &= ~bfactor_fail
 
     stats["kept"] = int(keep_mask.sum())
 
@@ -708,6 +710,8 @@ class ProteinWaterDataset(Dataset):
             edia_lookup = None
             if self.filter_by_edia and self.edia_dir is not None:
                 edia_lookup = load_edia_for_pdb(self.edia_dir, entry['pdb_id'])
+                if edia_lookup is None:
+                    print(f"Warning: EDIA file not found for {entry['pdb_id']}, skipping EDIA filtering")
 
             # compute normalized B-factors if B-factor filtering enabled
             bfactor_lookup = None
