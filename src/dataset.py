@@ -344,7 +344,7 @@ def compute_normalized_bfactors(
         pdb_std = np.std(all_bfactors)
 
         if pdb_std < 1e-6:
-            # if z-score is 0, set to 1.0 to avoid division by zero
+            # if std is ~0, set to 1.0 to avoid division by zero in z-score
             pdb_std = 1.0
 
         # apply chain filter if specified
