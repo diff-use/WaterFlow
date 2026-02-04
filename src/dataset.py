@@ -338,9 +338,8 @@ def compute_normalized_bfactors(
         pdb_mean = np.mean(atoms.b_factor)
         pdb_std = np.std(atoms.b_factor)
 
-        if pdb_std < 1e-3:
-            # if std is 0, set to 1.0 to avoid division by zero
-            pdb_std = 1.0
+        # clamp std to avoid division by zero
+        pdb_std = max(pdb_std, 1e-3)
 
         # apply chain filter if specified
         if chain_filter is not None:
