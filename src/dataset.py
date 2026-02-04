@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-from typing import List, Optional, Sequence, Tuple, Dict
 from pathlib import Path
 import itertools
 import numpy as np
 import pandas as pd
 from scipy.spatial.distance import cdist
-
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import torch
 from torch import Tensor
@@ -26,7 +22,7 @@ from torch_cluster import radius_graph
 import e3nn
 from e3nn.math import soft_one_hot_linspace
 
-from src.utils import atom37_to_atoms
+from .utils import atom37_to_atoms
 
 ELEMENT_VOCAB = [
     "C", "N", "O", "S", "P", "SE", "MG", "ZN", "CA", "FE", "NA", "K", "CL", "F", "BR",
@@ -34,7 +30,7 @@ ELEMENT_VOCAB = [
 ELEM_IDX = {e: i for i, e in enumerate(ELEMENT_VOCAB)}
 
 
-def element_onehot(symbols: List[str]) -> Tensor:
+def element_onehot(symbols: list[str]) -> Tensor:
     """One-hot encoding with 'other' bucket at end."""
     other_idx = len(ELEMENT_VOCAB)
     indices = torch.tensor([ELEM_IDX.get(s.upper(), other_idx) for s in symbols], dtype=torch.long) 
@@ -43,8 +39,8 @@ def element_onehot(symbols: List[str]) -> Tensor:
 
 def parse_asu_with_biotite(
     path: str,
-    chain_filter: Optional[Sequence[str]] = None,
-) -> Tuple[bts.AtomArray, bts.AtomArray]:
+    chain_filter: list[str] | None = None,
+) -> tuple[bts.AtomArray, bts.AtomArray]:
     """Parse PDB and return (protein_atoms, water_atoms)."""
     pdb_file = PDBFile.read(path)
     atoms = get_structure(pdb_file, model=1, altloc="occupancy")
@@ -64,7 +60,7 @@ def parse_asu_with_biotite(
     return protein_atoms, water_atoms
 
 
-def get_crystal_contacts_pymol(pdb_path: str, cutoff: float = 5.0) -> Dict:
+def get_crystal_contacts_pymol(pdb_path: str, cutoff: float = 5.0) -> dict:
     """Get ASU and symmetry mate atoms using PyMOL."""
     with pymol2.PyMOL() as pm:
         cmd = pm.cmd
@@ -92,7 +88,7 @@ def match_atoms_to_coords(
     atoms: bts.AtomArray,
     target_coords: np.ndarray,
     tolerance: float = 0.01
-) -> List[int]:
+) -> list[int]:
     """Match biotite atoms to PyMOL coordinates, return indices."""
     if target_coords.shape[0] == 0:
         return []
@@ -118,7 +114,7 @@ def check_com_distance(
     protein_coords: torch.Tensor,
     water_coords: torch.Tensor,
     max_com_dist: float = 25.0,
-) -> Tuple[bool, str]:
+) -> tuple[bool, str]:
     """
     Check if protein and water centers of mass are within acceptable distance.
 
@@ -149,7 +145,7 @@ def check_water_clashes(
     water_coords: torch.Tensor,
     clash_dist: float = 2.0,
     max_clash_fraction: float = 0.05,
-) -> Tuple[bool, str]:
+) -> tuple[bool, str]:
     """
     Check if too many waters clash with the protein surface (within a threshold).
 
@@ -183,9 +179,9 @@ def check_water_clashes(
 
 
 def check_chain_interactions(
-    protein_atoms: "bts.AtomArray",
+    protein_atoms: bts.AtomArray,
     interface_dist_threshold: float = 4.0,
-) -> Tuple[bool, str, str]:
+) -> tuple[bool, str, str]:
     """
     Check if multi-chain proteins have interacting chains (PPI) vs ASU copies.
 
@@ -241,7 +237,7 @@ def check_water_residue_ratio(
     num_waters: int,
     num_residues: int,
     min_ratio: float = 0.8,
-) -> Tuple[bool, str]:
+) -> tuple[bool, str]:
     """
     Check if water/residue ratio meets minimum threshold.
 
@@ -272,7 +268,7 @@ def check_water_residue_ratio(
 def load_edia_for_pdb(
     edia_dir: Path,
     pdb_id: str,
-) -> Optional[Dict[Tuple[str, int], float]]:
+) -> dict[tuple[str, int], float] | None:
     """
     Load EDIA scores for water molecules from CSV file.
 
@@ -293,9 +289,9 @@ def load_edia_for_pdb(
         df = pd.read_csv(csv_path)
 
         # filter for water molecules only
-        water_df = df[df["compID"] == "HOH"]
+        water_df = df[df["compID"].isin(["HOH", "WAT"])]
 
-        if len(water_df) == 0:
+        if water_df.empty:
             return {}
 
         # build lookup dictionary: (chain_id, res_id) -> EDIAm
@@ -313,12 +309,12 @@ def load_edia_for_pdb(
 
 def compute_normalized_bfactors(
     pdb_path: str,
-    chain_filter: Optional[Sequence[str]] = None,
-) -> Tuple[Optional[Dict[Tuple[str, int], float]], Optional[np.ndarray]]:
+    chain_filter: list[str] | None = None,
+) -> tuple[dict[tuple[str, int], float] | None, np.ndarray | None]:
     """
     Extract and normalize B-factors for water molecules.
 
-    B-factors are z-score normalized using whole-PDB statistics.
+    B-factors are z-score normalized using statistics from the individual PDB entry.
 
     Args:
         pdb_path: Path to PDB file
@@ -339,9 +335,8 @@ def compute_normalized_bfactors(
         )
 
         # compute whole-PDB B-factor statistics for normalization
-        all_bfactors = atoms.b_factor
-        pdb_mean = np.mean(all_bfactors)
-        pdb_std = np.std(all_bfactors)
+        pdb_mean = np.mean(atoms.b_factor)
+        pdb_std = np.std(atoms.b_factor)
 
         if pdb_std < 1e-3:
             # if std is 0, set to 1.0 to avoid division by zero
@@ -356,20 +351,18 @@ def compute_normalized_bfactors(
         water_mask = (atoms.res_name == "HOH") | (atoms.res_name == "WAT")
         water_atoms = atoms[water_mask]
 
-        if len(water_atoms) == 0:
+        if not water_atoms:
             return {}, np.array([])
 
         # lookup dictionary with one entry per unique water residue
         bfactor_lookup = {}
-        seen = set()
 
         for i in range(len(water_atoms)):
             chain_id = str(water_atoms.chain_id[i])
             res_id = int(water_atoms.res_id[i])
             key = (chain_id, res_id)
 
-            if key not in seen:
-                seen.add(key)
+            if key not in bfactor_lookup:
                 raw_bfactor = water_atoms.b_factor[i]
                 normalized = (raw_bfactor - pdb_mean) / pdb_std
                 bfactor_lookup[key] = normalized
@@ -381,54 +374,77 @@ def compute_normalized_bfactors(
         return None, None
 
 
+def apply_threshold_filter(
+    water_keys: list[tuple[str, int]],
+    lookup: dict[tuple[str, int], float],
+    threshold: float,
+    fail_if_below: bool,
+) -> np.ndarray:
+    """
+    Apply a threshold filter using a lookup dictionary.
+
+    Args:
+        water_keys: List of (chain_id, res_id) tuples for each water
+        lookup: Dict mapping (chain_id, res_id) -> value
+        threshold: Threshold value for comparison
+        fail_if_below: If True, fail when value < threshold (e.g., EDIA).
+                       If False, fail when value > threshold (e.g., B-factor).
+
+    Returns:
+        Boolean mask where True indicates the water FAILS the filter.
+        Waters missing from lookup get np.nan and pass the filter (conservative).
+    """
+    values = np.array([lookup.get(key, np.nan) for key in water_keys])
+    if fail_if_below:
+        return values < threshold
+    return values > threshold
+
+
 def filter_waters_by_quality(
-    water_atoms: "bts.AtomArray",
-    protein_atoms: "bts.AtomArray",
-    edia_lookup: Optional[Dict[Tuple[str, int], float]],
-    bfactor_lookup: Optional[Dict[Tuple[str, int], float]],
+    water_coords: np.ndarray,
+    water_keys: list[tuple[str, int]],
+    protein_coords: np.ndarray | None,
+    edia_lookup: dict[tuple[str, int], float] | None,
+    bfactor_lookup: dict[tuple[str, int], float] | None,
     max_protein_dist: float = 6.0,
     min_edia: float = 0.4,
     max_bfactor_zscore: float = 5.0,
-    filter_by_distance: bool = True,
-    filter_by_edia: bool = True,
-    filter_by_bfactor: bool = True,
-) -> Tuple["bts.AtomArray", Dict[str, int]]:
+    cache_key: str | None = None,
+) -> tuple[np.ndarray, dict[str, int]]:
     """
     Filter water atoms based on quality criteria.
 
     Waters are removed if they fail ANY of the enabled criteria:
-    1. Distance from protein surface > max_protein_dist
-    2. EDIA score < min_edia (if EDIA data available)
-    3. Normalized B-factor > max_bfactor_zscore (if B-factor data available)
+    1. Distance from protein surface > max_protein_dist (if protein_coords provided)
+    2. EDIA score < min_edia (if edia_lookup provided)
+    3. Normalized B-factor > max_bfactor_zscore (if bfactor_lookup provided)
 
     Args:
-        water_atoms: AtomArray of water molecules
-        protein_atoms: AtomArray of protein atoms (for distance calculation)
-        edia_lookup: Dict mapping (chain_id, res_id) -> EDIA score, or None
-        bfactor_lookup: Dict mapping (chain_id, res_id) -> normalized B-factor, or None
+        water_coords: (N, 3) array of water coordinates
+        water_keys: List of (chain_id, res_id) tuples for each water
+        protein_coords: (M, 3) array of protein coordinates, or None to skip distance filtering
+        edia_lookup: Dict mapping (chain_id, res_id) -> EDIA score, or None to skip EDIA filtering
+        bfactor_lookup: Dict mapping (chain_id, res_id) -> normalized B-factor, or None to skip B-factor filtering
         max_protein_dist: Maximum allowed distance to protein surface
         min_edia: Minimum allowed EDIA score
         max_bfactor_zscore: Maximum allowed B-factor z-score
-        filter_by_distance: Enable distance filtering
-        filter_by_edia: Enable EDIA filtering
-        filter_by_bfactor: Enable B-factor filtering
+        cache_key: Optional identifier for logging (e.g., PDB ID)
 
     Returns:
         Tuple of:
-        - Filtered AtomArray containing only high-quality waters
+        - Boolean mask of waters to keep
         - Dictionary with filtering statistics
     """
+    n_waters = len(water_keys)
 
-    if len(water_atoms) == 0:
-        return water_atoms, {
+    if n_waters == 0:
+        return np.array([], dtype=bool), {
             "total": 0,
             "removed_distance": 0,
             "removed_edia": 0,
             "removed_bfactor": 0,
             "kept": 0
         }
-
-    n_waters = len(water_atoms)
 
     stats = {
         "total": n_waters,
@@ -437,48 +453,41 @@ def filter_waters_by_quality(
         "removed_bfactor": 0,
     }
 
-    # compute failure masks independently for each filter
-    dist_fail = np.zeros(n_waters, dtype=bool)
-    edia_fail = np.zeros(n_waters, dtype=bool)
-    bfactor_fail = np.zeros(n_waters, dtype=bool)
-
     # distance filtering using scipy.spatial.distance.cdist
-    if filter_by_distance and len(protein_atoms) > 0:
-        dist_matrix = cdist(water_atoms.coord, protein_atoms.coord)
+    dist_fail = np.zeros(n_waters, dtype=bool)
+    if protein_coords is not None and len(protein_coords) > 0:
+        dist_matrix = cdist(water_coords, protein_coords)
         min_dists = dist_matrix.min(axis=1)
         dist_fail = min_dists > max_protein_dist
         stats["removed_distance"] = int(dist_fail.sum())
 
-    # build water keys array once for EDIA and B-factor filtering
-    water_keys = list(zip(
-        water_atoms.chain_id.astype(str),
-        water_atoms.res_id.astype(int)
-    ))
+    # lookup-based filters: (lookup, threshold, fail_if_below, stat_key)
+    lookup_filters = [
+        (edia_lookup, min_edia, True, "edia"),
+        (bfactor_lookup, max_bfactor_zscore, False, "bfactor"),
+    ]
 
-    # EDIA filtering
-    if filter_by_edia and edia_lookup is not None:
-        # build EDIA values array (NaN for waters not in lookup)
-        edia_values = np.array([edia_lookup.get(key, np.nan) for key in water_keys])
-
-        # waters fail if they have EDIA data AND it's below threshold
-        # waters without EDIA data (NaN) pass through (NaN < threshold is False)
-        edia_fail = edia_values < min_edia
-        stats["removed_edia"] = int(edia_fail.sum())
-
-    # bfactor filtering
-    if filter_by_bfactor and bfactor_lookup is not None:
-        # build B-factor values array (NaN for waters not in lookup)
-        bfactor_values = np.array([bfactor_lookup.get(key, np.nan) for key in water_keys])
-
-        # waters fail if B-factor > threshold (NaN > threshold is False)
-        bfactor_fail = bfactor_values > max_bfactor_zscore
-        stats["removed_bfactor"] = int(bfactor_fail.sum())
+    lookup_fail = np.zeros(n_waters, dtype=bool)
+    for lookup, threshold, fail_if_below, name in lookup_filters:
+        if lookup is not None:
+            fail_mask = apply_threshold_filter(water_keys, lookup, threshold, fail_if_below)
+            stats[f"removed_{name}"] = int(fail_mask.sum())
+            lookup_fail |= fail_mask
 
     # combine all failure masks - water is kept only if it passes all enabled filters
-    keep_mask = ~(dist_fail | edia_fail | bfactor_fail)
+    keep_mask = ~(dist_fail | lookup_fail)
     stats["kept"] = int(keep_mask.sum())
 
-    return water_atoms[keep_mask], stats
+    # log filtering statistics
+    if cache_key is not None and stats["total"] > 0:
+        removed = stats["total"] - stats["kept"]
+        if removed > 0:
+            print(f"  {cache_key}: Filtered {removed}/{stats['total']} waters "
+                  f"(dist:{stats['removed_distance']}, "
+                  f"edia:{stats['removed_edia']}, "
+                  f"bfactor:{stats['removed_bfactor']})")
+
+    return keep_mask
 
 
 class ProteinWaterDataset(Dataset):
@@ -505,8 +514,7 @@ class ProteinWaterDataset(Dataset):
         clash_dist: float = 2.0,
         interface_dist_threshold: float = 4.0,
         min_water_residue_ratio: float = 0.8,
-
-        edia_dir: Optional[str] = None,
+        edia_dir: str | None = None,
         max_protein_dist: float = 6.0,
         min_edia: float = 0.4,
         max_bfactor_zscore: float = 5.0,
@@ -574,7 +582,7 @@ class ProteinWaterDataset(Dataset):
         else:
             self._effective_length = len(self.entries)
     
-    def _parse_pdb_list(self, pdb_list_file: str) -> List[Dict]:
+    def _parse_pdb_list(self, pdb_list_file: str) -> list[dict]:
         """
         Parse PDB list file and construct entries with paths.
 
@@ -659,7 +667,7 @@ class ProteinWaterDataset(Dataset):
         self.entries = valid_entries
         print(f"Dataset contains {len(self.entries)} valid entries.")
     
-    def _preprocess_one(self, entry: Dict, cache_path: Path):
+    def _preprocess_one(self, entry: dict, cache_path: Path):
         """
         Preprocess a single PDB file.
 
@@ -689,7 +697,7 @@ class ProteinWaterDataset(Dataset):
         asu_water_indices = match_atoms_to_coords(
             water_atoms, crystal_data["asu_coords"]
         )
-        if len(asu_water_indices) > 0:
+        if asu_water_indices:
             asu_water_mask = np.zeros(len(water_atoms), dtype=bool)
             asu_water_mask[asu_water_indices] = True
             water_atoms = water_atoms[asu_water_mask]
@@ -701,7 +709,7 @@ class ProteinWaterDataset(Dataset):
             self.filter_by_distance or self.filter_by_edia or self.filter_by_bfactor
         )
 
-        if any_filter_enabled and len(water_atoms) > 0:
+        if any_filter_enabled and water_atoms:
             # load EDIA data if directory provided and EDIA filtering enabled
             edia_lookup = None
             if self.filter_by_edia and self.edia_dir is not None:
@@ -717,33 +725,30 @@ class ProteinWaterDataset(Dataset):
                     chain_filter=chain_filter
                 )
 
+            # build water keys for filtering
+            water_keys = list(zip(
+                water_atoms.chain_id.astype(str),
+                water_atoms.res_id.astype(int)
+            ))
+
             # apply quality filters
-            water_atoms, filter_stats = filter_waters_by_quality(
-                water_atoms,
-                protein_atoms,
+            keep_mask, _ = filter_waters_by_quality(
+                water_atoms.coord,
+                water_keys,
+                protein_atoms.coord if self.filter_by_distance else None,
                 edia_lookup,
                 bfactor_lookup,
                 max_protein_dist=self.max_protein_dist,
                 min_edia=self.min_edia,
                 max_bfactor_zscore=self.max_bfactor_zscore,
-                filter_by_distance=self.filter_by_distance,
-                filter_by_edia=self.filter_by_edia,
-                filter_by_bfactor=self.filter_by_bfactor,
+                cache_key=entry['cache_key'],
             )
-
-            # log filtering statistics
-            if filter_stats["total"] > 0:
-                removed = filter_stats["total"] - filter_stats["kept"]
-                if removed > 0:
-                    print(f"  {entry['cache_key']}: Filtered {removed}/{filter_stats['total']} waters "
-                          f"(dist:{filter_stats['removed_distance']}, "
-                          f"edia:{filter_stats['removed_edia']}, "
-                          f"bfactor:{filter_stats['removed_bfactor']})")
+            water_atoms = water_atoms[keep_mask]
 
         protein_pos = torch.tensor(protein_atoms.coord, dtype=torch.float32)
         water_pos_raw = (
             torch.tensor(water_atoms.coord, dtype=torch.float32)
-            if len(water_atoms) > 0
+            if water_atoms
             else torch.zeros((0, 3), dtype=torch.float32)
         )
 
@@ -794,7 +799,7 @@ class ProteinWaterDataset(Dataset):
             raise ValueError(f"Quality filter failed: {ratio_reason}")
 
         # process water atoms
-        if len(water_atoms) > 0:
+        if water_atoms:
             water_pos = torch.tensor(water_atoms.coord, dtype=torch.float32) - center
             water_elements = [str(e).upper() for e in water_atoms.element]
             water_x = element_onehot(water_elements)
