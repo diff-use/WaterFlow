@@ -409,7 +409,7 @@ def filter_waters_by_quality(
     min_edia: float = 0.4,
     max_bfactor_zscore: float = 5.0,
     cache_key: str | None = None,
-) -> tuple[np.ndarray, dict[str, int]]:
+) -> np.ndarray:
     """
     Filter water atoms based on quality criteria.
 
