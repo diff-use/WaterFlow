@@ -334,7 +334,7 @@ def compute_normalized_bfactors(
             extra_fields=["b_factor"]
         )
 
-        # compute whole-PDB B-factor statistics for normalization
+        # compute B-factor statistics for normalization from PDB entry (including non-water atoms)
         pdb_mean = np.mean(atoms.b_factor)
         pdb_std = np.std(atoms.b_factor)
 
@@ -454,7 +454,7 @@ def filter_waters_by_quality(
 
     # distance filtering using scipy.spatial.distance.cdist
     dist_fail = np.zeros(n_waters, dtype=bool)
-    if protein_coords is not None and len(protein_coords) > 0:
+    if protein_coords is not None and len(protein_coords):
         dist_matrix = cdist(water_coords, protein_coords)
         min_dists = dist_matrix.min(axis=1)
         dist_fail = min_dists > max_protein_dist
