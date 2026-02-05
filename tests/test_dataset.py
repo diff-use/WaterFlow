@@ -1017,57 +1017,43 @@ class TestFilterWatersByQuality:
     """Tests for per-water quality filtering."""
 
     @pytest.fixture
-    def mock_water_atoms(self):
-        """Create mock water atoms for testing."""
-        import biotite.structure as bts
-
-        atoms = bts.AtomArray(5)
-        atoms.coord = np.array([
+    def mock_water_coords(self):
+        """Create mock water coordinates for testing."""
+        return np.array([
             [0., 0., 0.],    # Water 0 - close to protein
             [5., 0., 0.],    # Water 1 - medium distance
             [15., 0., 0.],   # Water 2 - far from protein
             [3., 0., 0.],    # Water 3 - close
             [20., 0., 0.],   # Water 4 - very far
         ])
-        atoms.chain_id = np.array(["A", "A", "A", "B", "B"])
-        atoms.res_id = np.array([101, 102, 103, 201, 202])
-        atoms.res_name = np.array(["HOH"] * 5)
-        atoms.element = np.array(["O"] * 5)
-
-        return atoms
 
     @pytest.fixture
-    def mock_protein_atoms(self):
-        """Create mock protein atoms for testing."""
-        import biotite.structure as bts
+    def mock_water_keys(self):
+        """Create mock water keys (chain_id, res_id) for testing."""
+        return [("A", 101), ("A", 102), ("A", 103), ("B", 201), ("B", 202)]
 
-        atoms = bts.AtomArray(10)
-        atoms.coord = np.zeros((10, 3))  # Protein centered at origin
-        atoms.chain_id = np.array(["A"] * 10)
-        atoms.res_id = np.array([1] * 10)
-        atoms.element = np.array(["C"] * 10)
+    @pytest.fixture
+    def mock_protein_coords(self):
+        """Create mock protein coordinates for testing."""
+        return np.zeros((10, 3))  # Protein centered at origin
 
-        return atoms
-
-    def test_distance_filtering(self, mock_water_atoms, mock_protein_atoms):
+    def test_distance_filtering(self, mock_water_coords, mock_water_keys, mock_protein_coords):
         """Waters far from protein should be removed."""
-        filtered, stats = filter_waters_by_quality(
-            mock_water_atoms,
-            mock_protein_atoms,
+        keep_mask, stats = filter_waters_by_quality(
+            mock_water_coords,
+            mock_water_keys,
+            protein_coords=mock_protein_coords,
             edia_lookup=None,
             bfactor_lookup=None,
             max_protein_dist=6.0,
-            filter_by_distance=True,
-            filter_by_edia=False,
-            filter_by_bfactor=False,
         )
 
         # Waters at 0, 5, 3 A should pass; 15, 20 A should fail
-        assert len(filtered) == 3
+        assert keep_mask.sum() == 3
         assert stats["removed_distance"] == 2
         assert stats["kept"] == 3
 
-    def test_edia_filtering(self, mock_water_atoms, mock_protein_atoms):
+    def test_edia_filtering(self, mock_water_coords, mock_water_keys):
         """Waters with low EDIA should be removed."""
         edia_lookup = {
             ("A", 101): 0.85,  # Pass
@@ -1077,21 +1063,19 @@ class TestFilterWatersByQuality:
             ("B", 202): 0.60,  # Pass
         }
 
-        filtered, stats = filter_waters_by_quality(
-            mock_water_atoms,
-            mock_protein_atoms,
+        keep_mask, stats = filter_waters_by_quality(
+            mock_water_coords,
+            mock_water_keys,
+            protein_coords=None,
             edia_lookup=edia_lookup,
             bfactor_lookup=None,
             min_edia=0.4,
-            filter_by_distance=False,
-            filter_by_edia=True,
-            filter_by_bfactor=False,
         )
 
-        assert len(filtered) == 3
+        assert keep_mask.sum() == 3
         assert stats["removed_edia"] == 2
 
-    def test_bfactor_filtering(self, mock_water_atoms, mock_protein_atoms):
+    def test_bfactor_filtering(self, mock_water_coords, mock_water_keys):
         """Waters with high B-factor z-score should be removed."""
         bfactor_lookup = {
             ("A", 101): 1.0,   # Pass
@@ -1101,21 +1085,19 @@ class TestFilterWatersByQuality:
             ("B", 202): 0.5,   # Pass
         }
 
-        filtered, stats = filter_waters_by_quality(
-            mock_water_atoms,
-            mock_protein_atoms,
+        keep_mask, stats = filter_waters_by_quality(
+            mock_water_coords,
+            mock_water_keys,
+            protein_coords=None,
             edia_lookup=None,
             bfactor_lookup=bfactor_lookup,
             max_bfactor_zscore=5.0,
-            filter_by_distance=False,
-            filter_by_edia=False,
-            filter_by_bfactor=True,
         )
 
-        assert len(filtered) == 3
+        assert keep_mask.sum() == 3
         assert stats["removed_bfactor"] == 2
 
-    def test_combined_filters(self, mock_water_atoms, mock_protein_atoms):
+    def test_combined_filters(self, mock_water_coords, mock_water_keys, mock_protein_coords):
         """Waters failing ANY criterion should be removed."""
         edia_lookup = {
             ("A", 101): 0.85,  # Pass EDIA
@@ -1132,24 +1114,22 @@ class TestFilterWatersByQuality:
             ("B", 202): 1.0,   # Pass B-factor
         }
 
-        filtered, stats = filter_waters_by_quality(
-            mock_water_atoms,
-            mock_protein_atoms,
+        keep_mask, stats = filter_waters_by_quality(
+            mock_water_coords,
+            mock_water_keys,
+            protein_coords=mock_protein_coords,
             edia_lookup=edia_lookup,
             bfactor_lookup=bfactor_lookup,
             max_protein_dist=6.0,
             min_edia=0.4,
             max_bfactor_zscore=5.0,
-            filter_by_distance=True,
-            filter_by_edia=True,
-            filter_by_bfactor=True,
         )
 
         # Only water 0 (A, 101) should pass all three filters
-        assert len(filtered) == 1
+        assert keep_mask.sum() == 1
         assert stats["kept"] == 1
 
-    def test_missing_edia_data_keeps_water(self, mock_water_atoms, mock_protein_atoms):
+    def test_missing_edia_data_keeps_water(self, mock_water_coords, mock_water_keys):
         """Waters without EDIA data should be kept (conservative)."""
         # Only provide EDIA for some waters
         edia_lookup = {
@@ -1158,61 +1138,55 @@ class TestFilterWatersByQuality:
             # A,103, B,201, B,202 have no EDIA data - should be kept
         }
 
-        filtered, stats = filter_waters_by_quality(
-            mock_water_atoms,
-            mock_protein_atoms,
+        keep_mask, stats = filter_waters_by_quality(
+            mock_water_coords,
+            mock_water_keys,
+            protein_coords=None,
             edia_lookup=edia_lookup,
             bfactor_lookup=None,
             min_edia=0.4,
-            filter_by_distance=False,
-            filter_by_edia=True,
-            filter_by_bfactor=False,
         )
 
         # 4 should pass (1 with good EDIA + 3 with no EDIA data)
-        assert len(filtered) == 4
+        assert keep_mask.sum() == 4
         assert stats["removed_edia"] == 1
 
-    def test_empty_water_array(self, mock_protein_atoms):
+    def test_empty_water_array(self):
         """Empty water array should return empty array."""
-        import biotite.structure as bts
-
-        empty_waters = bts.AtomArray(0)
-
-        filtered, stats = filter_waters_by_quality(
-            empty_waters,
-            mock_protein_atoms,
+        keep_mask, stats = filter_waters_by_quality(
+            np.zeros((0, 3)),
+            [],
+            protein_coords=np.zeros((10, 3)),
             edia_lookup=None,
             bfactor_lookup=None,
         )
 
-        assert len(filtered) == 0
+        assert len(keep_mask) == 0
         assert stats["total"] == 0
         assert stats["kept"] == 0
 
-    def test_all_filters_disabled(self, mock_water_atoms, mock_protein_atoms):
+    def test_all_filters_disabled(self, mock_water_coords, mock_water_keys):
         """With all filters disabled, all waters should pass."""
-        filtered, stats = filter_waters_by_quality(
-            mock_water_atoms,
-            mock_protein_atoms,
+        keep_mask, stats = filter_waters_by_quality(
+            mock_water_coords,
+            mock_water_keys,
+            protein_coords=None,
             edia_lookup=None,
             bfactor_lookup=None,
-            filter_by_distance=False,
-            filter_by_edia=False,
-            filter_by_bfactor=False,
         )
 
-        assert len(filtered) == 5
+        assert keep_mask.sum() == 5
         assert stats["kept"] == 5
         assert stats["removed_distance"] == 0
         assert stats["removed_edia"] == 0
         assert stats["removed_bfactor"] == 0
 
-    def test_stats_dict_has_required_keys(self, mock_water_atoms, mock_protein_atoms):
+    def test_stats_dict_has_required_keys(self, mock_water_coords, mock_water_keys):
         """Stats dict should have all required keys."""
         _, stats = filter_waters_by_quality(
-            mock_water_atoms,
-            mock_protein_atoms,
+            mock_water_coords,
+            mock_water_keys,
+            protein_coords=None,
             edia_lookup=None,
             bfactor_lookup=None,
         )
@@ -1246,16 +1220,20 @@ class TestWaterFilteringIntegration:
         # Get B-factors
         bfactor_lookup, _ = compute_normalized_bfactors(pdb_6eey)
 
-        # Apply filtering with distance only
-        filtered, stats = filter_waters_by_quality(
-            water_atoms,
-            protein_atoms,
+        # Build water keys
+        water_keys = list(zip(
+            water_atoms.chain_id.astype(str),
+            water_atoms.res_id.astype(int)
+        ))
+
+        # Apply filtering with distance and bfactor
+        keep_mask, stats = filter_waters_by_quality(
+            water_atoms.coord,
+            water_keys,
+            protein_coords=protein_atoms.coord,
             edia_lookup=None,
             bfactor_lookup=bfactor_lookup,
             max_protein_dist=6.0,
-            filter_by_distance=True,
-            filter_by_edia=False,
-            filter_by_bfactor=True,
         )
 
         # Some waters should be filtered
