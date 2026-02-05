@@ -10,11 +10,9 @@ import torch
 from torch_geometric.data import HeteroData
 
 from pathlib import Path
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.encoder import ProteinGVPEncoder
-from src.flow import FlowWaterGVP, FlowMatcher, make_protein_encoder_data
+from src.gvp_encoder import ProteinGVPEncoder, GVPEncoder, make_encoder_data
+from src.flow import FlowWaterGVP, FlowMatcher
 
 
 def _iter_tensors(obj):
@@ -170,7 +168,7 @@ def test_forward_pass_no_nan_with_module_hooks(device):
         duplicate_protein_coords=False,
     )
 
-    encoder = ProteinGVPEncoder(
+    base_encoder = ProteinGVPEncoder(
         node_scalar_in=16,
         hidden_dims=(64, 8),
         edge_scalar_in=16,
@@ -179,6 +177,7 @@ def test_forward_pass_no_nan_with_module_hooks(device):
         num_edge_rbf=16,
         radius=8.0,
     ).to(device)
+    encoder = GVPEncoder(encoder=base_encoder, freeze=False)
 
     model = FlowWaterGVP(
         encoder=encoder,
@@ -190,7 +189,7 @@ def test_forward_pass_no_nan_with_module_hooks(device):
     ).to(device)
 
     # Quick pre-check: protein encoder input features created from pp edges
-    enc_data = make_protein_encoder_data(data)
+    enc_data = make_encoder_data(data)
     assert_edge_index_in_range(enc_data.edge_index, enc_data.x.size(0), enc_data.x.size(0), "pp edge_index")
 
     # Also validate knn edges are sane (catches orientation / k issues)
@@ -201,12 +200,12 @@ def test_forward_pass_no_nan_with_module_hooks(device):
     t = torch.linspace(0.05, 0.95, steps=n_graphs, device=device)
 
     with FiniteHookManager() as hm:
-        # Encoder internals
-        hm.watch(model.encoder.input_scalar_encoder, "encoder.input_scalar_encoder")
-        hm.watch(model.encoder.input_gvp, "encoder.input_gvp")
-        for i, layer in enumerate(model.encoder.layers):
+        # Encoder internals (access via .encoder.encoder for wrapped GVPEncoder)
+        hm.watch(model.encoder.encoder.input_scalar_encoder, "encoder.input_scalar_encoder")
+        hm.watch(model.encoder.encoder.input_gvp, "encoder.input_gvp")
+        for i, layer in enumerate(model.encoder.encoder.layers):
             hm.watch(layer, f"encoder.layers[{i}]")
-        hm.watch(model.encoder.edge_update, "encoder.edge_update")
+        hm.watch(model.encoder.encoder.edge_update, "encoder.edge_update")
 
         # Flow parts
         hm.watch(model.encoder_to_flow, "flow.encoder_to_flow")
@@ -236,7 +235,7 @@ def test_training_step_no_nan_tripwire(device):
         duplicate_protein_coords=False,
     )
 
-    encoder = ProteinGVPEncoder(
+    base_encoder = ProteinGVPEncoder(
         node_scalar_in=16,
         hidden_dims=(64, 8),
         edge_scalar_in=16,
@@ -245,6 +244,7 @@ def test_training_step_no_nan_tripwire(device):
         num_edge_rbf=16,
         radius=8.0,
     ).to(device)
+    encoder = GVPEncoder(encoder=base_encoder, freeze=False)
 
     model = FlowWaterGVP(
         encoder=encoder,
@@ -300,7 +300,7 @@ def test_forward_with_duplicate_protein_coords_catches_nan(device):
         duplicate_protein_coords=True,
     )
 
-    encoder = ProteinGVPEncoder(
+    base_encoder = ProteinGVPEncoder(
         node_scalar_in=16,
         hidden_dims=(64, 8),
         edge_scalar_in=16,
@@ -309,6 +309,7 @@ def test_forward_with_duplicate_protein_coords_catches_nan(device):
         num_edge_rbf=16,
         radius=8.0,
     ).to(device)
+    encoder = GVPEncoder(encoder=base_encoder, freeze=False)
 
     model = FlowWaterGVP(
         encoder=encoder,
@@ -344,7 +345,7 @@ def test_forward_with_duplicate_protein_coords_localizes_nan(device):
         duplicate_protein_coords=True,   # force a zero-distance pair
     )
 
-    encoder = ProteinGVPEncoder(
+    base_encoder = ProteinGVPEncoder(
         node_scalar_in=16,
         hidden_dims=(64, 8),
         edge_scalar_in=16,
@@ -353,6 +354,7 @@ def test_forward_with_duplicate_protein_coords_localizes_nan(device):
         num_edge_rbf=16,
         radius=8.0,
     ).to(device)
+    encoder = GVPEncoder(encoder=base_encoder, freeze=False)
 
     model = FlowWaterGVP(
         encoder=encoder,
@@ -364,19 +366,19 @@ def test_forward_with_duplicate_protein_coords_localizes_nan(device):
     ).to(device)
 
     # ---- Pre-check: encoder input edges ----
-    enc_data = make_protein_encoder_data(data)
+    enc_data = make_encoder_data(data)
     for tensor in _iter_tensors(enc_data):
         assert torch.isfinite(tensor).all()
 
     t = torch.tensor([0.5], device=device)
 
     with FiniteHookManager() as hm:
-        # encoder internals
-        hm.watch(model.encoder.input_scalar_encoder, "encoder.input_scalar_encoder")
-        hm.watch(model.encoder.input_gvp, "encoder.input_gvp")
-        for i, layer in enumerate(model.encoder.layers):
+        # encoder internals (access via .encoder.encoder for wrapped GVPEncoder)
+        hm.watch(model.encoder.encoder.input_scalar_encoder, "encoder.input_scalar_encoder")
+        hm.watch(model.encoder.encoder.input_gvp, "encoder.input_gvp")
+        for i, layer in enumerate(model.encoder.encoder.layers):
             hm.watch(layer, f"encoder.layers[{i}]")
-        hm.watch(model.encoder.edge_update, "encoder.edge_update")
+        hm.watch(model.encoder.encoder.edge_update, "encoder.edge_update")
 
         # flow top-level stages
         hm.watch(model.encoder_to_flow, "flow.encoder_to_flow")
@@ -503,10 +505,11 @@ class TestFlowIntegrationCorrectness:
         """Integration trajectory should have num_steps entries."""
         data = make_batched_hetero(device, n_graphs=1, n_protein_per=24, n_water_per=12)
 
-        encoder = ProteinGVPEncoder(
+        base_encoder = ProteinGVPEncoder(
             node_scalar_in=16, hidden_dims=(64, 8), edge_scalar_in=16,
             pool_residue=False,
         ).to(device)
+        encoder = GVPEncoder(encoder=base_encoder, freeze=False)
 
         model = FlowWaterGVP(
             encoder=encoder, hidden_dims=(64, 8), layers=1,
@@ -561,10 +564,11 @@ class TestVelocityFieldProperties:
         """Velocity predictions should be finite (no NaN or Inf)."""
         data = make_batched_hetero(device, n_graphs=1, n_protein_per=24, n_water_per=12)
 
-        encoder = ProteinGVPEncoder(
+        base_encoder = ProteinGVPEncoder(
             node_scalar_in=16, hidden_dims=(64, 8), edge_scalar_in=16,
             pool_residue=False,
         ).to(device)
+        encoder = GVPEncoder(encoder=base_encoder, freeze=False)
 
         model = FlowWaterGVP(
             encoder=encoder, hidden_dims=(64, 8), layers=1,
@@ -590,10 +594,11 @@ class TestVelocityFieldProperties:
         """Velocity field should depend on t (different outputs for different times)."""
         data = make_batched_hetero(device, n_graphs=1, n_protein_per=24, n_water_per=12)
 
-        encoder = ProteinGVPEncoder(
+        base_encoder = ProteinGVPEncoder(
             node_scalar_in=16, hidden_dims=(64, 8), edge_scalar_in=16,
             pool_residue=False,
         ).to(device)
+        encoder = GVPEncoder(encoder=base_encoder, freeze=False)
 
         model = FlowWaterGVP(
             encoder=encoder, hidden_dims=(64, 8), layers=1,

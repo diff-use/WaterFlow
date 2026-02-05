@@ -18,10 +18,7 @@ Usage:
 
 import argparse
 import json
-import sys
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import numpy as np
 import torch
@@ -30,8 +27,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 from src.dataset import ProteinWaterDataset
-from src.encoder import ProteinGVPEncoder, load_encoder_from_checkpoint
-from src.encoder_adapters import SLAEToGVPAdapter
+from src.encoder_base import build_encoder
 from src.flow import FlowWaterGVP, FlowMatcher
 from src.utils import (
     plot_3d_frame,
@@ -162,7 +158,7 @@ def load_config(run_dir: Path) -> dict:
 
 
 def build_model_from_config(config: dict, device: torch.device) -> nn.Module:
-    """Build model architecture from config (without loading weights)."""
+    """Build model architecture from config using registry-based encoder construction."""
     use_slae = config.get("use_slae", False)
     hidden_s = config.get("hidden_s", 256)
     hidden_v = config.get("hidden_v", 64)
@@ -171,62 +167,29 @@ def build_model_from_config(config: dict, device: torch.device) -> nn.Module:
     k_ww = config.get("k_ww", 24)
     freeze_encoder = config.get("freeze_encoder", False)
 
-    if use_slae:
-        slae_dim = config.get("slae_dim", 128)
-        slae_adapter_dims = config.get("slae_adapter_dims", None)
+    # Build encoder config for registry
+    encoder_config = {
+        'encoder_type': 'slae' if use_slae else 'gvp',
+        'hidden_s': hidden_s,
+        'hidden_v': hidden_v,
+        'node_scalar_in': config.get("node_scalar_in", 16),
+        'freeze_encoder': True if use_slae else freeze_encoder,
+        'slae_dim': config.get("slae_dim", 128),
+        'slae_adapter_dims': config.get("slae_adapter_dims"),
+        'encoder_ckpt': config.get("encoder_ckpt"),
+    }
 
-        if slae_adapter_dims is not None:
-            s_dim, v_dim = map(int, slae_adapter_dims.split(","))
-        else:
-            s_dim, v_dim = hidden_s, hidden_v
+    encoder = build_encoder(encoder_config, device)
 
-        adapter = SLAEToGVPAdapter(slae_dim=slae_dim, out_dims=(s_dim, v_dim)).to(
-            device
-        )
-
-        encoder = nn.Identity()
-
-        model = FlowWaterGVP(
-            encoder=encoder,
-            hidden_dims=(hidden_s, hidden_v),
-            edge_scalar_dim=32,
-            layers=flow_layers,
-            k_pw=k_pw,
-            k_ww=k_ww,
-            freeze_encoder=True,
-            encoder_type="slae",
-            use_cached_slae=True,
-            slae_adapter=adapter,
-        ).to(device)
-
-    else:
-        encoder_ckpt = config.get("encoder_ckpt", None)
-
-        node_scalar_in = config.get("node_scalar_in", 17)
-        if encoder_ckpt:
-            encoder, _ = load_encoder_from_checkpoint(
-                encoder_ckpt,
-                node_scalar_in=node_scalar_in,
-                device=device,
-                freeze=freeze_encoder,
-            )
-        else:
-            encoder = ProteinGVPEncoder(
-                node_scalar_in=node_scalar_in,
-                hidden_dims=(hidden_s, hidden_v),
-                edge_scalar_in=16,
-            ).to(device)
-
-        model = FlowWaterGVP(
-            encoder=encoder,
-            hidden_dims=(hidden_s, hidden_v),
-            edge_scalar_dim=32,
-            layers=flow_layers,
-            k_pw=k_pw,
-            k_ww=k_ww,
-            freeze_encoder=freeze_encoder,
-            encoder_type="gvp",
-        ).to(device)
+    model = FlowWaterGVP(
+        encoder=encoder,
+        hidden_dims=(hidden_s, hidden_v),
+        edge_scalar_dim=32,
+        layers=flow_layers,
+        k_pw=k_pw,
+        k_ww=k_ww,
+        freeze_encoder=True if use_slae else freeze_encoder,
+    ).to(device)
 
     return model
 

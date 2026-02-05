@@ -26,9 +26,6 @@ from pathlib import Path
 import tempfile
 import os
 
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 from src.dataset import (
     element_onehot,
     ELEMENT_VOCAB,

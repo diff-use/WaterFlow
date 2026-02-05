@@ -1,32 +1,24 @@
 # flow.py
 
 import math
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, List, Union
 from pathlib import Path
-
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-import torch
-from torch import nn
-import torch.nn.functional as F
-from torch_geometric.nn import knn
-from torch_geometric.data import HeteroData, Data, Batch
-from typing import List, Union
-
-from torch_scatter import scatter_mean, scatter_add
-import e3nn
-from e3nn.math import soft_one_hot_linspace
-
 import copy
 
 import numpy as np
-from torch import Tensor
+import torch
+from torch import nn, Tensor
+import torch.nn.functional as F
+from torch_geometric.nn import knn
+from torch_geometric.data import HeteroData, Data, Batch
+from torch_scatter import scatter_mean, scatter_add
+import e3nn
+from e3nn.math import soft_one_hot_linspace
 from tqdm.auto import tqdm
 
-from src.utils import ot_coupling
-from src.encoder import ProteinGVPEncoder
-from src.gvp import GVP, GVPMultiEdgeConv
+from .utils import ot_coupling
+from .encoder_base import BaseProteinEncoder
+from .gvp import GVP, GVPMultiEdgeConv
 
 def build_knn_edges(src_pos: torch.Tensor,
                     dst_pos: torch.Tensor,
@@ -47,41 +39,6 @@ def build_knn_edges(src_pos: torch.Tensor,
         idx = idx[:, mask]
 
     return idx.unique(dim=1)
-
-
-def make_protein_encoder_data(data: HeteroData) -> Data:
-    """
-    Build a homogeneous Data with protein nodes (including any mates).
-
-    Extracts protein subgraph from HeteroData for use with ProteinGVPEncoder.
-    Edge features are computed by the encoder itself.
-
-    Returns:
-        enc_data: Data with x, pos, edge_index
-    """
-    device = data['protein'].pos.device
-    prot = data['protein']
-
-    x = prot.x
-    pos = prot.pos
-
-    # protein-protein edges (topology only - features computed by encoder)
-    if ('protein', 'pp', 'protein') in data.edge_types:
-        edge_index = data['protein', 'pp', 'protein'].edge_index
-    else:
-        edge_index = torch.empty(2, 0, dtype=torch.long, device=device)
-
-    enc_data = Data(
-        x=x,
-        pos=pos,
-        edge_index=edge_index,
-    )
-
-    # batch for multi-complex batches
-    if hasattr(prot, "batch"):
-        enc_data.batch = prot.batch
-
-    return enc_data
 
 
 class ProteinWaterUpdate(nn.Module):
@@ -238,7 +195,7 @@ class FlowWaterGVP(nn.Module):
 
     def __init__(
         self,
-        encoder: ProteinGVPEncoder,
+        encoder: BaseProteinEncoder,
         hidden_dims: Tuple[int, int] = (256, 32),
         edge_scalar_dim: int = 32,
         layers: int = 4,
@@ -249,9 +206,6 @@ class FlowWaterGVP(nn.Module):
         k_wp: int = 8,
         freeze_encoder: bool = False,
         water_input_dim: int = 16,  # 1 hot with oxygen, same as encoder
-        encoder_type: str = "gvp",  # "gvp" or "slae"
-        use_cached_slae: bool = True,
-        slae_adapter: Optional[nn.Module] = None,
     ):
         super().__init__()
         self.encoder = encoder
@@ -264,31 +218,12 @@ class FlowWaterGVP(nn.Module):
         self.k_ww = k_ww
         self.k_wp = k_wp
         self.freeze_encoder = freeze_encoder
-        self.encoder_type = encoder_type
-        self.use_cached_slae = use_cached_slae
 
-        if encoder_type == "slae":
-            if slae_adapter is None:
-                raise ValueError("slae_adapter required when encoder_type='slae'")
-            self.slae_adapter = slae_adapter
-        else:
-            self.slae_adapter = None
-
-        if freeze_encoder:
-            for p in self.encoder.parameters():
-                p.requires_grad = False
-            self.encoder.eval()
-
-        # map encoder hidden dims -> flow hidden dims
-        if encoder_type == "gvp":
-            self.encoder_hidden_dims = encoder.hidden_dims
-        elif encoder_type == "slae":
-            # SLAE adapter outputs (s, V) tuples, encoder_to_flow expects those dims
-            self.encoder_hidden_dims = hidden_dims
         s_h, v_h = hidden_dims
 
+        # Bridge encoder output dims -> flow dims (works for ANY encoder)
         self.encoder_to_flow = GVP(
-            in_dims=self.encoder_hidden_dims,
+            in_dims=encoder.output_dims,
             out_dims=hidden_dims,
             activations=(F.relu, torch.sigmoid),
             vector_gate=True,
@@ -354,34 +289,11 @@ class FlowWaterGVP(nn.Module):
         """
         device = data['protein'].pos.device
 
-        # get protein embeddings (conditional on encoder type)
-        if self.encoder_type == "gvp":
-            # original GVP encoder path
-            enc_data = make_protein_encoder_data(data)
+        # Single unified encoder call - works for ANY encoder type
+        s_all, v_all = self.encoder(data)
 
-            with torch.set_grad_enabled(not self.freeze_encoder):
-                s_all, v_all = self.encoder(enc_data)
-
-            # bridge encoder dims -> flow dims
-            s_p_latent, v_p_latent = self.encoder_to_flow((s_all, v_all))
-
-        elif self.encoder_type == "slae":
-            if self.use_cached_slae and 'slae_embedding' in data['protein']:
-                embeddings = data['protein'].slae_embedding
-            else:
-                raise NotImplementedError(
-                    "SLAE encoder without cached embeddings is not yet implemented. "
-                    "Please provide pre-computed slae_embedding in data['protein']."
-                )
-
-            # adapter: 128-dim embeddings -> (s, V) tuple
-            s_all, v_all = self.slae_adapter(embeddings)
-
-            # bridge adapter output -> flow dims
-            s_p_latent, v_p_latent = self.encoder_to_flow((s_all, v_all))
-
-        else:
-            raise ValueError(f"Unknown encoder_type: {self.encoder_type}")
+        # Bridge encoder dims -> flow dims
+        s_p_latent, v_p_latent = self.encoder_to_flow((s_all, v_all))
 
         if 'water' not in data.node_types or data['water'].num_nodes == 0:
             return torch.zeros(0, 3, device=device)
