@@ -54,8 +54,6 @@ def parse_args():
     # SLAE encoder options
     p.add_argument("--use_slae", action="store_true", help="Use SLAE encoder instead of GVP")
     p.add_argument("--slae_dim", type=int, default=128, help="SLAE embedding dimension")
-    p.add_argument("--slae_adapter_dims", type=str, default=None,
-                   help="Adapter output dimensions as 's,v' (default: use hidden_s,hidden_v)")
 
     # training
     p.add_argument("--epochs", type=int, default=100)
@@ -96,16 +94,15 @@ def build_model(args, device, node_scalar_in=16):
     print(f"Building model with {encoder_type.upper()} encoder")
 
     if args.use_slae:
-        print(f"  SLAE dim: {args.slae_dim}, Adapter output dims: {args.slae_adapter_dims or f'{args.hidden_s},{args.hidden_v}'}")
+        print(f"  SLAE dim: {args.slae_dim}")
 
     encoder_config = {
         'encoder_type': encoder_type,
         'hidden_s': args.hidden_s,
         'hidden_v': args.hidden_v,
         'node_scalar_in': node_scalar_in,
-        'freeze_encoder': args.freeze_encoder if not args.use_slae else True,
+        'freeze_encoder': args.freeze_encoder,
         'slae_dim': args.slae_dim,
-        'slae_adapter_dims': args.slae_adapter_dims,
         'encoder_ckpt': args.encoder_ckpt,
     }
 
@@ -118,7 +115,6 @@ def build_model(args, device, node_scalar_in=16):
         layers=args.flow_layers,
         k_pw=args.k_pw,
         k_ww=args.k_ww,
-        freeze_encoder=args.freeze_encoder if not args.use_slae else True,
     ).to(device)
 
     return model

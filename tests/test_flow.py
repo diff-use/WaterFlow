@@ -195,14 +195,13 @@ class TestProteinWaterUpdate:
         assert ('protein', 'pw', 'water') in updater.etypes
         assert ('water', 'ww', 'water') in updater.etypes
     
-    def test_init_with_protein_update(self):
+    def test_init_always_includes_all_edge_types(self):
         updater = ProteinWaterUpdate(
             hidden_dims=(128, 16),
             rbf_dim=16,
             layers=2,
-            update_protein=True,
         )
-        
+
         assert ('protein', 'pp', 'protein') in updater.etypes
         assert ('water', 'wp', 'protein') in updater.etypes
     
@@ -508,7 +507,8 @@ class TestEdgeCases:
         
         assert v_pred.shape == (1, 3)
     
-    def test_freeze_encoder(self, device):
+    def test_frozen_gvp_encoder(self, device):
+        """Freezing is handled by the encoder itself, not FlowWaterGVP."""
         base_encoder = ProteinGVPEncoder(
             node_scalar_in=16,
             hidden_dims=(64, 8),
@@ -521,7 +521,6 @@ class TestEdgeCases:
             encoder=encoder,
             hidden_dims=(64, 8),
             layers=1,
-            freeze_encoder=True,
         ).to(device)
 
         # Verify encoder params are frozen

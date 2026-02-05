@@ -185,7 +185,6 @@ def test_forward_pass_no_nan_with_module_hooks(device):
         layers=2,
         k_pw=8,   # keep <= n_water_per
         k_ww=8,   # keep <= n_water_per
-        freeze_encoder=False,
     ).to(device)
 
     # Quick pre-check: protein encoder input features created from pp edges
@@ -193,7 +192,7 @@ def test_forward_pass_no_nan_with_module_hooks(device):
     assert_edge_index_in_range(enc_data.edge_index, enc_data.x.size(0), enc_data.x.size(0), "pp edge_index")
 
     # Also validate knn edges are sane (catches orientation / k issues)
-    edge_dict = model.updater.build_edges(data, k_pw=model.k_pw, k_ww=model.k_ww, include_pp=False)
+    edge_dict = model.updater.build_edges(data, k_pw=model.k_pw, k_ww=model.k_ww)
     assert_edge_index_in_range(edge_dict[("protein", "pw", "water")], data["protein"].pos.size(0), data["water"].pos.size(0), "pw edge_index")
     assert_edge_index_in_range(edge_dict[("water", "ww", "water")], data["water"].pos.size(0), data["water"].pos.size(0), "ww edge_index")
 
@@ -252,7 +251,6 @@ def test_training_step_no_nan_tripwire(device):
         layers=2,
         k_pw=8,
         k_ww=8,
-        freeze_encoder=False,
     ).to(device)
 
     fm = FlowMatcher(
@@ -317,7 +315,6 @@ def test_forward_with_duplicate_protein_coords_catches_nan(device):
         layers=2,
         k_pw=8,
         k_ww=8,
-        freeze_encoder=False,
     ).to(device)
 
     t = torch.tensor([0.5], device=device)
@@ -362,7 +359,6 @@ def test_forward_with_duplicate_protein_coords_localizes_nan(device):
         layers=2,
         k_pw=8,
         k_ww=8,
-        freeze_encoder=False,
     ).to(device)
 
     # ---- Pre-check: encoder input edges ----

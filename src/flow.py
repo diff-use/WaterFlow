@@ -43,10 +43,11 @@ def build_knn_edges(src_pos: torch.Tensor,
 
 class ProteinWaterUpdate(nn.Module):
     """
-    Heterogeneous GVP message passing:
+    Heterogeneous GVP message passing with all four edge types:
       - protein -> water  (pw)
       - water   -> water  (ww)
-      - (optional) protein<->protein (pp), water->protein (wp)
+      - protein -> protein (pp)
+      - water   -> protein (wp)
     """
 
     def __init__(
@@ -57,7 +58,6 @@ class ProteinWaterUpdate(nn.Module):
         drop_rate=0.0,
         vector_gate=True,
         aggr_edges="sum",
-        update_protein=False,
         use_dst_feats=True,
     ):
         super().__init__()
@@ -66,12 +66,9 @@ class ProteinWaterUpdate(nn.Module):
         etypes = [
             ('protein', 'pw', 'water'),
             ('water',   'ww', 'water'),
+            ('protein', 'pp', 'protein'),
+            ('water',   'wp', 'protein'),
         ]
-        if update_protein:
-            etypes += [
-                ('protein', 'pp', 'protein'),
-                ('water',   'wp', 'protein'),
-            ]
 
         self.blocks = nn.ModuleList([
             GVPMultiEdgeConv(
@@ -94,15 +91,16 @@ class ProteinWaterUpdate(nn.Module):
                     data: HeteroData,
                     k_pw: int = 12,
                     k_ww: int = 8,
-                    k_wp: int = 8,
-                    include_pp: bool = False) -> Dict[Tuple[str, str, str], torch.Tensor]:
+                    k_wp: int = 8) -> Dict[Tuple[str, str, str], torch.Tensor]:
         """
         Build KNN edges for protein-water interactions.
-        
+
         For protein->water edges, we take the union of:
         - KNN(protein -> water): k nearest waters per protein
         - KNN(water -> protein) reversed: k nearest proteins per water
         This ensures every water has at least k_pw protein neighbors.
+
+        PP edges are read from the dataset (cached at preprocessing time).
         """
         edge_index_dict: Dict[Tuple[str, str, str], torch.Tensor] = {}
         device = data['protein'].pos.device
@@ -113,13 +111,13 @@ class ProteinWaterUpdate(nn.Module):
         pos_p = data['protein'].pos
         pos_w = data['water'].pos
 
-        # protein -> water 
+        # protein -> water
         if pos_p.numel() > 0 and pos_w.numel() > 0:
             # p->w
             ei_pw = build_knn_edges(pos_p, pos_w, k=k_pw, batch_src=batch_p, batch_dst=batch_w)
             # w->p then reverse
             ei_wp = build_knn_edges(pos_w, pos_p, k=k_pw, batch_src=batch_w, batch_dst=batch_p)
-            ei_wp_reversed = ei_wp.flip(0)  
+            ei_wp_reversed = ei_wp.flip(0)
             # union
             ei_pw_union = torch.cat([ei_pw, ei_wp_reversed], dim=1).unique(dim=1)
             edge_index_dict[('protein', 'pw', 'water')] = ei_pw_union
@@ -134,21 +132,21 @@ class ProteinWaterUpdate(nn.Module):
         else:
             edge_index_dict[('water', 'ww', 'water')] = torch.empty(2, 0, dtype=torch.long, device=device)
 
-        # protein-protein and water->protein
-        if include_pp:
-            if ('protein', 'pp', 'protein') in data.edge_types:
-                edge_index_dict[('protein', 'pp', 'protein')] = data['protein', 'pp', 'protein'].edge_index
-            else:
-                edge_index_dict[('protein', 'pp', 'protein')] = build_knn_edges(
-                    pos_p, pos_p, k=k_pw, batch_src=batch_p, batch_dst=batch_p
-                )
+        # protein-protein edges (cached from dataset)
+        if ('protein', 'pp', 'protein') in data.edge_types:
+            edge_index_dict[('protein', 'pp', 'protein')] = data['protein', 'pp', 'protein'].edge_index
+        else:
+            edge_index_dict[('protein', 'pp', 'protein')] = build_knn_edges(
+                pos_p, pos_p, k=k_pw, batch_src=batch_p, batch_dst=batch_p
+            )
 
-            if pos_w.numel() > 0 and pos_p.numel() > 0:
-                edge_index_dict[('water', 'wp', 'protein')] = build_knn_edges(
-                    pos_w, pos_p, k=k_wp, batch_src=batch_w, batch_dst=batch_p
-                )
-            else:
-                edge_index_dict[('water', 'wp', 'protein')] = torch.empty(2, 0, dtype=torch.long, device=device)
+        # water -> protein
+        if pos_w.numel() > 0 and pos_p.numel() > 0:
+            edge_index_dict[('water', 'wp', 'protein')] = build_knn_edges(
+                pos_w, pos_p, k=k_wp, batch_src=batch_w, batch_dst=batch_p
+            )
+        else:
+            edge_index_dict[('water', 'wp', 'protein')] = torch.empty(2, 0, dtype=torch.long, device=device)
 
         for et in self.etypes:
             if et not in edge_index_dict:
@@ -161,8 +159,7 @@ class ProteinWaterUpdate(nn.Module):
                 data: HeteroData,
                 k_pw: int = 12,
                 k_ww: int = 8,
-                k_wp: int = 8,
-                update_protein: bool = False):
+                k_wp: int = 8):
         """
         x_dict: {
             'protein': (s_p, v_p),
@@ -174,7 +171,6 @@ class ProteinWaterUpdate(nn.Module):
         edge_index_dict = self.build_edges(
             data,
             k_pw=k_pw, k_ww=k_ww, k_wp=k_wp,
-            include_pp=update_protein,
         )
 
         for block in self.blocks:
@@ -204,7 +200,6 @@ class FlowWaterGVP(nn.Module):
         k_pw: int = 12,
         k_ww: int = 8,
         k_wp: int = 8,
-        freeze_encoder: bool = False,
         water_input_dim: int = 16,  # 1 hot with oxygen, same as encoder
     ):
         super().__init__()
@@ -217,7 +212,6 @@ class FlowWaterGVP(nn.Module):
         self.k_pw = k_pw
         self.k_ww = k_ww
         self.k_wp = k_wp
-        self.freeze_encoder = freeze_encoder
 
         s_h, v_h = hidden_dims
 
@@ -243,7 +237,7 @@ class FlowWaterGVP(nn.Module):
             nn.LayerNorm(s_h),
         )
 
-        # hetero updater: protein+water
+        # hetero updater: protein+water (always includes pp and wp edges)
         self.updater = ProteinWaterUpdate(
             hidden_dims=hidden_dims,
             rbf_dim=edge_scalar_dim,
@@ -251,7 +245,6 @@ class FlowWaterGVP(nn.Module):
             drop_rate=drop_rate,
             vector_gate=vector_gate,
             aggr_edges="sum",
-            update_protein=not freeze_encoder,
             use_dst_feats=True,
         )
 
@@ -343,7 +336,6 @@ class FlowWaterGVP(nn.Module):
             k_pw=self.k_pw,
             k_ww=self.k_ww,
             k_wp=self.k_wp,
-            update_protein=not self.freeze_encoder,
         )
 
         # water vector field head

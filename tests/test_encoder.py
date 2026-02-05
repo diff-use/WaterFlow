@@ -15,8 +15,8 @@ from torch_geometric.data import Data, HeteroData
 from torch_cluster import radius_graph
 
 from src.encoder_base import build_encoder, get_encoder_class
-from src.gvp_encoder import ProteinGVPEncoder, GVPEncoder, FlowEncoder, make_encoder_data
-from src.slae import SLAEEncoder, SLAEProjection
+from src.gvp_encoder import ProteinGVPEncoder, GVPEncoder, make_encoder_data
+from src.slae import SLAEEncoder
 
 
 # ============== Fixtures ==============
@@ -115,14 +115,12 @@ class TestEncoderRegistry:
         config = {
             'encoder_type': 'slae',
             'slae_dim': 128,
-            'hidden_s': 256,
-            'hidden_v': 32,
         }
         encoder = build_encoder(config, device)
 
         assert isinstance(encoder, SLAEEncoder)
         assert encoder.encoder_type == 'slae'
-        assert encoder.output_dims == (256, 32)
+        assert encoder.output_dims == (128, 0)
 
     def test_build_encoder_default_gvp(self, device):
         """build_encoder should default to GVP if encoder_type not specified."""
@@ -161,32 +159,31 @@ class TestBaseEncoderInterface:
 
     def test_slae_implements_interface(self, device, sample_hetero_data_with_slae):
         """SLAEEncoder should implement all required interface methods."""
-        encoder = SLAEEncoder(
-            slae_dim=128,
-            output_dims=(64, 16),
-        ).to(device)
+        encoder = SLAEEncoder(slae_dim=128).to(device)
 
         # Check properties
         assert isinstance(encoder.output_dims, tuple)
         assert len(encoder.output_dims) == 2
+        assert encoder.output_dims == (128, 0)
         assert isinstance(encoder.encoder_type, str)
 
         # Check forward returns (s, V) tuple
         s, V = encoder(sample_hetero_data_with_slae)
         assert s.shape[0] == sample_hetero_data_with_slae['protein'].num_nodes
-        assert V.shape[0] == sample_hetero_data_with_slae['protein'].num_nodes
-        assert V.shape[2] == 3
+        assert s.shape[1] == 128
+        assert V.shape == (sample_hetero_data_with_slae['protein'].num_nodes, 0, 3)
 
     def test_from_config_class_method(self, device):
         """Both encoders should have from_config class method."""
         gvp_config = {'encoder_type': 'gvp', 'node_scalar_in': 16, 'hidden_s': 64, 'hidden_v': 16}
-        slae_config = {'encoder_type': 'slae', 'slae_dim': 128, 'hidden_s': 64, 'hidden_v': 16}
+        slae_config = {'encoder_type': 'slae', 'slae_dim': 128}
 
         gvp_encoder = GVPEncoder.from_config(gvp_config, device)
         slae_encoder = SLAEEncoder.from_config(slae_config, device)
 
         assert isinstance(gvp_encoder, GVPEncoder)
         assert isinstance(slae_encoder, SLAEEncoder)
+        assert slae_encoder.output_dims == (128, 0)
 
 
 # ============== GVP Encoder Tests ==============
@@ -331,76 +328,34 @@ class TestMakeEncoderData:
 
 # ============== SLAE Encoder Tests ==============
 
-class TestSLAEProjection:
-    """Tests for SLAEProjection module."""
-
-    def test_projection_dimensions(self):
-        """Test projection output dimensions."""
-        projection = SLAEProjection(slae_dim=128, out_dims=(256, 32))
-
-        embeddings = torch.randn(100, 128)
-        s, V = projection(embeddings)
-
-        assert s.shape == (100, 256), f"Scalar shape mismatch: {s.shape}"
-        assert V.shape == (100, 32, 3), f"Vector shape mismatch: {V.shape}"
-
-    def test_projection_zero_vectors(self):
-        """Test that projection outputs zero vectors."""
-        projection = SLAEProjection(slae_dim=128, out_dims=(256, 32))
-        embeddings = torch.randn(50, 128)
-
-        s, V = projection(embeddings)
-
-        assert torch.all(V == 0), "Vectors should be all zeros"
-
-    def test_projection_gradient_flow(self):
-        """Test that gradients flow through projection."""
-        projection = SLAEProjection(slae_dim=128, out_dims=(256, 32))
-        embeddings = torch.randn(20, 128, requires_grad=False)
-
-        s, V = projection(embeddings)
-
-        loss = s.sum()
-        loss.backward()
-
-        for param in projection.parameters():
-            assert param.grad is not None, "Projection should have gradients"
-
-
 class TestSLAEEncoder:
     """Tests for SLAEEncoder (BaseProteinEncoder implementation)."""
 
     def test_encoder_output_dims(self, device):
         """Encoder should expose correct output_dims."""
-        encoder = SLAEEncoder(
-            slae_dim=128,
-            output_dims=(256, 32),
-        ).to(device)
-
-        assert encoder.output_dims == (256, 32)
+        encoder = SLAEEncoder(slae_dim=128).to(device)
+        assert encoder.output_dims == (128, 0)
 
     def test_encoder_type(self, device):
         """Encoder should return 'slae' as encoder_type."""
-        encoder = SLAEEncoder(slae_dim=128, output_dims=(64, 16)).to(device)
+        encoder = SLAEEncoder(slae_dim=128).to(device)
         assert encoder.encoder_type == 'slae'
 
     def test_encoder_forward(self, device, sample_hetero_data_with_slae):
-        """Forward pass should return (s, V) tuple."""
-        encoder = SLAEEncoder(
-            slae_dim=128,
-            output_dims=(256, 32),
-            freeze=False,
-        ).to(device)
+        """Forward pass should return (s, V) tuple with raw embeddings."""
+        encoder = SLAEEncoder(slae_dim=128).to(device)
 
         s, V = encoder(sample_hetero_data_with_slae)
 
         n_atoms = sample_hetero_data_with_slae['protein'].num_nodes
-        assert s.shape == (n_atoms, 256)
-        assert V.shape == (n_atoms, 32, 3)
+        assert s.shape == (n_atoms, 128)
+        assert V.shape == (n_atoms, 0, 3)
+        # Raw embeddings should be identical to input
+        assert torch.allclose(s, sample_hetero_data_with_slae['protein'].slae_embedding)
 
     def test_encoder_missing_embeddings_error(self, device, sample_hetero_data):
         """Should raise NotImplementedError when embeddings are missing."""
-        encoder = SLAEEncoder(slae_dim=128, output_dims=(64, 16)).to(device)
+        encoder = SLAEEncoder(slae_dim=128).to(device)
 
         # sample_hetero_data does NOT have slae_embedding
         with pytest.raises(NotImplementedError, match="requires cached embeddings"):
@@ -408,57 +363,23 @@ class TestSLAEEncoder:
 
     def test_encoder_no_nans(self, device, sample_hetero_data_with_slae):
         """Output should not contain NaNs or Infs."""
-        encoder = SLAEEncoder(slae_dim=128, output_dims=(64, 16)).to(device)
+        encoder = SLAEEncoder(slae_dim=128).to(device)
 
         s, V = encoder(sample_hetero_data_with_slae)
 
         assert not torch.isnan(s).any(), "Scalar output contains NaNs"
         assert not torch.isinf(s).any(), "Scalar output contains Infs"
-        assert not torch.isnan(V).any(), "Vector output contains NaNs"
 
-    def test_encoder_gradient_flow(self, device, sample_hetero_data_with_slae):
-        """Gradients should flow through encoder when not frozen."""
-        encoder = SLAEEncoder(slae_dim=128, output_dims=(64, 16), freeze=False).to(device)
-
-        s, V = encoder(sample_hetero_data_with_slae)
-
-        loss = s.sum()
-        loss.backward()
-
-        for name, param in encoder.named_parameters():
-            assert param.grad is not None, f"Parameter {name} has no gradient"
+    def test_encoder_no_learnable_params(self, device):
+        """SLAE encoder should have no learnable parameters."""
+        encoder = SLAEEncoder(slae_dim=128).to(device)
+        assert sum(p.numel() for p in encoder.parameters()) == 0
 
 
 # ============== Encoder Interoperability Tests ==============
 
 class TestEncoderInteroperability:
     """Tests that both encoders work interchangeably with flow model."""
-
-    def test_both_encoders_same_output_shape(self, device, sample_hetero_data_with_slae):
-        """Both encoders should produce same output shape for same hidden dims."""
-        hidden_dims = (64, 16)
-
-        gvp_encoder = GVPEncoder(
-            encoder=ProteinGVPEncoder(
-                node_scalar_in=16,
-                hidden_dims=hidden_dims,
-                edge_scalar_in=16,
-                pool_residue=False,
-            ).to(device),
-            freeze=False,
-        )
-
-        slae_encoder = SLAEEncoder(
-            slae_dim=128,
-            output_dims=hidden_dims,
-        ).to(device)
-
-        # Forward pass
-        gvp_s, gvp_V = gvp_encoder(sample_hetero_data_with_slae)
-        slae_s, slae_V = slae_encoder(sample_hetero_data_with_slae)
-
-        assert gvp_s.shape == slae_s.shape
-        assert gvp_V.shape == slae_V.shape
 
     def test_both_encoders_work_with_flow(self, device, sample_hetero_data_with_slae):
         """Both encoders should work with FlowWaterGVP."""
@@ -477,11 +398,8 @@ class TestEncoderInteroperability:
             freeze=False,
         )
 
-        # SLAE encoder
-        slae_encoder = SLAEEncoder(
-            slae_dim=128,
-            output_dims=hidden_dims,
-        ).to(device)
+        # SLAE encoder (output_dims = (128, 0), bridged by encoder_to_flow)
+        slae_encoder = SLAEEncoder(slae_dim=128).to(device)
 
         # Create flow models with each encoder
         flow_gvp = FlowWaterGVP(
@@ -504,61 +422,6 @@ class TestEncoderInteroperability:
 
         # Both should have same output shape
         assert v_gvp.shape == v_slae.shape
-
-
-# ============== Backward Compatibility Tests ==============
-
-class TestFlowEncoder:
-    """Tests for FlowEncoder wrapper (backward compatibility)."""
-
-    @pytest.fixture
-    def flow_encoder(self):
-        """Create flow encoder (without checkpoint)."""
-        return FlowEncoder(
-            checkpoint_path="",  # No checkpoint, random init
-            node_scalar_in=16,
-            device="cpu",
-            freeze=False,
-        )
-
-    @pytest.fixture
-    def sample_data(self):
-        """Create sample data."""
-        num_nodes = 15
-        num_edges = 30
-
-        return Data(
-            x=torch.randn(num_nodes, 16),
-            pos=torch.randn(num_nodes, 3),
-            edge_index=torch.randint(0, num_nodes, (2, num_edges)),
-        )
-
-    def test_flow_encoder_initialization(self, flow_encoder):
-        """Test FlowEncoder initializes."""
-        assert flow_encoder is not None
-        assert hasattr(flow_encoder, 'encoder')
-        assert hasattr(flow_encoder, 'pooled_dim')
-
-    def test_flow_encoder_forward(self, flow_encoder, sample_data):
-        """Test forward returns tuple."""
-        output = flow_encoder(sample_data)
-
-        assert isinstance(output, tuple)
-        s, v = output
-        assert s.shape[0] == sample_data.num_nodes
-        assert v.shape[0] == sample_data.num_nodes
-        assert v.shape[2] == 3
-
-    def test_flow_encoder_freeze(self):
-        """Test that freeze parameter works."""
-        encoder_frozen = FlowEncoder(checkpoint_path="", node_scalar_in=16, device="cpu", freeze=True)
-        encoder_unfrozen = FlowEncoder(checkpoint_path="", node_scalar_in=16, device="cpu", freeze=False)
-
-        for p in encoder_frozen.encoder.parameters():
-            assert not p.requires_grad
-
-        for p in encoder_unfrozen.encoder.parameters():
-            assert p.requires_grad
 
 
 if __name__ == "__main__":

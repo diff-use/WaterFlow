@@ -173,9 +173,8 @@ def build_model_from_config(config: dict, device: torch.device) -> nn.Module:
         'hidden_s': hidden_s,
         'hidden_v': hidden_v,
         'node_scalar_in': config.get("node_scalar_in", 16),
-        'freeze_encoder': True if use_slae else freeze_encoder,
+        'freeze_encoder': freeze_encoder,
         'slae_dim': config.get("slae_dim", 128),
-        'slae_adapter_dims': config.get("slae_adapter_dims"),
         'encoder_ckpt': config.get("encoder_ckpt"),
     }
 
@@ -188,7 +187,6 @@ def build_model_from_config(config: dict, device: torch.device) -> nn.Module:
         layers=flow_layers,
         k_pw=k_pw,
         k_ww=k_ww,
-        freeze_encoder=True if use_slae else freeze_encoder,
     ).to(device)
 
     return model
