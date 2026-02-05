@@ -284,7 +284,9 @@ class FlowWaterGVP(nn.Module):
         s_all, v_all = self.encoder(data)
 
         # Bridge encoder dims -> flow dims
-        s_p_latent, v_p_latent = self.encoder_to_flow((s_all, v_all))
+        # Pass tuple when encoder has vector outputs, tensor when scalar-only
+        encoder_input = (s_all, v_all) if self.encoder.output_dims[1] > 0 else s_all
+        s_p_latent, v_p_latent = self.encoder_to_flow(encoder_input)
 
         if 'water' not in data.node_types or data['water'].num_nodes == 0:
             return torch.zeros(0, 3, device=device)

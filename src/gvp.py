@@ -156,8 +156,6 @@ class GVP(nn.Module):
                 elif self.vector_act:
                     v = v * self.vector_act(_norm_no_nan(v, axis=-1, keepdims=True))
         else:
-            if isinstance(x, tuple):
-                x = x[0]
             s = self.ws(x)
             if self.vo:
                 v = torch.zeros(s.shape[0], self.vo, 3, device=self.dummy_param.device)
