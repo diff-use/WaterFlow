@@ -241,7 +241,6 @@ def load_encoder_from_checkpoint(
     checkpoint_path: str,
     node_scalar_in: int,
     device: str = "cuda",
-    freeze: bool = True,
     default_hidden_dims: Tuple[int, int] = (256, 64),
     default_pooled_dim: int = 128,
     default_num_edge_rbf: int = 16,
@@ -301,11 +300,6 @@ def load_encoder_from_checkpoint(
         except Exception as e:
             print(f"Failed to load state dict: {e}")
             print("Using randomly initialized weights.")
-
-    if freeze:
-        for p in encoder.parameters():
-            p.requires_grad = False
-        encoder.eval()
 
     return encoder, args
 
@@ -393,7 +387,6 @@ class GVPEncoder(BaseProteinEncoder):
                 encoder_ckpt,
                 node_scalar_in=node_scalar_in,
                 device=str(device),
-                freeze=freeze,
             )
         else:
             encoder = ProteinGVPEncoder(
@@ -428,6 +421,5 @@ class GVPEncoder(BaseProteinEncoder):
             checkpoint_path,
             node_scalar_in=node_scalar_in,
             device=device,
-            freeze=freeze,
         )
         return cls(encoder=encoder, freeze=freeze)
