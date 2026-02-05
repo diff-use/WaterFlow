@@ -11,9 +11,7 @@ from torch import nn, Tensor
 import torch.nn.functional as F
 from torch_geometric.nn import knn
 from torch_geometric.data import HeteroData, Data, Batch
-from torch_scatter import scatter_mean, scatter_add
-import e3nn
-from e3nn.math import soft_one_hot_linspace
+from torch_scatter import scatter_mean
 from tqdm.auto import tqdm
 
 from .utils import ot_coupling

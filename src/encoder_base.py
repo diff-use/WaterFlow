@@ -1,6 +1,6 @@
 # encoder_base.py
 """
-Base encoder interface and registry for modular encoder architecture.
+Base encoder and registry for modular encoders.
 
 This module provides:
 - BaseProteinEncoder: Abstract base class that all encoders must implement
@@ -32,7 +32,7 @@ class BaseProteinEncoder(ABC, nn.Module):
     @property
     @abstractmethod
     def encoder_type(self) -> str:
-        """Return encoder type identifier ('gvp', 'slae', etc.)."""
+        """Return encoder type identifier ('gvp', 'slae', 'esm', etc.)."""
         pass
 
     @abstractmethod
@@ -66,7 +66,7 @@ class BaseProteinEncoder(ABC, nn.Module):
         pass
 
 
-# Global encoder registry
+# global encoder registry
 _ENCODER_REGISTRY: Dict[str, Type[BaseProteinEncoder]] = {}
 
 

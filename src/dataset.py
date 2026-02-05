@@ -430,20 +430,12 @@ def filter_waters_by_quality(
         cache_key: Optional identifier for logging (e.g., PDB ID)
 
     Returns:
-        Tuple of:
-        - Boolean mask of waters to keep
-        - Dictionary with filtering statistics
+        Boolean mask of waters to keep (True = keep, False = remove)
     """
     n_waters = len(water_keys)
 
     if n_waters == 0:
-        return np.array([], dtype=bool), {
-            "total": 0,
-            "removed_distance": 0,
-            "removed_edia": 0,
-            "removed_bfactor": 0,
-            "kept": 0
-        }
+        return np.array([], dtype=bool)
 
     stats = {
         "total": n_waters,
@@ -731,7 +723,7 @@ class ProteinWaterDataset(Dataset):
             ))
 
             # apply quality filters
-            keep_mask, _ = filter_waters_by_quality(
+            keep_mask = filter_waters_by_quality(
                 water_atoms.coord,
                 water_keys,
                 protein_atoms.coord if self.filter_by_distance else None,

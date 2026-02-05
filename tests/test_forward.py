@@ -9,8 +9,6 @@ import pytest
 import torch
 from torch_geometric.data import HeteroData
 
-from pathlib import Path
-
 from src.gvp_encoder import ProteinGVPEncoder, GVPEncoder, make_encoder_data
 from src.flow import FlowWaterGVP, FlowMatcher
 
