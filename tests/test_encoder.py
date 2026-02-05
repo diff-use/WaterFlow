@@ -78,6 +78,28 @@ def sample_hetero_data_with_slae(sample_hetero_data):
 
 # ============== Registry Tests ==============
 
+class TestPackageLevelImport:
+    """Tests that importing from src package triggers encoder registration."""
+
+    def test_build_encoder_works_with_package_import(self):
+        """
+        Verify that importing build_encoder from src (not src.encoder_base)
+        has encoders already registered. This tests that src/__init__.py
+        correctly imports the encoder modules to trigger registration.
+        """
+        # Import fresh from package level - this is how scripts should import
+        from src import build_encoder as pkg_build_encoder
+
+        # Should work without any explicit encoder module imports
+        device = torch.device("cpu")
+
+        gvp_encoder = pkg_build_encoder({'encoder_type': 'gvp', 'node_scalar_in': 16}, device)
+        assert gvp_encoder.encoder_type == 'gvp'
+
+        slae_encoder = pkg_build_encoder({'encoder_type': 'slae', 'slae_dim': 128}, device)
+        assert slae_encoder.encoder_type == 'slae'
+
+
 class TestEncoderRegistry:
     """Tests for encoder registry pattern."""
 
