@@ -1,6 +1,3 @@
-# slae.py
-from __future__ import annotations
-
 """
 SLAE (Strictly Local All-Atom Environment) base encoder implementation.
 
@@ -9,6 +6,7 @@ them directly as scalar features with zero vector channels. Downstream
 GVP message-passing layers (including protein-protein edges) provide all
 geometric processing.
 """
+from __future__ import annotations
 
 import torch
 from torch_geometric.data import HeteroData
@@ -33,7 +31,7 @@ class SLAEEncoder(BaseProteinEncoder):
     @property
     def output_dims(self) -> tuple[int, int]:
         """Return (slae_dim, 0) — scalars only."""
-        return (self._slae_dim, 0)
+        return self._slae_dim, 0
 
     @property
     def encoder_type(self) -> str:

@@ -159,21 +159,18 @@ def load_config(run_dir: Path) -> dict:
 
 def build_model_from_config(config: dict, device: torch.device) -> nn.Module:
     """Build model architecture from config using registry-based encoder construction."""
-    use_slae = config.get("use_slae", False)
-    hidden_s = config.get("hidden_s", 256)
-    hidden_v = config.get("hidden_v", 64)
-    flow_layers = config.get("flow_layers", 5)
-    k_pw = config.get("k_pw", 24)
-    k_ww = config.get("k_ww", 24)
-    freeze_encoder = config.get("freeze_encoder", False)
-
     # Build encoder config for registry
+    # Example GVP config:
+    #   {'encoder_type': 'gvp', 'hidden_s': 256, 'hidden_v': 64, 'node_scalar_in': 16}
+    # Example SLAE config:
+    #   {'encoder_type': 'slae', 'hidden_s': 256, 'hidden_v': 64, 'slae_dim': 128,
+    #    'encoder_ckpt': '/path/to/slae_checkpoint.pt'}
     encoder_config = {
-        'encoder_type': 'slae' if use_slae else 'gvp',
-        'hidden_s': hidden_s,
-        'hidden_v': hidden_v,
+        'encoder_type': 'slae' if config.get("use_slae", False) else 'gvp',
+        'hidden_s': config.get("hidden_s", 256),
+        'hidden_v': config.get("hidden_v", 64),
         'node_scalar_in': config.get("node_scalar_in", 16),
-        'freeze_encoder': freeze_encoder,
+        'freeze_encoder': config.get("freeze_encoder", False),
         'slae_dim': config.get("slae_dim", 128),
         'encoder_ckpt': config.get("encoder_ckpt"),
     }
@@ -182,11 +179,11 @@ def build_model_from_config(config: dict, device: torch.device) -> nn.Module:
 
     model = FlowWaterGVP(
         encoder=encoder,
-        hidden_dims=(hidden_s, hidden_v),
+        hidden_dims=(config.get("hidden_s", 256), config.get("hidden_v", 64)),
         edge_scalar_dim=32,
-        layers=flow_layers,
-        k_pw=k_pw,
-        k_ww=k_ww,
+        layers=config.get("flow_layers", 5),
+        k_pw=config.get("k_pw", 24),
+        k_ww=config.get("k_ww", 24),
     ).to(device)
 
     return model

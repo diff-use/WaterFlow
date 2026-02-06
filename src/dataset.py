@@ -23,6 +23,7 @@ import e3nn
 from e3nn.math import soft_one_hot_linspace
 
 from .utils import atom37_to_atoms
+from .constants import EDGE_PP
 
 ELEMENT_VOCAB = [
     "C", "N", "O", "S", "P", "SE", "MG", "ZN", "CA", "FE", "NA", "K", "CL", "F", "BR",
@@ -929,9 +930,9 @@ class ProteinWaterDataset(Dataset):
         if protein_pos.size(0) > 0:
             pp_edge_index = radius_graph(protein_pos, r=self.cutoff, loop=False)
             pp_edge_index = _make_undirected(pp_edge_index)
-            data['protein', 'pp', 'protein'].edge_index = pp_edge_index
+            data[EDGE_PP].edge_index = pp_edge_index
         else:
-            data['protein', 'pp', 'protein'].edge_index = torch.empty((2, 0), dtype=torch.long)
+            data[EDGE_PP].edge_index = torch.empty((2, 0), dtype=torch.long)
         
         # store metadata
         data.pdb_id = entry['cache_key']
