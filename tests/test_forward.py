@@ -5,12 +5,13 @@ All test cases created with assistance from Claude Code and refined.
 """
 
 import os
+
 import pytest
 import torch
 from torch_geometric.data import HeteroData
 
-from src.gvp_encoder import ProteinGVPEncoder, GVPEncoder, make_encoder_data
-from src.flow import FlowWaterGVP, FlowMatcher
+from src.flow import FlowMatcher, FlowWaterGVP
+from src.gvp_encoder import GVPEncoder, ProteinGVPEncoder, make_encoder_data
 
 
 def _iter_tensors(obj):

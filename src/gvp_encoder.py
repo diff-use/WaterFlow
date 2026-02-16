@@ -4,23 +4,23 @@ GVP (Geometric Vector Perceptron) encoder implementation.
 This encoder processes protein structure directly using GVP layers
 to produce geometric features for the flow model.
 """
-
 from __future__ import annotations
 
-from pathlib import Path
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, Literal
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from loguru import logger
 from torch_geometric.data import Batch, Data, HeteroData
-from torch_scatter import scatter_add, scatter_mean, scatter_max
+from torch_scatter import scatter_add, scatter_max, scatter_mean
 
-from .encoder_base import BaseProteinEncoder, register_encoder
-from .gvp import EdgeUpdate, GVP, GVPConvLayer
-from .utils import rbf as _rbf
-from .constants import EDGE_PP
+from src.constants import EDGE_PP
+from src.encoder_base import BaseProteinEncoder, register_encoder
+from src.gvp import GVP, EdgeUpdate, GVPConvLayer
+from src.utils import rbf as _rbf
 
 
 def _edge_vectors(pos: torch.Tensor, edge_index: torch.Tensor):
@@ -275,7 +275,7 @@ def load_encoder_from_checkpoint(
             args = ckpt.get("args", args)
             state_dict = ckpt.get("encoder", ckpt)
             loaded = True
-            print(f"Loaded encoder checkpoint from {checkpoint_path}")
+            logger.info(f"Loaded encoder checkpoint from {checkpoint_path}")
 
             # use node_scalar_in from checkpoint if not specified
             if node_scalar_in is None:
@@ -290,10 +290,10 @@ def load_encoder_from_checkpoint(
         except ValueError:
             raise
         except Exception as e:
-            print(f"Failed to load checkpoint {checkpoint_path}: {e}")
-            print("Initializing blank encoder instead.")
+            logger.warning(f"Failed to load checkpoint {checkpoint_path}: {e}")
+            logger.info("Initializing blank encoder instead.")
     else:
-        print(f"Checkpoint not found at {checkpoint_path}, initializing blank encoder.")
+        logger.warning(f"Checkpoint not found at {checkpoint_path}, initializing blank encoder.")
 
     if node_scalar_in is None:
         raise ValueError("node_scalar_in required when checkpoint doesn't exist")
@@ -316,8 +316,8 @@ def load_encoder_from_checkpoint(
         try:
             encoder.load_state_dict(state_dict)
         except Exception as e:
-            print(f"Failed to load state dict: {e}")
-            print("Using randomly initialized weights.")
+            logger.warning(f"Failed to load state dict: {e}")
+            logger.info("Using randomly initialized weights.")
 
     return encoder, args
 

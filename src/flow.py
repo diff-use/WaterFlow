@@ -1,22 +1,23 @@
 from __future__ import annotations
 
+import copy
 import math
 from pathlib import Path
-import copy
 
 import numpy as np
 import torch
-from torch import nn, Tensor
 import torch.nn.functional as F
+from torch import Tensor, nn
+from torch_geometric.data import Batch, Data, HeteroData
 from torch_geometric.nn import knn
-from torch_geometric.data import HeteroData, Data, Batch
 from torch_scatter import scatter_mean
 from tqdm.auto import tqdm
 
-from .utils import ot_coupling
-from .encoder_base import BaseProteinEncoder
-from .gvp import GVP, GVPMultiEdgeConv
-from .constants import EDGE_PP, EDGE_WW, EDGE_PW, EDGE_WP, ALL_EDGE_TYPES
+from src.constants import ALL_EDGE_TYPES, EDGE_PP, EDGE_PW, EDGE_WP, EDGE_WW
+from src.encoder_base import BaseProteinEncoder
+from src.gvp import GVP, GVPMultiEdgeConv
+from src.utils import ot_coupling
+
 
 def build_knn_edges(src_pos: torch.Tensor,
                     dst_pos: torch.Tensor,
@@ -136,7 +137,7 @@ class ProteinWaterUpdate(nn.Module):
 
         # protein-protein edges (cached from dataset)
         if EDGE_PP in data.edge_types:
-            edge_index_dict[EDGE_PP] = data['protein', 'pp', 'protein'].edge_index
+            edge_index_dict[EDGE_PP] = data[EDGE_PP].edge_index
         else:
             edge_index_dict[EDGE_PP] = build_knn_edges(
                 pos_p, pos_p, k=k_pw, batch_src=batch_p, batch_dst=batch_p

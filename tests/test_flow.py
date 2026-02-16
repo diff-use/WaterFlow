@@ -3,19 +3,20 @@
 All test cases created with assistance from Claude Code and refined.
 """
 
+from unittest.mock import MagicMock, Mock, patch
+
+import numpy as np
 import pytest
 import torch
-import numpy as np
-from unittest.mock import Mock, MagicMock, patch
-from torch_geometric.data import HeteroData, Data
+from torch_geometric.data import Data, HeteroData
 
 from src.flow import (
-    build_knn_edges,
-    ProteinWaterUpdate,
-    FlowWaterGVP,
     FlowMatcher,
+    FlowWaterGVP,
+    ProteinWaterUpdate,
+    build_knn_edges,
 )
-from src.gvp_encoder import make_encoder_data, ProteinGVPEncoder, GVPEncoder
+from src.gvp_encoder import GVPEncoder, ProteinGVPEncoder, make_encoder_data
 
 
 @pytest.fixture

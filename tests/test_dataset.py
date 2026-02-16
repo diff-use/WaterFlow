@@ -19,28 +19,30 @@ Integration tests use real PDB files:
 All test cases created with assistance from Claude Code.
 """
 
-import pytest
-import torch
-import numpy as np
 from pathlib import Path
 
+import numpy as np
+import pytest
+import torch
+
 from src.dataset import (
-    element_onehot,
-    ELEMENT_VOCAB,
     ELEM_IDX,
+    ELEMENT_VOCAB,
+    ProteinWaterDataset,
     _make_undirected,
-    match_atoms_to_coords,
-    parse_asu_with_biotite,
-    get_crystal_contacts_pymol,
+    check_chain_interactions,
     check_com_distance,
     check_water_clashes,
-    check_chain_interactions,
-    load_edia_for_pdb,
     compute_normalized_bfactors,
+    element_onehot,
     filter_waters_by_quality,
-    ProteinWaterDataset,
+    get_crystal_contacts_pymol,
     get_dataloader,
+    load_edia_for_pdb,
+    match_atoms_to_coords,
+    parse_asu_with_biotite,
 )
+
 
 @pytest.fixture
 def pdb_base_dir():

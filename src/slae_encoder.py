@@ -11,7 +11,7 @@ from __future__ import annotations
 import torch
 from torch_geometric.data import HeteroData
 
-from .encoder_base import BaseProteinEncoder, register_encoder
+from src.encoder_base import BaseProteinEncoder, register_encoder
 
 
 @register_encoder('slae')
@@ -60,7 +60,7 @@ class SLAEEncoder(BaseProteinEncoder):
         return embeddings, V
 
     @classmethod
-    def from_config(cls, config: dict, device: torch.device) -> 'SLAEEncoder':
+    def from_config(cls, config: dict, device: torch.device) -> SLAEEncoder:
         """
         Construct SLAEEncoder from config dict.
 

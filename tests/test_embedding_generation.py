@@ -7,10 +7,11 @@ Tests:
 
 """
 
-import pytest
 import tempfile
-import torch
 from pathlib import Path
+
+import pytest
+import torch
 
 
 class TestDatasetEmbeddingLoading:

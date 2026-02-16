@@ -16,19 +16,22 @@ Usage:
 """
 
 import argparse
-from pathlib import Path
 import sys
+from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import torch
-import numpy as np
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
+import numpy as np
 import pandas as pd
-from tqdm import tqdm
 
 # For re-running mate detection
 import pymol2
+import torch
+from loguru import logger
+from mpl_toolkits.mplot3d import Axes3D
+from tqdm import tqdm
+
 from src.dataset import get_crystal_contacts_pymol
 
 
@@ -135,7 +138,7 @@ def visualize_mates(cached_data, pdb_id, output_dir):
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
 
-    print(f"  Saved visualization to {output_path}")
+    logger.info(f"  Saved visualization to {output_path}")
 
 
 def compare_mate_detection(pdb_path, cache_path, cutoff=5.0):
@@ -180,7 +183,7 @@ def main():
 
     # Find all cache files
     cache_files = sorted(processed_dir.glob("*.pt"))
-    print(f"Found {len(cache_files)} cache files")
+    logger.info(f"Found {len(cache_files)} cache files")
 
     # Sample for detailed analysis
     if args.num_samples < len(cache_files):
@@ -191,9 +194,9 @@ def main():
     # Statistics
     all_stats = []
 
-    print("\n" + "="*80)
-    print("SYMMETRY MATE QC ANALYSIS")
-    print("="*80)
+    logger.info("\n" + "="*80)
+    logger.info("SYMMETRY MATE QC ANALYSIS")
+    logger.info("="*80)
 
     for cache_path in tqdm(sample_files, desc="Analyzing samples"):
         cache_key = cache_path.stem
@@ -222,46 +225,46 @@ def main():
     # Create summary report
     df = pd.DataFrame(all_stats)
 
-    print("\n" + "="*80)
-    print("SUMMARY STATISTICS")
-    print("="*80)
+    logger.info("\n" + "="*80)
+    logger.info("SUMMARY STATISTICS")
+    logger.info("="*80)
 
-    print(f"\nTotal structures analyzed: {len(df)}")
-    print(f"\nStructures with mates: {(df['num_mates'] > 0).sum()} ({(df['num_mates'] > 0).sum() / len(df) * 100:.1f}%)")
-    print(f"Structures without mates: {(df['num_mates'] == 0).sum()}")
+    logger.info(f"\nTotal structures analyzed: {len(df)}")
+    logger.info(f"\nStructures with mates: {(df['num_mates'] > 0).sum()} ({(df['num_mates'] > 0).sum() / len(df) * 100:.1f}%)")
+    logger.info(f"Structures without mates: {(df['num_mates'] == 0).sum()}")
 
     if (df['num_mates'] > 0).any():
         mate_df = df[df['num_mates'] > 0]
-        print(f"\nFor structures WITH mates:")
-        print(f"  Number of mate atoms: {mate_df['num_mates'].describe()}")
-        print(f"\n  Distance to nearest ASU atom (Å):")
-        print(f"    Min: {mate_df['min_dist'].min():.2f}")
-        print(f"    Max: {mate_df['max_dist'].max():.2f}")
-        print(f"    Mean: {mate_df['mean_dist'].mean():.2f}")
-        print(f"    Median: {mate_df['median_dist'].median():.2f}")
-        print(f"\n  Percent of mates within cutoff ({args.cutoff}Å): {mate_df['percent_within_cutoff'].mean():.1f}%")
+        logger.info(f"\nFor structures WITH mates:")
+        logger.info(f"  Number of mate atoms: {mate_df['num_mates'].describe()}")
+        logger.info(f"\n  Distance to nearest ASU atom (Å):")
+        logger.info(f"    Min: {mate_df['min_dist'].min():.2f}")
+        logger.info(f"    Max: {mate_df['max_dist'].max():.2f}")
+        logger.info(f"    Mean: {mate_df['mean_dist'].mean():.2f}")
+        logger.info(f"    Median: {mate_df['median_dist'].median():.2f}")
+        logger.info(f"\n  Percent of mates within cutoff ({args.cutoff}Å): {mate_df['percent_within_cutoff'].mean():.1f}%")
 
         # Check for issues
-        print(f"\n⚠️  POTENTIAL ISSUES:")
+        logger.warning(f"\n⚠️  POTENTIAL ISSUES:")
         far_mates = mate_df[mate_df['min_dist'] > args.cutoff]
         if len(far_mates) > 0:
-            print(f"  {len(far_mates)} structures have mates farther than cutoff:")
+            logger.info(f"  {len(far_mates)} structures have mates farther than cutoff:")
             for _, row in far_mates.iterrows():
-                print(f"    {row['pdb_id']}: min_dist = {row['min_dist']:.2f}Å")
+                logger.info(f"    {row['pdb_id']}: min_dist = {row['min_dist']:.2f}Å")
 
     if args.recompute_mates and 'match' in df.columns:
-        print(f"\n MATE RECOMPUTATION CHECK:")
-        print(f"  Matches cached: {df['match'].sum()} / {len(df)}")
+        logger.info(f"\n MATE RECOMPUTATION CHECK:")
+        logger.info(f"  Matches cached: {df['match'].sum()} / {len(df)}")
         if not df['match'].all():
-            print(f"  ⚠️  MISMATCHES FOUND:")
+            logger.warning(f"  ⚠️  MISMATCHES FOUND:")
             mismatches = df[~df['match']]
             for _, row in mismatches.iterrows():
-                print(f"    {row['pdb_id']}: cached={row['cached_num_mates']}, fresh={row['fresh_num_mates']}")
+                logger.info(f"    {row['pdb_id']}: cached={row['cached_num_mates']}, fresh={row['fresh_num_mates']}")
 
     # Save report
     report_path = output_dir / "mate_qc_report.csv"
     df.to_csv(report_path, index=False)
-    print(f"\n✓ Full report saved to {report_path}")
+    logger.info(f"\n✓ Full report saved to {report_path}")
 
     # Save summary plot
     if (df['num_mates'] > 0).any():
@@ -297,11 +300,11 @@ def main():
         plt.tight_layout()
         summary_plot_path = output_dir / "mate_qc_summary.png"
         plt.savefig(summary_plot_path, dpi=150, bbox_inches='tight')
-        print(f"✓ Summary plot saved to {summary_plot_path}")
+        logger.info(f"✓ Summary plot saved to {summary_plot_path}")
 
-    print("\n" + "="*80)
-    print("QC COMPLETE")
-    print("="*80)
+    logger.info("\n" + "="*80)
+    logger.info("QC COMPLETE")
+    logger.info("="*80)
 
 
 if __name__ == "__main__":

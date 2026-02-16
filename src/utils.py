@@ -9,17 +9,16 @@ Utility functions organized by category:
 4. Visualization (plot_3d_frame, create_trajectory_gif, save_protein_plot)
 """
 
-import torch
-from torch import Tensor
-import numpy as np
 from collections.abc import Sequence
-from scipy.optimize import linear_sum_assignment
-import scipy.spatial.distance as spdist
 
-from e3nn.math import soft_one_hot_linspace
 import matplotlib.pyplot as plt
-
+import numpy as np
+import scipy.spatial.distance as spdist
+import torch
+from e3nn.math import soft_one_hot_linspace
 from PIL import Image
+from scipy.optimize import linear_sum_assignment
+from torch import Tensor
 
 ATOM37_FILL = 1e-5
 

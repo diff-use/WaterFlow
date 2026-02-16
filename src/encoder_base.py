@@ -7,7 +7,6 @@ This module provides:
 """
 from __future__ import annotations
 
-
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
@@ -55,7 +54,7 @@ class BaseProteinEncoder(ABC, nn.Module):
 
     @classmethod
     @abstractmethod
-    def from_config(cls, config: dict, device: torch.device) -> 'BaseProteinEncoder':
+    def from_config(cls, config: dict, device: torch.device) -> BaseProteinEncoder:
         """
         Construct encoder from config dict.
 
@@ -101,11 +100,11 @@ def get_encoder_class(name: str) -> BaseProteinEncoder:
         Encoder class
 
     Raises:
-        ValueError: If encoder name is not registered
+        KeyError: If encoder name is not registered
     """
     if name not in _ENCODER_REGISTRY:
         available = list(_ENCODER_REGISTRY.keys())
-        raise ValueError(f"Unknown encoder type '{name}'. Available: {available}")
+        raise KeyError(f"Unknown encoder type '{name}'. Available: {available}")
     return _ENCODER_REGISTRY[name]
 
 

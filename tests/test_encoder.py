@@ -11,13 +11,12 @@ Tests:
 
 import pytest
 import torch
-from torch_geometric.data import Data, HeteroData
 from torch_cluster import radius_graph
+from torch_geometric.data import Data, HeteroData
 
 from src.encoder_base import build_encoder, get_encoder_class
-from src.gvp_encoder import ProteinGVPEncoder, GVPEncoder, make_encoder_data
+from src.gvp_encoder import GVPEncoder, ProteinGVPEncoder, make_encoder_data
 from src.slae import SLAEEncoder
-
 
 # ============== Fixtures ==============
 

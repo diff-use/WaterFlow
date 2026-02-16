@@ -2,28 +2,28 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import itertools
-import numpy as np
-import pandas as pd
-from scipy.spatial.distance import cdist
-
-import torch
-from torch import Tensor
-import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
-from torch_geometric.data import HeteroData, Batch
-from tqdm import tqdm
+from pathlib import Path
 
 import biotite.structure as bts
-from biotite.structure.io.pdb import PDBFile, get_structure
-import pymol2
-from torch_cluster import radius_graph
 import e3nn
+import numpy as np
+import pandas as pd
+import pymol2
+import torch
+import torch.nn.functional as F
+from biotite.structure.io.pdb import PDBFile, get_structure
 from e3nn.math import soft_one_hot_linspace
+from loguru import logger
+from scipy.spatial.distance import cdist
+from torch import Tensor
+from torch.utils.data import DataLoader, Dataset
+from torch_cluster import radius_graph
+from torch_geometric.data import Batch, HeteroData
+from tqdm import tqdm
 
-from .utils import atom37_to_atoms
-from .constants import EDGE_PP
+from src.constants import EDGE_PP
+from src.utils import atom37_to_atoms
 
 ELEMENT_VOCAB = [
     "C", "N", "O", "S", "P", "SE", "MG", "ZN", "CA", "FE", "NA", "K", "CL", "F", "BR",
@@ -304,7 +304,7 @@ def load_edia_for_pdb(
         return edia_lookup
 
     except Exception as e:
-        print(f"Warning: Could not load EDIA data for {pdb_id}: {e}")
+        logger.warning(f"Warning: Could not load EDIA data for {pdb_id}: {e}")
         return None
 
 
@@ -370,7 +370,7 @@ def compute_normalized_bfactors(
         return bfactor_lookup, water_atoms.b_factor
 
     except Exception as e:
-        print(f"Warning: Could not extract B-factors from {pdb_path}: {e}")
+        logger.warning(f"Warning: Could not extract B-factors from {pdb_path}: {e}")
         return None, None
 
 
@@ -431,7 +431,7 @@ def filter_waters_by_quality(
         cache_key: Optional identifier for logging (e.g., PDB ID)
 
     Returns:
-        Boolean mask of waters to keep (True = keep, False = remove)
+        np.ndarray: Boolean mask of waters to keep (True = keep, False = remove)
     """
     n_waters = len(water_keys)
 
@@ -474,7 +474,7 @@ def filter_waters_by_quality(
     if cache_key is not None and stats["total"] > 0:
         removed = stats["total"] - stats["kept"]
         if removed > 0:
-            print(f"  {cache_key}: Filtered {removed}/{stats['total']} waters "
+            logger.info(f"  {cache_key}: Filtered {removed}/{stats['total']} waters "
                   f"(dist:{stats['removed_distance']}, "
                   f"edia:{stats['removed_edia']}, "
                   f"bfactor:{stats['removed_bfactor']})")
@@ -570,7 +570,7 @@ class ProteinWaterDataset(Dataset):
         # if single sample and duplication requested, set effective length [this is for experiments to check if the model can memorize a sample]
         if len(self.entries) == 1 and duplicate_single_sample > 1:
             self._effective_length = duplicate_single_sample
-            print(f"Single sample detected. Duplicating {duplicate_single_sample}x ")
+            logger.info(f"Single sample detected. Duplicating {duplicate_single_sample}x ")
         else:
             self._effective_length = len(self.entries)
     
@@ -593,7 +593,7 @@ class ProteinWaterDataset(Dataset):
 
                 parts = line.split('_')
                 if len(parts) < 2:
-                    print(f"Warning: Skipping malformed line: {line}")
+                    logger.warning(f"Warning: Skipping malformed line: {line}")
                     continue
 
                 pdb_id = parts[0]
@@ -603,7 +603,7 @@ class ProteinWaterDataset(Dataset):
                 elif len(parts) == 2 and parts[1] == "final":
                     chain_id = None
                 else:
-                    print(f"Warning: Unexpected format: {line}")
+                    logger.warning(f"Warning: Unexpected format: {line}")
                     continue
 
                 pdb_path = self.base_pdb_dir / pdb_id / f"{pdb_id}_final.pdb"
@@ -615,7 +615,7 @@ class ProteinWaterDataset(Dataset):
                     'cache_key': line,
                 })
 
-        print(f"Loaded {len(entries)} entries from {pdb_list_file}")
+        logger.info(f"Loaded {len(entries)} entries from {pdb_list_file}")
         return entries
     
     def _preprocess_all(self):
@@ -628,17 +628,17 @@ class ProteinWaterDataset(Dataset):
         ]
 
         if not to_process:
-            print("All entries already preprocessed.")
+            logger.info("All entries already preprocessed.")
             return
 
-        print(f"Preprocessing {len(to_process)} entries...")
+        logger.info(f"Preprocessing {len(to_process)} entries...")
         failures = []
         for entry in tqdm(to_process, desc="Preprocessing"):
             cache_path = self.processed_dir / f"{entry['cache_key']}.pt"
             try:
                 self._preprocess_one(entry, cache_path)
             except Exception as e:
-                print(f"\nFailed to preprocess {entry['cache_key']}: {e}")
+                logger.warning(f"\nFailed to preprocess {entry['cache_key']}: {e}")
                 failures.append((entry['cache_key'], str(e)))
 
         # write failures to log file
@@ -647,7 +647,7 @@ class ProteinWaterDataset(Dataset):
             with open(failure_log_path, 'a') as f:
                 for pdb_id, reason in failures:
                     f.write(f"{pdb_id}\t{reason}\n")
-            print(f"Logged {len(failures)} failures to {failure_log_path}")
+            logger.info(f"Logged {len(failures)} failures to {failure_log_path}")
 
         valid_entries = [
             e for e in self.entries
@@ -655,9 +655,9 @@ class ProteinWaterDataset(Dataset):
         ]
         n_removed = len(self.entries) - len(valid_entries)
         if n_removed > 0:
-            print(f"Filtered out {n_removed} entries without valid cache files.")
+            logger.info(f"Filtered out {n_removed} entries without valid cache files.")
         self.entries = valid_entries
-        print(f"Dataset contains {len(self.entries)} valid entries.")
+        logger.info(f"Dataset contains {len(self.entries)} valid entries.")
     
     def _preprocess_one(self, entry: dict, cache_path: Path):
         """
@@ -707,7 +707,7 @@ class ProteinWaterDataset(Dataset):
             if self.filter_by_edia and self.edia_dir is not None:
                 edia_lookup = load_edia_for_pdb(self.edia_dir, entry['pdb_id'])
                 if edia_lookup is None:
-                    print(f"Warning: EDIA file not found for {entry['pdb_id']}, skipping EDIA filtering")
+                    logger.warning(f"Warning: EDIA file not found for {entry['pdb_id']}, skipping EDIA filtering")
 
             # compute normalized B-factors if B-factor filtering enabled
             bfactor_lookup = None
@@ -984,4 +984,3 @@ def get_dataloader(
     )
 
     return loader
-

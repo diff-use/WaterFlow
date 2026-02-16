@@ -15,3 +15,4 @@ build/
 .env
 .venv/
 venv/
+notebooks/

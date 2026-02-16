@@ -1,16 +1,16 @@
 # gvp.py 
 # generic GVP and GVPConv layers adapted from Jing et al. (2021)
 
-import torch
 import functools
-from torch import nn
+
+import torch
 import torch.nn.functional as F
-from torch_geometric.nn import MessagePassing
+from torch import nn
+from torch_geometric.nn import HeteroConv, MessagePassing
 from torch_scatter import scatter_add
 
-from torch_geometric.nn import HeteroConv
+from src.utils import rbf
 
-from .utils import rbf
 
 def tuple_sum(*args):
     """
