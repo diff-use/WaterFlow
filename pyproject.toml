@@ -185,6 +185,7 @@ dependencies = [
   "yarl>=1.22.0",
   "zstandard>=0.25.0",
   "zstd>=1.5.7.2",
+  "geomloss>=0.2.6",
 ]
 
 [dependency-groups]
@@ -221,4 +222,3 @@ torchvision = { index = "pytorch-cu126" }
 torch-scatter = { index = "pyg-cu126" }
 torch-cluster = { index = "pyg-cu126" }
 pyg-lib = { index = "pyg-cu126" }
-

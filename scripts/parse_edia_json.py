@@ -5,9 +5,11 @@ Usage: python parse_edia_json.py <input_file> [output_file]
 """
 
 import json
-import pandas as pd
 import sys
 from pathlib import Path
+
+import pandas as pd
+from loguru import logger
 
 
 def parse_protein_data(file_path):
@@ -43,13 +45,13 @@ def parse_protein_data(file_path):
         return df
 
     except json.JSONDecodeError as e:
-        print(f"JSON parsing error: {e}")
+        logger.error(f"JSON parsing error: {e}")
         return None
     except FileNotFoundError:
-        print(f"File not found: {file_path}")
+        logger.error(f"File not found: {file_path}")
         return None
     except Exception as e:
-        print(f"Error parsing file: {e}")
+        logger.error(f"Error parsing file: {e}")
         return None
 
 
@@ -63,12 +65,12 @@ def save_to_csv(df, output_path):
     """
     if df is not None:
         df.to_csv(output_path, index=False)
-        print(f"Data saved to: {output_path}")
+        logger.info(f"Data saved to: {output_path}")
 
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python parse_edia_json.py <input_file> [output_file]")
+        logger.error("Usage: python parse_edia_json.py <input_file> [output_file]")
         sys.exit(1)
 
     input_file = sys.argv[1]
@@ -84,7 +86,7 @@ def main():
             print(f"Total residues: {len(df)}")
             print(f"Columns: {list(df.columns)}")
     else:
-        print("Failed to parse the file.")
+        logger.error("Failed to parse the file.")
         sys.exit(1)
 
 

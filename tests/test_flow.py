@@ -3,19 +3,20 @@
 All test cases created with assistance from Claude Code and refined.
 """
 
+from unittest.mock import MagicMock, Mock, patch
+
+import numpy as np
 import pytest
 import torch
-import numpy as np
-from unittest.mock import Mock, MagicMock, patch
-from torch_geometric.data import HeteroData, Data
+from torch_geometric.data import Data, HeteroData
 
 from src.flow import (
-    build_knn_edges,
-    ProteinWaterUpdate,
-    FlowWaterGVP,
     FlowMatcher,
+    FlowWaterGVP,
+    ProteinWaterUpdate,
+    build_knn_edges,
 )
-from src.gvp_encoder import make_encoder_data, ProteinGVPEncoder, GVPEncoder
+from src.gvp_encoder import GVPEncoder, ProteinGVPEncoder, make_encoder_data
 
 
 @pytest.fixture
@@ -87,7 +88,9 @@ def mock_encoder(device):
         n = data['protein'].pos.size(0)
         s = torch.randn(n, 256, device=device)
         v = torch.randn(n, 32, 3, device=device)
-        return s, v
+        # Return 3 values: (s, V, pp_edge_attr)
+        # Mock encoder returns None for edge features (like SLAE/ESM)
+        return s, v, None
 
     encoder.side_effect = mock_forward
     encoder.__call__ = mock_forward
@@ -367,24 +370,28 @@ class TestFlowMatcher:
     
     def test_training_step(self, flow_matcher, simple_hetero_data, device):
         optimizer = torch.optim.Adam(flow_matcher.model.parameters(), lr=1e-4)
-        
+
+        optimizer.zero_grad()
         result = flow_matcher.training_step(
-            simple_hetero_data, optimizer, use_self_conditioning=False
+            simple_hetero_data, use_self_conditioning=False
         )
-        
+        optimizer.step()
+
         assert 'loss' in result
         assert 'rmsd' in result
         assert 'sigma' in result
         assert result['loss'] >= 0
-    
+
     def test_training_step_with_self_cond(self, flow_matcher, simple_hetero_data, device):
         optimizer = torch.optim.Adam(flow_matcher.model.parameters(), lr=1e-4)
-        
+
         # Force self-conditioning
         flow_matcher.p_self_cond = 1.0
+        optimizer.zero_grad()
         result = flow_matcher.training_step(
-            simple_hetero_data, optimizer, use_self_conditioning=True
+            simple_hetero_data, use_self_conditioning=True
         )
+        optimizer.step()
         
         assert 'loss' in result
     

@@ -19,28 +19,31 @@ Integration tests use real PDB files:
 All test cases created with assistance from Claude Code.
 """
 
-import pytest
-import torch
-import numpy as np
 from pathlib import Path
 
+import numpy as np
+import pytest
+import torch
+
 from src.dataset import (
-    element_onehot,
-    ELEMENT_VOCAB,
     ELEM_IDX,
+    ELEMENT_VOCAB,
+    ProteinWaterDataset,
     _make_undirected,
-    match_atoms_to_coords,
-    parse_asu_with_biotite,
-    get_crystal_contacts_pymol,
+    check_chain_interactions,
     check_com_distance,
     check_water_clashes,
-    check_chain_interactions,
-    load_edia_for_pdb,
+    compute_edge_features,
     compute_normalized_bfactors,
+    element_onehot,
     filter_waters_by_quality,
-    ProteinWaterDataset,
+    get_crystal_contacts_pymol,
     get_dataloader,
+    load_edia_for_pdb,
+    match_atoms_to_coords,
+    parse_asu_with_biotite,
 )
+
 
 @pytest.fixture
 def pdb_base_dir():
@@ -76,6 +79,15 @@ def pdb_8dzt(pdb_base_dir):
 
 
 @pytest.fixture
+def pdb_1deu(pdb_base_dir):
+    """Path to 1deu PDB file - has insertion codes (52 residues with ins_code='P')."""
+    path = pdb_base_dir / "1deu" / "1deu_final.pdb"
+    if not path.exists():
+        pytest.skip(f"PDB file not found: {path}")
+    return str(path)
+
+
+@pytest.fixture
 def tmp_processed_dir(tmp_path):
     """Temporary directory for processed files."""
     return tmp_path / "processed"
@@ -85,7 +97,7 @@ def tmp_processed_dir(tmp_path):
 def single_pdb_list_file(tmp_path, pdb_6eey):
     """Create a temp PDB list file with single entry."""
     list_file = tmp_path / "pdb_list.txt"
-    list_file.write_text("6eey_final_A\n")
+    list_file.write_text("6eey_final\n")
     return str(list_file)
 
 
@@ -152,6 +164,74 @@ class TestElementOnehot:
         out = element_onehot(["C"])
         assert out.shape == (1, len(ELEMENT_VOCAB) + 1)
         assert out[0, ELEM_IDX["C"]] == 1.0
+
+
+@pytest.mark.unit
+class TestComputeEdgeFeatures:
+    """Tests for compute_edge_features helper function."""
+
+    def test_basic_edge_features(self):
+        """Should compute distances, unit vectors, and RBF features."""
+        pos = torch.tensor([
+            [0., 0., 0.],
+            [3., 0., 0.],
+            [0., 4., 0.],
+        ])
+        edge_index = torch.tensor([[0, 0], [1, 2]])
+
+        dist, unit, rbf_feat = compute_edge_features(pos, edge_index, cutoff=8.0)
+
+        # Check distances
+        assert dist.shape == (2,)
+        assert torch.allclose(dist, torch.tensor([3., 4.]))
+
+        # Check unit vectors
+        assert unit.shape == (2, 3)
+        expected_unit = torch.tensor([
+            [1., 0., 0.],  # (3,0,0) / 3
+            [0., 1., 0.],  # (0,4,0) / 4
+        ])
+        assert torch.allclose(unit, expected_unit, atol=1e-5)
+
+        # Check RBF features shape
+        assert rbf_feat.shape == (2, 16)
+        assert not torch.isnan(rbf_feat).any()
+
+    def test_empty_edges(self):
+        """Empty edge index should return empty tensors."""
+        pos = torch.randn(10, 3)
+        edge_index = torch.empty((2, 0), dtype=torch.long)
+
+        dist, unit, rbf_feat = compute_edge_features(pos, edge_index, cutoff=8.0)
+
+        assert dist.shape == (0,)
+        assert unit.shape == (0, 3)
+        assert rbf_feat.shape == (0, 16)
+
+    def test_custom_num_rbf(self):
+        """Should respect num_rbf parameter."""
+        pos = torch.tensor([[0., 0., 0.], [1., 0., 0.]])
+        edge_index = torch.tensor([[0], [1]])
+
+        _, _, rbf_feat = compute_edge_features(pos, edge_index, cutoff=8.0, num_rbf=32)
+
+        assert rbf_feat.shape == (1, 32)
+
+    def test_unit_vectors_normalized(self):
+        """Unit vectors should have norm 1 for non-self-loop edges."""
+        pos = torch.randn(20, 3)
+        # Create edges without self-loops
+        src = torch.randint(0, 20, (50,))
+        dst = torch.randint(0, 20, (50,))
+        # Filter out self-loops
+        mask = src != dst
+        edge_index = torch.stack([src[mask], dst[mask]])
+
+        dist, unit, _ = compute_edge_features(pos, edge_index, cutoff=8.0)
+
+        # All unit vectors should have norm 1
+        norms = torch.linalg.norm(unit, dim=-1)
+        assert torch.allclose(norms, torch.ones_like(norms), atol=1e-4)
 
 
 @pytest.mark.unit
@@ -495,19 +575,6 @@ class TestParseAsuWithBiotite:
         assert "H" not in protein_elements
         assert "H" not in water_elements
 
-    def test_chain_filter(self, pdb_6eey):
-        """Chain filter should limit to specified chains."""
-        # Get all chains
-        protein_all, _ = parse_asu_with_biotite(pdb_6eey)
-        all_chains = set(protein_all.chain_id)
-
-        if len(all_chains) > 1:
-            first_chain = list(all_chains)[0]
-            protein_filtered, _ = parse_asu_with_biotite(pdb_6eey, chain_filter=[first_chain])
-
-            assert set(protein_filtered.chain_id) == {first_chain}
-            assert len(protein_filtered) < len(protein_all)
-
     def test_water_residue_names(self, pdb_6eey):
         """Water atoms should have HOH or WAT residue names."""
         _, water_atoms = parse_asu_with_biotite(pdb_6eey)
@@ -631,15 +698,17 @@ class TestProteinWaterDataset:
         assert torch.allclose(data_0['protein'].pos, data_5['protein'].pos)
 
     def test_cached_file_created(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
-        """Preprocessing should create cached .pt file."""
+        """Preprocessing should create cached .pt file in correct directory."""
         dataset = ProteinWaterDataset(
             pdb_list_file=single_pdb_list_file,
             processed_dir=str(tmp_processed_dir),
             base_pdb_dir=str(pdb_base_dir),
             preprocess=True,
+            include_mates=True,
         )
 
-        cache_file = tmp_processed_dir / "6eey_final_A.pt"
+        # With include_mates=True, cache goes to geometry_mates/ directory
+        cache_file = tmp_processed_dir / "geometry_mates" / "6eey_final.pt"
         assert cache_file.exists()
 
     def test_no_reprocess_if_cached(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
@@ -650,9 +719,11 @@ class TestProteinWaterDataset:
             processed_dir=str(tmp_processed_dir),
             base_pdb_dir=str(pdb_base_dir),
             preprocess=True,
+            include_mates=True,
         )
 
-        cache_file = tmp_processed_dir / "6eey_final_A.pt"
+        # With include_mates=True, cache goes to geometry_mates/ directory
+        cache_file = tmp_processed_dir / "geometry_mates" / "6eey_final.pt"
         mtime_1 = cache_file.stat().st_mtime
 
         # Second creation should not modify cache
@@ -661,6 +732,7 @@ class TestProteinWaterDataset:
             processed_dir=str(tmp_processed_dir),
             base_pdb_dir=str(pdb_base_dir),
             preprocess=True,
+            include_mates=True,
         )
 
         mtime_2 = cache_file.stat().st_mtime
@@ -795,8 +867,8 @@ class TestGetDataloader:
 class TestPdbListParsing:
     """Tests for PDB list file parsing."""
 
-    def test_chain_specific_format(self, tmp_path, pdb_base_dir):
-        """Should parse chain-specific format: pdb_id_final_chainID"""
+    def test_chain_specific_format_rejected(self, tmp_path, pdb_base_dir):
+        """Chain-specific format should be rejected."""
         list_file = tmp_path / "list.txt"
         list_file.write_text("6eey_final_A\n")
 
@@ -807,9 +879,7 @@ class TestPdbListParsing:
             preprocess=False,  # Don't preprocess for this test
         )
 
-        assert len(dataset.entries) == 1
-        assert dataset.entries[0]['pdb_id'] == '6eey'
-        assert dataset.entries[0]['chain_id'] == 'A'
+        assert len(dataset.entries) == 0
 
     def test_whole_pdb_format(self, tmp_path, pdb_base_dir):
         """Should parse whole PDB format: pdb_id_final"""
@@ -825,12 +895,11 @@ class TestPdbListParsing:
 
         assert len(dataset.entries) == 1
         assert dataset.entries[0]['pdb_id'] == '6eey'
-        assert dataset.entries[0]['chain_id'] is None
 
     def test_multiple_entries(self, tmp_path, pdb_base_dir):
         """Should parse multiple entries."""
         list_file = tmp_path / "list.txt"
-        list_file.write_text("6eey_final_A\n6eey_final_B\n")
+        list_file.write_text("6eey_final\n1deu_final\n")
 
         dataset = ProteinWaterDataset(
             pdb_list_file=str(list_file),
@@ -844,7 +913,7 @@ class TestPdbListParsing:
     def test_empty_lines_ignored(self, tmp_path, pdb_base_dir):
         """Empty lines should be ignored."""
         list_file = tmp_path / "list.txt"
-        list_file.write_text("\n6eey_final_A\n\n\n")
+        list_file.write_text("\n6eey_final\n\n\n")
 
         dataset = ProteinWaterDataset(
             pdb_list_file=str(list_file),
@@ -913,6 +982,80 @@ class TestDatasetEdgeCases:
 
         assert n_edges_large >= n_edges_small
 
+    def test_pp_edge_features_cached(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
+        """PP edge features should be cached and loaded properly."""
+        dataset = ProteinWaterDataset(
+            pdb_list_file=single_pdb_list_file,
+            processed_dir=str(tmp_processed_dir),
+            base_pdb_dir=str(pdb_base_dir),
+            preprocess=True,
+            include_mates=False,
+        )
+
+        data = dataset[0]
+        pp_edge = data['protein', 'pp', 'protein']
+
+        # Check that all edge features are present
+        assert hasattr(pp_edge, 'edge_index')
+        assert hasattr(pp_edge, 'edge_unit')
+        assert hasattr(pp_edge, 'edge_rbf')
+
+        n_edges = pp_edge.edge_index.shape[1]
+
+        # Check shapes
+        assert pp_edge.edge_unit.shape == (n_edges, 3)
+        assert pp_edge.edge_rbf.shape == (n_edges, 16)
+
+        # Check values are valid
+        assert not torch.isnan(pp_edge.edge_unit).any()
+        assert not torch.isnan(pp_edge.edge_rbf).any()
+
+        # Unit vectors should have norm ~1
+        unit_norms = torch.linalg.norm(pp_edge.edge_unit, dim=-1)
+        assert torch.allclose(unit_norms, torch.ones_like(unit_norms), atol=1e-4)
+
+    def test_directory_based_cache_separation(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
+        """Different include_mates settings should use different directories."""
+        # Create dataset without mates
+        ProteinWaterDataset(
+            pdb_list_file=single_pdb_list_file,
+            processed_dir=str(tmp_processed_dir),
+            base_pdb_dir=str(pdb_base_dir),
+            include_mates=False,
+            preprocess=True,
+        )
+
+        # Create dataset with mates
+        ProteinWaterDataset(
+            pdb_list_file=single_pdb_list_file,
+            processed_dir=str(tmp_processed_dir),
+            base_pdb_dir=str(pdb_base_dir),
+            include_mates=True,
+            preprocess=True,
+        )
+
+        # Check that both directories exist with the correct cache files
+        cache_no_mates = tmp_processed_dir / "geometry" / "6eey_final.pt"
+        cache_with_mates = tmp_processed_dir / "geometry_mates" / "6eey_final.pt"
+
+        assert cache_no_mates.exists(), "geometry/ cache should exist"
+        assert cache_with_mates.exists(), "geometry_mates/ cache should exist"
+
+    def test_custom_geometry_cache_name(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
+        """Custom geometry_cache_name should be used for cache directory."""
+        dataset = ProteinWaterDataset(
+            pdb_list_file=single_pdb_list_file,
+            processed_dir=str(tmp_processed_dir),
+            base_pdb_dir=str(pdb_base_dir),
+            geometry_cache_name="custom_geom",
+            include_mates=True,
+            preprocess=True,
+        )
+
+        # Cache should be in custom_geom_mates/ directory
+        cache_file = tmp_processed_dir / "custom_geom_mates" / "6eey_final.pt"
+        assert cache_file.exists()
+
 
 # ============== Tests for water quality filtering ==============
 
@@ -944,9 +1087,9 @@ ALA,A,1,0.95,0.98
 
         assert result is not None
         assert len(result) == 3  # Only waters, not ALA
-        assert result[("A", 101)] == pytest.approx(0.85)
-        assert result[("A", 102)] == pytest.approx(0.45)
-        assert result[("B", 201)] == pytest.approx(0.72)
+        assert result[("A", 101, "")] == pytest.approx(0.85)
+        assert result[("A", 102, "")] == pytest.approx(0.45)
+        assert result[("B", 201, "")] == pytest.approx(0.72)
 
     def test_returns_empty_dict_for_no_waters(self, tmp_path):
         """Should return empty dict if no water molecules in CSV."""
@@ -983,28 +1126,17 @@ class TestComputeNormalizedBfactors:
             assert all(-10 < v < 20 for v in values)
 
     def test_returns_dict_keyed_by_chain_resid(self, pdb_6eey):
-        """Should return dict with (chain_id, res_id) keys."""
+        """Should return dict with (chain_id, res_id, ins_code) keys."""
         bfactor_lookup, _ = compute_normalized_bfactors(pdb_6eey)
 
         assert bfactor_lookup is not None
         if len(bfactor_lookup) > 0:
             key = next(iter(bfactor_lookup.keys()))
             assert isinstance(key, tuple)
-            assert len(key) == 2
+            assert len(key) == 3
             assert isinstance(key[0], str)  # chain_id
             assert isinstance(key[1], int)  # res_id
-
-    def test_handles_chain_filter(self, pdb_6eey):
-        """Should respect chain filter parameter."""
-        all_chains, _ = compute_normalized_bfactors(pdb_6eey)
-        single_chain, _ = compute_normalized_bfactors(pdb_6eey, chain_filter=["A"])
-
-        # Single chain should have <= entries
-        assert len(single_chain) <= len(all_chains)
-
-        # All keys should be from chain A
-        for chain_id, _ in single_chain.keys():
-            assert chain_id == "A"
+            assert isinstance(key[2], str)  # ins_code
 
 
 @pytest.mark.unit
@@ -1224,3 +1356,264 @@ class TestWaterFilteringIntegration:
         data = dataset[0]
         # Should have water nodes
         assert data['water'].num_nodes >= 0
+
+
+@pytest.mark.integration
+class TestEmbeddingLoading:
+    """Integration tests for loading embeddings from subdirectories.
+
+    These tests use real PDB files to verify the full embedding loading pipeline.
+    For unit tests with mock cache data, see
+    tests/test_embedding_generation.py::TestDatasetEmbeddingLoading.
+    """
+
+    def test_slae_embedding_loaded_from_subdirectory(
+        self, single_pdb_list_file, tmp_path, pdb_base_dir
+    ):
+        """SLAE embeddings should be loaded from processed_dir/slae/."""
+        processed_dir = tmp_path / "processed"
+
+        # First create the dataset to generate the main cache
+        dataset = ProteinWaterDataset(
+            pdb_list_file=single_pdb_list_file,
+            processed_dir=str(processed_dir),
+            encoder_type="gvp",
+            base_pdb_dir=str(pdb_base_dir),
+            preprocess=True,
+        )
+
+        # Get the number of ASU atoms
+        data = dataset[0]
+        num_asu_atoms = data.num_asu_protein_atoms
+
+        # Create mock SLAE embeddings in the subdirectory
+        slae_dir = processed_dir / "slae"
+        slae_dir.mkdir(parents=True, exist_ok=True)
+
+        mock_slae_emb = torch.randn(num_asu_atoms, 128)
+        slae_data = {
+            'node_embeddings': mock_slae_emb,
+            'atom37_coords': torch.zeros(10, 37, 3),  # Not used in loading
+            'pdb_id': '6eey',
+        }
+        torch.save(slae_data, slae_dir / "6eey_final.pt")
+
+        # Reload and check embedding is present
+        dataset = ProteinWaterDataset(
+            pdb_list_file=single_pdb_list_file,
+            processed_dir=str(processed_dir),
+            encoder_type="slae",
+            base_pdb_dir=str(pdb_base_dir),
+            preprocess=False,
+        )
+        data = dataset[0]
+        assert hasattr(data['protein'], 'slae_embedding')
+        assert data['protein'].slae_embedding.shape[0] == data['protein'].num_nodes
+
+    def test_esm_embedding_loaded_from_subdirectory(
+        self, single_pdb_list_file, tmp_path, pdb_base_dir
+    ):
+        """ESM embeddings should be loaded from processed_dir/esm/."""
+        processed_dir = tmp_path / "processed"
+
+        # First create the dataset to generate the main cache
+        dataset = ProteinWaterDataset(
+            pdb_list_file=single_pdb_list_file,
+            processed_dir=str(processed_dir),
+            encoder_type="gvp",
+            base_pdb_dir=str(pdb_base_dir),
+            preprocess=True,
+            include_mates=False,  # Simpler test without mates
+        )
+
+        # Get the number of residues
+        data = dataset[0]
+        num_residues = data['protein'].num_protein_residues
+
+        # Create mock ESM embeddings in the subdirectory
+        esm_dir = processed_dir / "esm"
+        esm_dir.mkdir(parents=True, exist_ok=True)
+
+        mock_esm_emb = torch.randn(num_residues, 1536)
+        esm_data = {
+            'residue_embeddings': mock_esm_emb,
+            'sequence': 'A' * num_residues,
+            'pdb_id': '6eey',
+        }
+        torch.save(esm_data, esm_dir / "6eey_final.pt")
+
+        # Reload and check embedding is present
+        dataset = ProteinWaterDataset(
+            pdb_list_file=single_pdb_list_file,
+            processed_dir=str(processed_dir),
+            encoder_type="esm",
+            base_pdb_dir=str(pdb_base_dir),
+            preprocess=False,
+            include_mates=False,
+        )
+        data = dataset[0]
+        assert hasattr(data['protein'], 'esm_embedding')
+        # ESM embeddings are broadcasted to atom level
+        assert data['protein'].esm_embedding.shape[0] == data['protein'].num_nodes
+        assert data['protein'].esm_embedding.shape[1] == 1536
+
+    def test_embeddings_not_present_without_subdirectory(
+        self, single_pdb_list_file, tmp_path, pdb_base_dir
+    ):
+        """Without embedding subdirectories, no embeddings should be present."""
+        processed_dir = tmp_path / "processed_no_emb"
+
+        dataset = ProteinWaterDataset(
+            pdb_list_file=single_pdb_list_file,
+            processed_dir=str(processed_dir),
+            encoder_type="gvp",
+            base_pdb_dir=str(pdb_base_dir),
+            preprocess=True,
+        )
+
+        data = dataset[0]
+
+        # Neither embedding should be present
+        assert not hasattr(data['protein'], 'slae_embedding')
+        assert not hasattr(data['protein'], 'esm_embedding')
+
+    def test_slae_embedding_with_mates_padded(
+        self, single_pdb_list_file, tmp_path, pdb_base_dir
+    ):
+        """SLAE embeddings should pad mate atoms with zeros."""
+        processed_dir = tmp_path / "processed_with_mates"
+
+        # Create dataset WITH mates
+        dataset = ProteinWaterDataset(
+            pdb_list_file=single_pdb_list_file,
+            processed_dir=str(processed_dir),
+            encoder_type="gvp",
+            base_pdb_dir=str(pdb_base_dir),
+            include_mates=True,
+            preprocess=True,
+        )
+
+        # Get ASU and total node counts
+        data = dataset[0]
+        num_asu_atoms = data.num_asu_protein_atoms
+        total_protein_atoms = data['protein'].num_nodes
+
+        # Skip if no mates
+        if total_protein_atoms == num_asu_atoms:
+            pytest.skip("No symmetry mates in this structure")
+
+        # Create mock SLAE embeddings (only for ASU atoms)
+        slae_dir = processed_dir / "slae"
+        slae_dir.mkdir(parents=True, exist_ok=True)
+
+        mock_slae_emb = torch.randn(num_asu_atoms, 128)
+        slae_data = {
+            'node_embeddings': mock_slae_emb,
+            'atom37_coords': torch.zeros(10, 37, 3),
+            'pdb_id': '6eey',
+        }
+        torch.save(slae_data, slae_dir / "6eey_final.pt")
+
+        # Reload
+        dataset = ProteinWaterDataset(
+            pdb_list_file=single_pdb_list_file,
+            processed_dir=str(processed_dir),
+            encoder_type="slae",
+            base_pdb_dir=str(pdb_base_dir),
+            include_mates=True,
+            preprocess=False,
+        )
+        data = dataset[0]
+        assert hasattr(data['protein'], 'slae_embedding')
+
+        # Total size should match all protein atoms
+        assert data['protein'].slae_embedding.shape[0] == total_protein_atoms
+
+        # Mate embeddings (after ASU atoms) should be zeros
+        mate_emb = data['protein'].slae_embedding[num_asu_atoms:]
+        assert torch.allclose(mate_emb, torch.zeros_like(mate_emb))
+
+
+@pytest.mark.integration
+class TestInsertionCodeHandling:
+    """Tests for proper handling of PDB insertion codes.
+
+    Insertion codes are used in PDBs (especially antibodies) to maintain
+    consistent numbering across homologous structures. For example, residues
+    52, 52A, 52B are three distinct residues that should not be merged.
+
+    Without proper handling, (chain_id, res_id) collisions cause residue loss.
+    The fix uses (chain_id, res_id, ins_code) as the residue key.
+    """
+
+    def test_insertion_codes_not_merged(self, pdb_1deu):
+        """Residues with insertion codes should not be merged with base residue."""
+        import biotite.structure as bts
+        from biotite.structure.io.pdb import PDBFile, get_structure
+
+        pdb_file = PDBFile.read(pdb_1deu)
+        atoms = get_structure(pdb_file, model=1, altloc="occupancy")
+        protein_atoms = atoms[bts.filter_canonical_amino_acids(atoms)]
+
+        # Count residues using the correct method (with ins_code)
+        res_id = protein_atoms.res_id
+        chain_id_arr = protein_atoms.chain_id
+        ins_code_arr = protein_atoms.ins_code
+
+        residue_keys_with_ins = list(zip(chain_id_arr, res_id, ins_code_arr))
+        unique_with_ins = dict.fromkeys(residue_keys_with_ins)
+
+        # Count residues using the OLD method (without ins_code) - should be fewer
+        residue_keys_no_ins = list(zip(chain_id_arr, res_id))
+        unique_no_ins = dict.fromkeys(residue_keys_no_ins)
+
+        # 1deu has 52 insertion code residues
+        assert len(unique_with_ins) > len(unique_no_ins)
+        assert len(unique_with_ins) - len(unique_no_ins) == 52
+
+    def test_residue_count_matches_esm(self, pdb_1deu):
+        """Residue count should match ESM's parsing (which handles insertion codes)."""
+        import biotite.structure as bts
+        from biotite.structure.io.pdb import PDBFile, get_structure
+        from esm.sdk.api import ESMProtein
+        from esm.utils.structure.protein_complex import ProteinComplex
+
+        # Get our residue count (with ins_code fix)
+        pdb_file = PDBFile.read(pdb_1deu)
+        atoms = get_structure(pdb_file, model=1, altloc="occupancy")
+        protein_atoms = atoms[bts.filter_canonical_amino_acids(atoms)]
+
+        residue_keys = list(zip(
+            protein_atoms.chain_id,
+            protein_atoms.res_id,
+            protein_atoms.ins_code
+        ))
+        our_residue_count = len(dict.fromkeys(residue_keys))
+
+        # Get ESM's residue count
+        complex_obj = ProteinComplex.from_pdb(pdb_1deu)
+        protein = ESMProtein.from_protein_complex(complex_obj)
+        esm_residue_count = len(protein.sequence.replace('|', ''))
+
+        assert our_residue_count == esm_residue_count
+
+    def test_dataset_handles_insertion_codes(self, pdb_1deu, tmp_path, pdb_base_dir):
+        """Dataset preprocessing should correctly count residues with insertion codes."""
+        # Create a PDB list with 1deu
+        list_file = tmp_path / "pdb_list.txt"
+        list_file.write_text("1deu_final\n")
+
+        dataset = ProteinWaterDataset(
+            pdb_list_file=str(list_file),
+            processed_dir=str(tmp_path / "processed"),
+            base_pdb_dir=str(pdb_base_dir),
+            preprocess=True,
+            min_water_residue_ratio=0.0,  # Disable ratio check for this test
+            interface_dist_threshold=100.0,  # Disable chain interaction check (1deu chains are 45A apart)
+        )
+
+        data = dataset[0]
+
+        # Should have the correct number of residues (536, not 484)
+        # This is stored in num_residues (which includes mates, but 1deu has no mates at default cutoff)
+        assert data['protein'].num_residues >= 536

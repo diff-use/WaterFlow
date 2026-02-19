@@ -12,30 +12,32 @@ Organized by category to match utils.py structure:
 All test cases created with assistance from Claude Code and refined.
 """
 
+import matplotlib
+import numpy as np
 import pytest
 import torch
-import numpy as np
-import matplotlib
+
 matplotlib.use('Agg')
 
 from pathlib import Path
 
 from src.utils import (
-    # Feature encoding
-    rbf,
-    atom37_to_atoms,
     ATOM37_FILL,
+    atom37_to_atoms,
+    compute_placement_metrics,
+    compute_rmsd,
+    create_trajectory_gif,
     # Optimal transport
     ot_coupling,
-    # Metrics
-    recall_precision,
-    compute_rmsd,
-    compute_placement_metrics,
     # Visualization
     plot_3d_frame,
+    # Feature encoding
+    rbf,
+    # Metrics
+    recall_precision,
     save_protein_plot,
-    create_trajectory_gif,
 )
+
 
 @pytest.mark.unit
 class TestRBF:
@@ -166,7 +168,7 @@ class TestAtom37ToAtoms:
 
 @pytest.mark.unit
 class TestOTCoupling:
-    """Tests for Hungarian matching in flow matching."""
+    """Tests for OT coupling in flow matching."""
 
     def test_output_shapes(self):
         """Output shapes should match input shapes."""
@@ -265,7 +267,6 @@ class TestOTCoupling:
         # x1_star[1] should be [1,0,0]
         assert torch.allclose(x1_star[0], torch.tensor([0.0, 0.0, 0.0]))
         assert torch.allclose(x1_star[1], torch.tensor([1.0, 0.0, 0.0]))
-
 
 @pytest.mark.unit
 class TestRecallPrecision:

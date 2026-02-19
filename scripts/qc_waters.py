@@ -17,21 +17,24 @@ Usage:
 """
 
 import argparse
-from pathlib import Path
 import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
+from pathlib import Path
 
-import torch
-import numpy as np
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
-import pandas as pd
-from tqdm import tqdm
-from scipy.spatial import cKDTree
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # For parsing PDB metadata
 import biotite.structure as bts
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import torch
 from biotite.structure.io.pdb import PDBFile, get_structure
+from loguru import logger
+from mpl_toolkits.mplot3d import Axes3D
+from scipy.spatial import cKDTree
+from tqdm import tqdm
+
+from src.utils import setup_logging_for_tqdm
 
 
 def analyze_water_protein_distances(protein_pos, water_pos):
@@ -157,7 +160,7 @@ def get_water_metadata(pdb_path, chain_filter=None):
             'num_waters': len(water_atoms),
         }
     except Exception as e:
-        print(f"  Warning: Could not parse PDB metadata: {e}")
+        logger.warning(f"Could not parse PDB metadata: {e}")
         return None
 
 
@@ -172,7 +175,7 @@ def visualize_waters(cached_data, pdb_id, output_dir, show_issues=None):
     water_pos = cached_data['water_pos'].numpy()
 
     if water_pos.shape[0] == 0:
-        print(f"  Skipping {pdb_id}: no waters")
+        logger.info(f"Skipping {pdb_id}: no waters")
         return
 
     fig = plt.figure(figsize=(14, 10))
@@ -223,10 +226,11 @@ def visualize_waters(cached_data, pdb_id, output_dir, show_issues=None):
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
 
-    print(f"  Saved visualization to {output_path}")
+    logger.info(f"Saved visualization to {output_path}")
 
 
 def main():
+    setup_logging_for_tqdm()
     parser = argparse.ArgumentParser(description="QC water molecules")
     parser.add_argument("--processed_dir", type=str, required=True)
     parser.add_argument("--base_pdb_dir", type=str,
@@ -247,7 +251,7 @@ def main():
 
     # Find all cache files
     cache_files = sorted(processed_dir.glob("*.pt"))
-    print(f"Found {len(cache_files)} cache files")
+    logger.info(f"Found {len(cache_files)} cache files")
 
     # Determine which files to analyze
     if args.analyze_all:
@@ -373,7 +377,7 @@ def main():
     # Save report
     report_path = output_dir / "water_qc_report.csv"
     df.to_csv(report_path, index=False)
-    print(f"\n✓ Full report saved to {report_path}")
+    logger.info(f"Full report saved to {report_path}")
 
     # Save summary plots
     if (df['num_waters'] > 0).any():
@@ -432,7 +436,7 @@ def main():
         plt.tight_layout()
         summary_plot_path = output_dir / "water_qc_summary.png"
         plt.savefig(summary_plot_path, dpi=150, bbox_inches='tight')
-        print(f"✓ Summary plot saved to {summary_plot_path}")
+        logger.info(f"Summary plot saved to {summary_plot_path}")
 
     print("\n" + "="*80)
     print("QC COMPLETE")

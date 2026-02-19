@@ -5,12 +5,13 @@ All test cases created with assistance from Claude Code and refined.
 """
 
 import os
+
 import pytest
 import torch
 from torch_geometric.data import HeteroData
 
-from src.gvp_encoder import ProteinGVPEncoder, GVPEncoder, make_encoder_data
-from src.flow import FlowWaterGVP, FlowMatcher
+from src.flow import FlowMatcher, FlowWaterGVP
+from src.gvp_encoder import GVPEncoder, ProteinGVPEncoder, make_encoder_data
 
 
 def _iter_tensors(obj):
@@ -202,7 +203,8 @@ def test_forward_pass_no_nan_with_module_hooks(device):
         hm.watch(model.encoder.encoder.input_gvp, "encoder.input_gvp")
         for i, layer in enumerate(model.encoder.encoder.layers):
             hm.watch(layer, f"encoder.layers[{i}]")
-        hm.watch(model.encoder.encoder.edge_update, "encoder.edge_update")
+        if model.encoder.encoder.edge_update is not None:
+            hm.watch(model.encoder.encoder.edge_update, "encoder.edge_update")
 
         # Flow parts
         hm.watch(model.encoder_to_flow, "flow.encoder_to_flow")
@@ -267,7 +269,14 @@ def test_training_step_no_nan_tripwire(device):
         hm.watch(model.vfield_head, "vfield_head")
 
         for step in range(5):
-            out = fm.training_step(data, opt, grad_clip=1.0, use_self_conditioning=False)
+            opt.zero_grad()
+            out = fm.training_step(data, use_self_conditioning=False)
+            torch.nn.utils.clip_grad_norm_(
+                [p for p in model.parameters() if p.requires_grad],
+                max_norm=1.0
+            )
+            opt.step()
+
             loss = out["loss"]
             assert isinstance(loss, float)
             assert loss == loss, "loss is NaN"
@@ -372,7 +381,8 @@ def test_forward_with_duplicate_protein_coords_localizes_nan(device):
         hm.watch(model.encoder.encoder.input_gvp, "encoder.input_gvp")
         for i, layer in enumerate(model.encoder.encoder.layers):
             hm.watch(layer, f"encoder.layers[{i}]")
-        hm.watch(model.encoder.encoder.edge_update, "encoder.edge_update")
+        if model.encoder.encoder.edge_update is not None:
+            hm.watch(model.encoder.encoder.edge_update, "encoder.edge_update")
 
         # flow top-level stages
         hm.watch(model.encoder_to_flow, "flow.encoder_to_flow")

@@ -16,20 +16,24 @@ Usage:
 """
 
 import argparse
-from pathlib import Path
 import sys
+from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import torch
-import numpy as np
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
+import numpy as np
 import pandas as pd
-from tqdm import tqdm
 
 # For re-running mate detection
 import pymol2
+import torch
+from loguru import logger
+from mpl_toolkits.mplot3d import Axes3D
+from tqdm import tqdm
+
 from src.dataset import get_crystal_contacts_pymol
+from src.utils import setup_logging_for_tqdm
 
 
 def analyze_mate_distances(cached_data, cutoff=5.0):
@@ -135,7 +139,7 @@ def visualize_mates(cached_data, pdb_id, output_dir):
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
 
-    print(f"  Saved visualization to {output_path}")
+    logger.info(f"Saved visualization to {output_path}")
 
 
 def compare_mate_detection(pdb_path, cache_path, cutoff=5.0):
@@ -161,6 +165,7 @@ def compare_mate_detection(pdb_path, cache_path, cutoff=5.0):
 
 
 def main():
+    setup_logging_for_tqdm()
     parser = argparse.ArgumentParser(description="QC symmetry mates")
     parser.add_argument("--processed_dir", type=str, required=True)
     parser.add_argument("--base_pdb_dir", type=str,
@@ -180,7 +185,7 @@ def main():
 
     # Find all cache files
     cache_files = sorted(processed_dir.glob("*.pt"))
-    print(f"Found {len(cache_files)} cache files")
+    logger.info(f"Found {len(cache_files)} cache files")
 
     # Sample for detailed analysis
     if args.num_samples < len(cache_files):
@@ -261,7 +266,7 @@ def main():
     # Save report
     report_path = output_dir / "mate_qc_report.csv"
     df.to_csv(report_path, index=False)
-    print(f"\n✓ Full report saved to {report_path}")
+    logger.info(f"Full report saved to {report_path}")
 
     # Save summary plot
     if (df['num_mates'] > 0).any():
@@ -297,7 +302,7 @@ def main():
         plt.tight_layout()
         summary_plot_path = output_dir / "mate_qc_summary.png"
         plt.savefig(summary_plot_path, dpi=150, bbox_inches='tight')
-        print(f"✓ Summary plot saved to {summary_plot_path}")
+        logger.info(f"Summary plot saved to {summary_plot_path}")
 
     print("\n" + "="*80)
     print("QC COMPLETE")
