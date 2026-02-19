@@ -20,20 +20,22 @@ import argparse
 import json
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
-import matplotlib.pyplot as plt
+from loguru import logger
 from tqdm import tqdm
 
 from src.dataset import ProteinWaterDataset
 from src.encoder_base import build_encoder
-from src.flow import FlowWaterGVP, FlowMatcher
+from src.flow import FlowMatcher, FlowWaterGVP
 from src.utils import (
-    plot_3d_frame,
-    create_trajectory_gif,
     compute_placement_metrics,
     compute_rmsd,
+    create_trajectory_gif,
+    plot_3d_frame,
+    setup_logging_for_tqdm,
 )
 
 
@@ -292,6 +294,7 @@ def save_plot(
 
 
 def main():
+    setup_logging_for_tqdm()
     args = parse_args()
 
     # setup paths
@@ -305,17 +308,17 @@ def main():
 
     # Device
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    logger.info(f"Using device: {device}")
 
     # load config and build model
-    print(f"\nLoading model from: {run_dir}")
+    logger.info(f"Loading model from: {run_dir}")
     config = load_config(run_dir)
     model = build_model_from_config(config, device)
 
     # load checkpoint
     checkpoint_path = run_dir / "checkpoints" / args.checkpoint
     epoch = load_checkpoint(model, checkpoint_path, device)
-    print(f"Loaded checkpoint: {checkpoint_path} (epoch {epoch})")
+    logger.info(f"Loaded checkpoint: {checkpoint_path} (epoch {epoch})")
 
     # Create FlowMatcher
     flow_matcher = FlowMatcher(
@@ -324,7 +327,7 @@ def main():
     )
 
     # Load dataset
-    print(f"\nLoading PDBs from: {args.pdb_list}")
+    logger.info(f"Loading PDBs from: {args.pdb_list}")
 
     # Determine include_mates from args or config
     include_mates = args.include_mates or config.get("include_mates", False)
@@ -337,18 +340,18 @@ def main():
         preprocess=True,
     )
 
-    print(f"Found {len(dataset)} PDB entries")
+    logger.info(f"Found {len(dataset)} PDB entries")
 
     # run inference
-    print(f"\nRunning inference with method={args.method}, steps={args.num_steps}")
-    print(f"Self-conditioning: {args.use_sc}")
-    print(f"Threshold for metrics: {args.threshold}Å")
-    print(f"Batch size: {args.batch_size}")
+    logger.info(f"Running inference with method={args.method}, steps={args.num_steps}")
+    logger.info(f"Self-conditioning: {args.use_sc}")
+    logger.info(f"Threshold for metrics: {args.threshold}Å")
+    logger.info(f"Batch size: {args.batch_size}")
     if args.water_ratio is not None:
-        print(f"Water ratio: {args.water_ratio} (sampling num_residues × {args.water_ratio} waters)")
+        logger.info(f"Water ratio: {args.water_ratio} (sampling num_residues × {args.water_ratio} waters)")
     else:
-        print("Water ratio: None (using ground truth water count)")
-    print("-" * 60)
+        logger.info("Water ratio: None (using ground truth water count)")
+    logger.info("-" * 60)
 
     all_metrics = []
 
@@ -363,7 +366,7 @@ def main():
             valid_graphs.append(graph)
 
     if skipped_pdbs:
-        print(f"Skipping {len(skipped_pdbs)} PDBs with no water molecules")
+        logger.info(f"Skipping {len(skipped_pdbs)} PDBs with no water molecules")
 
     # process in batches
     num_batches = (len(valid_graphs) + args.batch_size - 1) // args.batch_size
@@ -474,16 +477,16 @@ def main():
                 f,
                 indent=2,
             )
-        print(f"\nMetrics saved to: {metrics_path}")
+        logger.info(f"Metrics saved to: {metrics_path}")
 
     else:
-        print("\nNo valid samples processed.")
+        logger.warning("No valid samples processed.")
 
-    print(f"Plots saved to: {output_dir / 'plots'}")
+    logger.info(f"Plots saved to: {output_dir / 'plots'}")
     if args.save_gifs:
-        print(f"GIFs saved to: {output_dir / 'gifs'}")
+        logger.info(f"GIFs saved to: {output_dir / 'gifs'}")
 
-    print("\nInference complete.")
+    logger.info("Inference complete.")
 
 
 if __name__ == "__main__":
