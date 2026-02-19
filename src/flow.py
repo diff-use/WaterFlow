@@ -1,28 +1,29 @@
-# flow.py
+from __future__ import annotations
 
-import math
-from typing import Dict, Tuple, Optional, List, Union
-from pathlib import Path
 import copy
+import math
+from pathlib import Path
 
 import numpy as np
 import torch
-from torch import nn, Tensor
 import torch.nn.functional as F
+from torch import Tensor, nn
+from torch_geometric.data import Batch, Data, HeteroData
 from torch_geometric.nn import knn
-from torch_geometric.data import HeteroData, Data, Batch
 from torch_scatter import scatter_mean
 from tqdm.auto import tqdm
 
-from .utils import ot_coupling
-from .encoder_base import BaseProteinEncoder
-from .gvp import GVP, GVPMultiEdgeConv
+from src.constants import ALL_EDGE_TYPES, EDGE_PP, EDGE_PW, EDGE_WP, EDGE_WW, NUM_RBF
+from src.encoder_base import BaseProteinEncoder
+from src.gvp import GVP, GVPMultiEdgeConv
+from src.utils import ot_coupling
+
 
 def build_knn_edges(src_pos: torch.Tensor,
                     dst_pos: torch.Tensor,
                     k: int,
-                    batch_src: Optional[torch.Tensor] = None,
-                    batch_dst: Optional[torch.Tensor] = None) -> torch.Tensor:
+                    batch_src: torch.Tensor | None = None,
+                    batch_dst: torch.Tensor | None = None) -> torch.Tensor:
     """
     KNN edges from src -> dst (source indices in row 0, dest in row 1).
     """
@@ -61,12 +62,7 @@ class ProteinWaterUpdate(nn.Module):
         super().__init__()
         s_h, v_h = hidden_dims
 
-        etypes = [
-            ('protein', 'pw', 'water'),
-            ('water',   'ww', 'water'),
-            ('protein', 'pp', 'protein'),
-            ('water',   'wp', 'protein'),
-        ]
+        etypes = ALL_EDGE_TYPES
 
         self.blocks = nn.ModuleList([
             GVPMultiEdgeConv(
@@ -89,7 +85,7 @@ class ProteinWaterUpdate(nn.Module):
                     data: HeteroData,
                     k_pw: int = 12,
                     k_ww: int = 8,
-                    k_wp: int = 8) -> Dict[Tuple[str, str, str], torch.Tensor]:
+                    k_wp: int = 8) -> dict[tuple[str, str, str], torch.Tensor]:
         """
         Build KNN edges for protein-water interactions.
 
@@ -99,8 +95,17 @@ class ProteinWaterUpdate(nn.Module):
         This ensures every water has at least k_pw protein neighbors.
 
         PP edges are read from the dataset (cached at preprocessing time).
+
+        Args:
+            data: HeteroData with 'protein' and 'water' node types containing positions
+            k_pw: Number of nearest neighbors for protein-water edges
+            k_ww: Number of nearest neighbors for water-water edges
+            k_wp: Number of nearest neighbors for water-protein edges
+
+        Returns:
+            Dict mapping edge type tuples to (2, E) edge index tensors
         """
-        edge_index_dict: Dict[Tuple[str, str, str], torch.Tensor] = {}
+        edge_index_dict: dict[tuple[str, str, str], torch.Tensor] = {}
         device = data['protein'].pos.device
 
         batch_p = data['protein'].batch if 'batch' in data['protein'] else None
@@ -118,33 +123,33 @@ class ProteinWaterUpdate(nn.Module):
             ei_wp_reversed = ei_wp.flip(0)
             # union
             ei_pw_union = torch.cat([ei_pw, ei_wp_reversed], dim=1).unique(dim=1)
-            edge_index_dict[('protein', 'pw', 'water')] = ei_pw_union
+            edge_index_dict[EDGE_PW] = ei_pw_union
         else:
-            edge_index_dict[('protein', 'pw', 'water')] = torch.empty(2, 0, dtype=torch.long, device=device)
+            edge_index_dict[EDGE_PW] = torch.empty(2, 0, dtype=torch.long, device=device)
 
         # water -> water
         if pos_w.numel() > 0:
-            edge_index_dict[('water', 'ww', 'water')] = build_knn_edges(
+            edge_index_dict[EDGE_WW] = build_knn_edges(
                 pos_w, pos_w, k=k_ww, batch_src=batch_w, batch_dst=batch_w
             )
         else:
-            edge_index_dict[('water', 'ww', 'water')] = torch.empty(2, 0, dtype=torch.long, device=device)
+            edge_index_dict[EDGE_WW] = torch.empty(2, 0, dtype=torch.long, device=device)
 
         # protein-protein edges (cached from dataset)
-        if ('protein', 'pp', 'protein') in data.edge_types:
-            edge_index_dict[('protein', 'pp', 'protein')] = data['protein', 'pp', 'protein'].edge_index
+        if EDGE_PP in data.edge_types:
+            edge_index_dict[EDGE_PP] = data[EDGE_PP].edge_index
         else:
-            edge_index_dict[('protein', 'pp', 'protein')] = build_knn_edges(
+            edge_index_dict[EDGE_PP] = build_knn_edges(
                 pos_p, pos_p, k=k_pw, batch_src=batch_p, batch_dst=batch_p
             )
 
         # water -> protein
         if pos_w.numel() > 0 and pos_p.numel() > 0:
-            edge_index_dict[('water', 'wp', 'protein')] = build_knn_edges(
+            edge_index_dict[EDGE_WP] = build_knn_edges(
                 pos_w, pos_p, k=k_wp, batch_src=batch_w, batch_dst=batch_p
             )
         else:
-            edge_index_dict[('water', 'wp', 'protein')] = torch.empty(2, 0, dtype=torch.long, device=device)
+            edge_index_dict[EDGE_WP] = torch.empty(2, 0, dtype=torch.long, device=device)
 
         for et in self.etypes:
             if et not in edge_index_dict:
@@ -153,16 +158,20 @@ class ProteinWaterUpdate(nn.Module):
         return edge_index_dict
 
     def forward(self,
-                x_dict: Dict[str, Tuple[torch.Tensor, torch.Tensor]],
+                x_dict: dict[str, tuple[torch.Tensor, torch.Tensor]],
                 data: HeteroData,
                 k_pw: int = 12,
                 k_ww: int = 8,
-                k_wp: int = 8):
+                k_wp: int = 8,
+                pp_edge_attr: tuple | None = None):
         """
         x_dict: {
             'protein': (s_p, v_p),
             'water':   (s_w, v_w)
         }
+        pp_edge_attr: Optional encoder-learned edge features (s_edge, V_edge) for PP edges.
+                      If provided, uses learned scalar features with original cached unit vectors.
+                      If None, uses cached geometric edge features from the dataset.
         """
         pos_dict = {nt: data[nt].pos for nt in data.node_types if 'pos' in data[nt]}
 
@@ -171,8 +180,26 @@ class ProteinWaterUpdate(nn.Module):
             k_pw=k_pw, k_ww=k_ww, k_wp=k_wp,
         )
 
+        # PP edge features: encoder-provided > cached
+        cached_edge_attr_dict = {}
+        if EDGE_PP in data.edge_types:
+            pp_edge = data[EDGE_PP]
+
+            if pp_edge_attr is not None:
+                # Use encoder-learned scalar features with original cached unit vectors
+                # This preserves gradient flow through learned edge representations
+                s_edge, V_edge = pp_edge_attr
+                if hasattr(pp_edge, 'edge_unit'):
+                    cached_edge_attr_dict[EDGE_PP] = (s_edge, pp_edge.edge_unit)
+                else:
+                    # Fall back to full encoder output if no cached unit vectors
+                    cached_edge_attr_dict[EDGE_PP] = (s_edge, V_edge.squeeze(1))
+            elif hasattr(pp_edge, 'edge_rbf') and hasattr(pp_edge, 'edge_unit'):
+                # Use cached geometric edge features
+                cached_edge_attr_dict[EDGE_PP] = (pp_edge.edge_rbf, pp_edge.edge_unit)
+
         for block in self.blocks:
-            x_dict = block(x_dict, edge_index_dict, pos_dict)
+            x_dict = block(x_dict, edge_index_dict, pos_dict, cached_edge_attr_dict)
 
         return x_dict
 
@@ -190,8 +217,8 @@ class FlowWaterGVP(nn.Module):
     def __init__(
         self,
         encoder: BaseProteinEncoder,
-        hidden_dims: Tuple[int, int] = (256, 32),
-        edge_scalar_dim: int = 32,
+        hidden_dims: tuple[int, int] = (256, 32),
+        edge_scalar_dim: int = NUM_RBF,
         layers: int = 4,
         drop_rate: float = 0.0,
         vector_gate: bool = True,
@@ -259,17 +286,19 @@ class FlowWaterGVP(nn.Module):
             nn.LayerNorm(s_h),
         )
 
-        # water vector field head: (s,v) -> (0,1) -> single vector channel
+        # water vector field head: (s,v) -> (s_h//4, 1) -> single vector channel
+        # Note: intermediate scalars (s_h//4) are kept for proper vector gating,
+        # but discarded in forward() - only the vector output is used
         self.vfield_head = GVP(
             in_dims=hidden_dims,
-            out_dims=(0, 1),
+            out_dims=(s_h // 4, 1),
             vector_gate=True,
         )
 
     def forward(self,
                 data: HeteroData,
                 t: torch.Tensor,
-                sc: Optional[Dict[str, torch.Tensor]] = None) -> torch.Tensor:
+                sc: dict[str, torch.Tensor] | None = None) -> torch.Tensor:
         """
         data: HeteroData with node types 'protein' (may include mates), 'water'
         t: (B,) diffusion time per complex
@@ -281,7 +310,8 @@ class FlowWaterGVP(nn.Module):
         device = data['protein'].pos.device
 
         # Single unified encoder call - works for ANY encoder type
-        s_all, v_all = self.encoder(data)
+        # All encoders return (s, V, pp_edge_attr) where pp_edge_attr is None for SLAE/ESM
+        s_all, v_all, pp_edge_attr = self.encoder(data)
 
         # Bridge encoder dims -> flow dims
         # Pass tuple when encoder has vector outputs, tensor when scalar-only
@@ -330,12 +360,14 @@ class FlowWaterGVP(nn.Module):
         }
 
         # hetero update (protein+water graph)
+        # Pass encoder edge features (None for SLAE/ESM, tuple for GVP)
         x_dict = self.updater(
             x_dict,
             data,
             k_pw=self.k_pw,
             k_ww=self.k_ww,
             k_wp=self.k_wp,
+            pp_edge_attr=pp_edge_attr,
         )
 
         # water vector field head
@@ -394,13 +426,19 @@ class FlowMatcher:
     def training_step(
         self,
         batch: HeteroData,
-        optimizer: torch.optim.Optimizer,
-        grad_clip: float = 1.0,
         use_self_conditioning: bool = True,
-    ) -> Dict[str, float]:
+        accumulation_steps: int = 1,
+    ) -> dict[str, float]:
         """
-        Single flow matching training step.
-        
+        Single flow matching training step (forward + backward only).
+
+        The optimizer step is handled by the caller to support gradient accumulation.
+
+        Args:
+            batch: HeteroData batch
+            use_self_conditioning: Whether to use self-conditioning
+            accumulation_steps: Number of gradient accumulation steps (loss is scaled by 1/accumulation_steps)
+
         Returns dict with 'loss', 'rmsd', 'sigma'.
         """
         self.model.train()
@@ -462,20 +500,13 @@ class FlowMatcher:
                 per_sample_loss = numerator / (denominator + 1e-8)
                 per_sample_info = {'losses': per_sample_loss, 'num_graphs': num_graphs}
 
-        # backward
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        if grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(
-                [p for p in self.model.parameters() if p.requires_grad],
-                max_norm=grad_clip
-            )
-        optimizer.step()
+        # backward (scale loss for gradient accumulation)
+        (loss / accumulation_steps).backward()
 
         # training RMSD
         with torch.no_grad():
             x1_hat = x_t + (1.0 - t_per_atom) * v_pred
-            # rmsd = compute_rmsd(x1_hat, x1_star) 
+            # rmsd = compute_rmsd(x1_hat, x1_star)
 
             # on-gpu version of rmsd
             diff2 = ((x1_hat - x1_star) ** 2).sum(-1)  # (Nw,)
@@ -484,7 +515,7 @@ class FlowMatcher:
         return {'loss': loss.item(), 'rmsd': rmsd, 'sigma': sigma, 'per_sample_info': per_sample_info}
 
     @torch.no_grad()
-    def validation_step(self, batch: HeteroData) -> Dict[str, float]:
+    def validation_step(self, batch: HeteroData) -> dict[str, float]:
         """Single validation step (no gradient, no optimizer)."""
         self.model.eval()
         device = batch['protein'].pos.device
@@ -522,7 +553,7 @@ class FlowMatcher:
         g: Batch,
         water_ratio: float,
         device: torch.device,
-    ) -> Tuple[Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor]:
         """
         Create water node positions and batch indices based on protein residue count.
 
@@ -569,13 +600,13 @@ class FlowMatcher:
     @torch.no_grad()
     def euler_integrate(
         self,
-        graphs: Union[HeteroData, List[HeteroData]],
+        graphs: HeteroData | list[HeteroData],
         num_steps: int = 100,
         use_sc: bool = True,
         sc_ema_alpha: float = 0.2,
         device: str = "cuda",
-        water_ratio: Optional[float] = None,
-    ) -> List[np.ndarray]:
+        water_ratio: float | None = None,
+    ) -> list[np.ndarray]:
         """
         Euler integration from noise to final positions.
 
@@ -647,14 +678,14 @@ class FlowMatcher:
     @torch.no_grad()
     def rk4_integrate(
         self,
-        graphs: Union[HeteroData, List[HeteroData]],
+        graphs: HeteroData | list[HeteroData],
         num_steps: int = 500,
         use_sc: bool = True,
         sc_ema_alpha: float = 0.2,
         device: str = "cuda",
         return_trajectory: bool = True,
-        water_ratio: Optional[float] = None,
-    ) -> List[Dict[str, np.ndarray]]:
+        water_ratio: float | None = None,
+    ) -> list[dict[str, np.ndarray]]:
         """
         RK4 integration from noise to final positions.
 
@@ -781,12 +812,12 @@ class FlowMatcher:
 
     def sample(
         self,
-        graphs: Union[HeteroData, List[HeteroData]],
+        graphs: HeteroData | list[HeteroData],
         num_steps: int = 100,
         method: str = "euler",
         use_sc: bool = True,
         device: str = "cuda",
-    ) -> Union[np.ndarray, List[np.ndarray]]:
+    ) -> np.ndarray | list[np.ndarray]:
         """
         Sample water positions for one or more graphs.
 
@@ -817,4 +848,3 @@ class FlowMatcher:
         if single_input:
             return results[0]
         return results
-        

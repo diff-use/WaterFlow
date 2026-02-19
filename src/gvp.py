@@ -1,16 +1,17 @@
-# gvp.py 
+# gvp.py
 # generic GVP and GVPConv layers adapted from Jing et al. (2021)
 
-import torch
 import functools
-from torch import nn
+
+import torch
 import torch.nn.functional as F
-from torch_geometric.nn import MessagePassing
+from torch import nn
+from torch_geometric.nn import HeteroConv, MessagePassing
 from torch_scatter import scatter_add
 
-from torch_geometric.nn import HeteroConv
+from src.constants import NUM_RBF, RBF_CUTOFF
+from src.utils import rbf
 
-from .utils import rbf
 
 def tuple_sum(*args):
     """
@@ -473,7 +474,7 @@ class EdgeUpdate(nn.Module):
 
         src, dst = edge_index[0], edge_index[1]
         parts = [s_node[src], s_node[dst], s_edge]
-        
+
         if self.update_w_distance:
             parts.append(distance_feat)
 
@@ -481,7 +482,7 @@ class EdgeUpdate(nn.Module):
         upd = self.edge_mlp(h)                           # (E, s_edge_width)
         s_edge = self.edge_norm(s_edge + upd)            # residual, fixed width
         return (s_edge, V_edge)                          # vectors unchanged
-    
+
 # multi edge gvp
 
 class GVPMultiEdge(MessagePassing):
@@ -493,13 +494,13 @@ class GVPMultiEdge(MessagePassing):
         self,
         src_type: str, dst_type: str,
         s_dim: int, v_dim: int,
-        rbf_dim: int = 16, 
+        rbf_dim: int = NUM_RBF,
         use_dst_feats: bool = False,
         n_message_gvps: int = 1,
         activations=(F.relu, torch.sigmoid),
         vector_gate=True,
-        aggr="sum",        
-        rbf_dmax: float = 20.0
+        aggr="sum",
+        rbf_dmax: float = RBF_CUTOFF,
     ):
         super().__init__(aggr=aggr)
         self.src_type, self.dst_type = src_type, dst_type
@@ -532,10 +533,11 @@ class GVPMultiEdge(MessagePassing):
         rbf_e = rbf(dist.squeeze(-1), num_gaussians=rbf_dim, cutoff=rbf_dmax)  # (E, rbf_dim)
         return unit, rbf_e
 
-    def forward(self, x, edge_index, pos_pair):
+    def forward(self, x, edge_index, pos_pair, cached_edge_attr=None):
         """
         x: ((s_src, v_src), (s_dst, v_dst)) for bipartite, or (s,v) for homogeneous
-        pos_dict: {ntype: pos}
+        pos_pair: (pos_src, pos_dst) positions
+        cached_edge_attr: optional tuple (cached_rbf, cached_unit) for pre-computed edge features
         returns: merged messages at dst nodes: shape [N_dst, s_dim + 3*v_dim]
         """
         # Unpack by relation type:
@@ -557,8 +559,11 @@ class GVPMultiEdge(MessagePassing):
         v_src_f = v_src.reshape(v_src.size(0), -1)  # (N_src, 3*v)
         v_dst_f = v_dst.reshape(v_dst.size(0), -1)  # (N_dst, 3*v)
 
-        # compute geometric edge attributes on the fly
-        unit, rbf_e = self._unit_and_rbf(pos_src, pos_dst, edge_index, self.rbf_dim, self.rbf_dmax)
+        # use cached edge features if provided, otherwise compute on the fly
+        if cached_edge_attr is not None:
+            rbf_e, unit = cached_edge_attr
+        else:
+            unit, rbf_e = self._unit_and_rbf(pos_src, pos_dst, edge_index, self.rbf_dim, self.rbf_dmax)
 
         # pack as simple tensors for message()
         # edge_attr = (rbf_e, unit)  -- pass separately to keep shapes explicit
@@ -637,9 +642,11 @@ class GVPMultiEdgeConv(nn.Module):
             )
         self.hconv = HeteroConv(rel_convs, aggr="sum")  # sum messages across edge types
 
-    def forward(self, x_dict, edge_index_dict, pos_dict):
+    def forward(self, x_dict, edge_index_dict, pos_dict, cached_edge_attr_dict=None):
         """
         x_dict: {ntype: (s, v)}
+        cached_edge_attr_dict: optional dict mapping edge types to (rbf, unit) tuples
+                               for pre-computed edge features (e.g., for PP edges)
         returns updated x_dict
         """
         #build per-edge-type (pos_src, pos_dst) tuples
@@ -647,8 +654,21 @@ class GVPMultiEdgeConv(nn.Module):
             et: (pos_dict[et[0]], pos_dict[et[2]])
             for et in edge_index_dict.keys()
         }
+
+        # build cached edge attr dict for HeteroConv (None for edges without cache)
+        if cached_edge_attr_dict is None:
+            cached_edge_attr_dict = {}
+        edge_attr_for_hconv = {
+            et: cached_edge_attr_dict.get(et, None)
+            for et in edge_index_dict.keys()
+        }
+
         #heteroConv will forward kwarg name without '_dict' into each conv
-        merged_msgs = self.hconv(x_dict, edge_index_dict, pos_pair_dict=pos_pair_dict)
+        merged_msgs = self.hconv(
+            x_dict, edge_index_dict,
+            pos_pair_dict=pos_pair_dict,
+            cached_edge_attr_dict=edge_attr_for_hconv,
+        )
         #merged_msgs[ntype] is a merged tensor of total messages: [N, s_dim + 3*v_dim]
         for ntype, merged in merged_msgs.items():
             s_msg, v_msg = _split(merged, self.v_dim)

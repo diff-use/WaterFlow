@@ -1,4 +1,3 @@
-# encoder_base.py
 """
 Base encoder and registry for modular encoders.
 
@@ -6,13 +5,16 @@ This module provides:
 - BaseProteinEncoder: Abstract base class that all encoders must implement
 - Registry pattern: Decorator-based registration and build_encoder() function
 """
+from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Dict, Tuple, Type
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
-from torch_geometric.data import HeteroData
+
+if TYPE_CHECKING:
+    from torch_geometric.data import HeteroData
 
 
 class BaseProteinEncoder(ABC, nn.Module):
@@ -25,7 +27,7 @@ class BaseProteinEncoder(ABC, nn.Module):
 
     @property
     @abstractmethod
-    def output_dims(self) -> Tuple[int, int]:
+    def output_dims(self) -> tuple[int, int]:
         """Return (scalar_dim, vector_dim) output dimensions."""
         pass
 
@@ -36,7 +38,7 @@ class BaseProteinEncoder(ABC, nn.Module):
         pass
 
     @abstractmethod
-    def forward(self, data: HeteroData) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, data: HeteroData) -> tuple[torch.Tensor, torch.Tensor, tuple | None]:
         """
         Encode protein data.
 
@@ -44,15 +46,17 @@ class BaseProteinEncoder(ABC, nn.Module):
             data: HeteroData with protein nodes
 
         Returns:
-            Tuple of (s, V) where:
+            tuple of (s, V, pp_edge_attr) where:
                 s: (N, scalar_dim) scalar features
                 V: (N, vector_dim, 3) vector features
+                pp_edge_attr: tuple (s_edge, V_edge) for PP edges, or None if encoder
+                    doesn't process edges (e.g., SLAE, ESM)
         """
         pass
 
     @classmethod
     @abstractmethod
-    def from_config(cls, config: Dict, device: torch.device) -> 'BaseProteinEncoder':
+    def from_config(cls, config: dict, device: torch.device) -> BaseProteinEncoder:
         """
         Construct encoder from config dict.
 
@@ -67,7 +71,7 @@ class BaseProteinEncoder(ABC, nn.Module):
 
 
 # global encoder registry
-_ENCODER_REGISTRY: Dict[str, Type[BaseProteinEncoder]] = {}
+_ENCODER_REGISTRY: dict[str, BaseProteinEncoder] = {}
 
 
 def register_encoder(name: str):
@@ -79,7 +83,7 @@ def register_encoder(name: str):
         class MyEncoder(BaseProteinEncoder):
             ...
     """
-    def decorator(cls: Type[BaseProteinEncoder]) -> Type[BaseProteinEncoder]:
+    def decorator(cls: BaseProteinEncoder) -> BaseProteinEncoder:
         if name in _ENCODER_REGISTRY:
             raise ValueError(f"Encoder '{name}' is already registered")
         _ENCODER_REGISTRY[name] = cls
@@ -87,7 +91,7 @@ def register_encoder(name: str):
     return decorator
 
 
-def get_encoder_class(name: str) -> Type[BaseProteinEncoder]:
+def get_encoder_class(name: str) -> BaseProteinEncoder:
     """
     Get encoder class by name.
 
@@ -98,15 +102,15 @@ def get_encoder_class(name: str) -> Type[BaseProteinEncoder]:
         Encoder class
 
     Raises:
-        ValueError: If encoder name is not registered
+        KeyError: If encoder name is not registered
     """
     if name not in _ENCODER_REGISTRY:
         available = list(_ENCODER_REGISTRY.keys())
-        raise ValueError(f"Unknown encoder type '{name}'. Available: {available}")
+        raise KeyError(f"Unknown encoder type '{name}'. Available: {available}")
     return _ENCODER_REGISTRY[name]
 
 
-def build_encoder(config: Dict, device: torch.device) -> BaseProteinEncoder:
+def build_encoder(config: dict, device: torch.device) -> BaseProteinEncoder:
     """
     Build encoder from configuration dict.
 
@@ -119,6 +123,8 @@ def build_encoder(config: Dict, device: torch.device) -> BaseProteinEncoder:
     Returns:
         Instantiated encoder implementing BaseProteinEncoder
     """
-    encoder_type = config.get('encoder_type', 'gvp')
+    if 'encoder_type' not in config:
+        raise ValueError("'encoder_type' must be specified in config")
+    encoder_type = config['encoder_type']
     encoder_cls = get_encoder_class(encoder_type)
     return encoder_cls.from_config(config, device)
