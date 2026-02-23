@@ -7,6 +7,7 @@ Utility functions organized by category:
 2. Optimal transport (ot_coupling)
 3. Metrics (recall_precision, compute_rmsd, compute_placement_metrics)
 4. Visualization (plot_3d_frame, create_trajectory_gif, save_protein_plot)
+5. Logging (setup_logging_for_tqdm)
 """
 
 from collections.abc import Sequence
@@ -19,6 +20,25 @@ from e3nn.math import soft_one_hot_linspace
 from PIL import Image
 from scipy.optimize import linear_sum_assignment
 from torch import Tensor
+from tqdm import tqdm
+
+
+def setup_logging_for_tqdm():
+    """
+    Configure loguru to work with tqdm progress bars.
+
+    Redirects log output through tqdm.write() so log messages don't
+    break progress bar rendering. Call this once at the start of
+    scripts that use both logging and tqdm.
+    """
+    from loguru import logger
+
+    logger.remove()
+    logger.add(
+        lambda msg: tqdm.write(msg, end=""),
+        colorize=True,
+        format="<level>{level: <8}</level> | <level>{message}</level>",
+    )
 
 ATOM37_FILL = 1e-5
 

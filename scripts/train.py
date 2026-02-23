@@ -23,7 +23,11 @@ from src.utils import (
     compute_rmsd,
     create_trajectory_gif,
     plot_3d_frame,
+    setup_logging_for_tqdm,
 )
+
+# Configure logging to work with tqdm progress bars
+setup_logging_for_tqdm()
 
 
 def generate_run_name(args):

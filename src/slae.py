@@ -33,7 +33,7 @@ class SLAEEncoder(BaseProteinEncoder):
     @property
     def output_dims(self) -> tuple[int, int]:
         """Return (slae_dim, 0) — scalars only."""
-        return (self._slae_dim, 0)
+        return self._slae_dim, 0
 
     @property
     def encoder_type(self) -> str:
