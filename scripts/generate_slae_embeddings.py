@@ -40,24 +40,26 @@ SLAE_ROOT = Path.home() / "SLAE_wl"
 sys.path.insert(0, str(SLAE_ROOT))  # For SLAE imports
 
 # Default paths for SLAE config and checkpoint
-DEFAULT_SLAE_CONFIG = SLAE_ROOT / "SLAE" / "configs" / "encoder" / "protein_encoder.yaml"
+DEFAULT_SLAE_CONFIG = (
+    SLAE_ROOT / "SLAE" / "configs" / "encoder" / "protein_encoder.yaml"
+)
 DEFAULT_SLAE_CKPT = SLAE_ROOT / "checkpoints" / "autoencoder.ckpt"
 
-import biotite.structure as bts
-import numpy as np
-import pandas as pd
-import torch
-import yaml
-from biotite.structure.io.pdb import PDBFile, get_structure
-from loguru import logger
-from SLAE.features.graph_featurizer import ProteinGraphFeaturizer
-from SLAE.io.atom_tensor import atom37_to_atoms, atomarray_to_tensors
-from SLAE.model.encoder import ProteinEncoder
-from SLAE.util.constants import PROTEIN_ATOMS, PROTEIN_ATOMS_INDEX
-from torch_geometric.data import Batch, Data
-from tqdm import tqdm
+import biotite.structure as bts  # noqa: E402
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+import torch  # noqa: E402
+import yaml  # noqa: E402
+from biotite.structure.io.pdb import PDBFile, get_structure  # noqa: E402
+from loguru import logger  # noqa: E402
+from SLAE.features.graph_featurizer import ProteinGraphFeaturizer  # noqa: E402
+from SLAE.io.atom_tensor import atom37_to_atoms, atomarray_to_tensors  # noqa: E402
+from SLAE.model.encoder import ProteinEncoder  # noqa: E402
+from SLAE.util.constants import PROTEIN_ATOMS  # noqa: E402
+from torch_geometric.data import Batch, Data  # noqa: E402
+from tqdm import tqdm  # noqa: E402
 
-from src.utils import setup_logging_for_tqdm
+from src.utils import setup_logging_for_tqdm  # noqa: E402
 
 
 def _normalize_ins_code(value) -> str:
@@ -73,14 +75,14 @@ def _normalize_ins_code(value) -> str:
 def chunks(lst: list[dict], n: int) -> Iterator[list[dict]]:
     """Yield successive n-sized chunks from lst."""
     for i in range(0, len(lst), n):
-        yield lst[i:i + n]
+        yield lst[i : i + n]
 
 
 def load_yaml_dict(config_path: str | Path) -> dict[str, object]:
     """Load YAML config and return as dict."""
-    with open(config_path, 'r') as f:
+    with open(config_path, "r") as f:
         config = yaml.safe_load(f)
-    config.pop('_target_', None)
+    config.pop("_target_", None)
     return config
 
 
@@ -96,13 +98,13 @@ def parse_split_file(split_file: str, base_pdb_dir: Path) -> list[dict]:
         List of entry dicts with pdb_id, pdb_path, cache_key
     """
     entries = []
-    with open(split_file, 'r') as f:
+    with open(split_file, "r") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
 
-            parts = line.split('_')
+            parts = line.split("_")
             if len(parts) < 2:
                 logger.warning(f"Skipping malformed line: {line}")
                 continue
@@ -114,11 +116,13 @@ def parse_split_file(split_file: str, base_pdb_dir: Path) -> list[dict]:
 
             pdb_path = base_pdb_dir / pdb_id / f"{pdb_id}_final.pdb"
 
-            entries.append({
-                'pdb_id': pdb_id,
-                'pdb_path': pdb_path,
-                'cache_key': line,
-            })
+            entries.append(
+                {
+                    "pdb_id": pdb_id,
+                    "pdb_path": pdb_path,
+                    "cache_key": line,
+                }
+            )
 
     return entries
 
@@ -143,7 +147,9 @@ def parse_pdb_protein_atoms(pdb_path: str | Path) -> bts.AtomArray:
     return protein_atoms
 
 
-def get_geometry_atom_info(protein_atoms: bts.AtomArray) -> list[tuple[str, int, str, str]]:
+def get_geometry_atom_info(
+    protein_atoms: bts.AtomArray,
+) -> list[tuple[str, int, str, str]]:
     """
     Build list of (chain_id, res_id, ins_code, atom_name) for each atom in geometry order.
 
@@ -158,10 +164,12 @@ def get_geometry_atom_info(protein_atoms: bts.AtomArray) -> list[tuple[str, int,
         List of (chain_id, res_id, ins_code, atom_name) tuples, one per atom
     """
     return [
-        (protein_atoms.chain_id[i],
-         protein_atoms.res_id[i],
-         _normalize_ins_code(protein_atoms.ins_code[i]),
-         protein_atoms.atom_name[i].strip().upper())
+        (
+            protein_atoms.chain_id[i],
+            protein_atoms.res_id[i],
+            _normalize_ins_code(protein_atoms.ins_code[i]),
+            protein_atoms.atom_name[i].strip().upper(),
+        )
         for i in range(len(protein_atoms))
     ]
 
@@ -270,7 +278,9 @@ def compute_slae_embeddings_batch(
 
         # Get SLAE atom info for later alignment
         _, residue_idx, atom_type = atom37_to_atoms(coords)
-        slae_atom_info_list.append((residue_idx, atom_type, chains, residue_id, ins_code))
+        slae_atom_info_list.append(
+            (residue_idx, atom_type, chains, residue_id, ins_code)
+        )
 
     batch = Batch.from_data_list(data_list)
     batch = batch.to(device)
@@ -278,20 +288,30 @@ def compute_slae_embeddings_batch(
 
     with torch.no_grad():
         outputs = encoder(batch)
-        embeddings = outputs['node_embedding']  # (total_atoms, 128)
+        embeddings = outputs["node_embedding"]  # (total_atoms, 128)
 
     # split embeddings back into individual structures and align to geometry
     embeddings_list = []
     start_idx = 0
-    for (residue_idx, atom_type, chains, residue_id, ins_code), geometry_atom_info in zip(
-        slae_atom_info_list, geometry_atom_info_list
-    ):
+    for (
+        residue_idx,
+        atom_type,
+        chains,
+        residue_id,
+        ins_code,
+    ), geometry_atom_info in zip(slae_atom_info_list, geometry_atom_info_list):
         num_slae_atoms = residue_idx.size(0)
-        slae_emb = embeddings[start_idx:start_idx + num_slae_atoms].cpu()
+        slae_emb = embeddings[start_idx : start_idx + num_slae_atoms].cpu()
 
         # Align SLAE embeddings to geometry atom order
         aligned_emb = align_slae_to_geometry(
-            slae_emb, residue_idx, atom_type, chains, residue_id, ins_code, geometry_atom_info
+            slae_emb,
+            residue_idx,
+            atom_type,
+            chains,
+            residue_id,
+            ins_code,
+            geometry_atom_info,
         )
         embeddings_list.append(aligned_emb)
         start_idx += num_slae_atoms
@@ -305,43 +325,52 @@ def main() -> None:
         description="Precompute SLAE embeddings for protein structures"
     )
     parser.add_argument(
-        "--split_file", type=str, required=True,
-        help="Text file with PDB entries (one per line, e.g., '6eey_final_A')"
+        "--split_file",
+        type=str,
+        required=True,
+        help="Text file with PDB entries (one per line, e.g., '6eey_final_A')",
     )
     parser.add_argument(
-        "--cache_dir", type=str, required=True,
-        help="Base cache directory; embeddings saved to {cache_dir}/slae/"
+        "--cache_dir",
+        type=str,
+        required=True,
+        help="Base cache directory; embeddings saved to {cache_dir}/slae/",
     )
     parser.add_argument(
-        "--base_pdb_dir", type=str,
+        "--base_pdb_dir",
+        type=str,
         default="/sb/wankowicz_lab/data/srivasv/pdb_redo_data",
-        help="Base directory containing PDB subdirectories"
+        help="Base directory containing PDB subdirectories",
     )
     parser.add_argument(
-        "--slae_ckpt", type=str,
+        "--slae_ckpt",
+        type=str,
         default=str(DEFAULT_SLAE_CKPT),
-        help="Path to SLAE checkpoint"
+        help="Path to SLAE checkpoint",
     )
     parser.add_argument(
-        "--slae_config", type=str,
+        "--slae_config",
+        type=str,
         default=str(DEFAULT_SLAE_CONFIG),
-        help="Path to SLAE encoder config"
+        help="Path to SLAE encoder config",
     )
     parser.add_argument(
-        "--device", type=str, default="cuda",
-        help="Device to use (cuda/cpu)"
+        "--device", type=str, default="cuda", help="Device to use (cuda/cpu)"
     )
     parser.add_argument(
-        "--batch_limit", type=int, default=None,
-        help="Limit number of files to process (for testing)"
+        "--batch_limit",
+        type=int,
+        default=None,
+        help="Limit number of files to process (for testing)",
     )
     parser.add_argument(
-        "--overwrite", action="store_true",
-        help="Overwrite existing embeddings"
+        "--overwrite", action="store_true", help="Overwrite existing embeddings"
     )
     parser.add_argument(
-        "--batch_size", type=int, default=4,
-        help="Number of structures to process in each batch"
+        "--batch_size",
+        type=int,
+        default=4,
+        help="Number of structures to process in each batch",
     )
 
     args = parser.parse_args()
@@ -375,7 +404,7 @@ def main() -> None:
     logger.info(f"Found {len(entries)} entries in split file")
 
     if args.batch_limit:
-        entries = entries[:args.batch_limit]
+        entries = entries[: args.batch_limit]
         logger.info(f"Processing first {args.batch_limit} entries")
 
     # filter entries that need processing
@@ -397,17 +426,19 @@ def main() -> None:
     failures = []
     total_batches = (len(entries) + args.batch_size - 1) // args.batch_size
 
-    for batch_idx, entry_batch in enumerate(tqdm(
-        list(chunks(entries, args.batch_size)),
-        desc="Computing SLAE embeddings",
-        total=total_batches
-    )):
+    for batch_idx, entry_batch in enumerate(
+        tqdm(
+            list(chunks(entries, args.batch_size)),
+            desc="Computing SLAE embeddings",
+            total=total_batches,
+        )
+    ):
         batch_data = []
         batch_info = []
 
         for entry in entry_batch:
-            pdb_path = entry['pdb_path']
-            cache_key = entry['cache_key']
+            pdb_path = entry["pdb_path"]
+            cache_key = entry["cache_key"]
 
             if not pdb_path.exists():
                 logger.warning(f"PDB file not found: {pdb_path}")
@@ -416,17 +447,28 @@ def main() -> None:
 
             try:
                 protein_atoms = parse_pdb_protein_atoms(str(pdb_path))
-                coords, residue_type, chains, residue_id, ins_code = atomarray_to_tensors(
-                    protein_atoms
+                coords, residue_type, chains, residue_id, ins_code = (
+                    atomarray_to_tensors(protein_atoms)
                 )
                 # Get geometry atom info for alignment
                 geometry_atom_info = get_geometry_atom_info(protein_atoms)
-                batch_data.append((coords, residue_type, residue_id, chains, ins_code, geometry_atom_info))
-                batch_info.append({
-                    'entry': entry,
-                    'coords': coords,
-                    'n_geometry_atoms': len(geometry_atom_info),
-                })
+                batch_data.append(
+                    (
+                        coords,
+                        residue_type,
+                        residue_id,
+                        chains,
+                        ins_code,
+                        geometry_atom_info,
+                    )
+                )
+                batch_info.append(
+                    {
+                        "entry": entry,
+                        "coords": coords,
+                        "n_geometry_atoms": len(geometry_atom_info),
+                    }
+                )
             except Exception as e:
                 logger.exception(f"Error preparing {cache_key}")
                 failures.append((cache_key, str(e)))
@@ -442,9 +484,15 @@ def main() -> None:
                 geometry_atom_info_list = [item[5] for item in batch_data]
 
                 embeddings_list = compute_slae_embeddings_batch(
-                    coords_list, residue_type_list, residue_id_list,
-                    chains_list, ins_code_list, geometry_atom_info_list,
-                    encoder, featurizer, device
+                    coords_list,
+                    residue_type_list,
+                    residue_id_list,
+                    chains_list,
+                    ins_code_list,
+                    geometry_atom_info_list,
+                    encoder,
+                    featurizer,
+                    device,
                 )
 
                 # save each structure's embeddings
@@ -452,9 +500,9 @@ def main() -> None:
                     cache_path = slae_cache_dir / f"{info['entry']['cache_key']}.pt"
 
                     result = {
-                        'node_embeddings': embeddings,
-                        'atom37_coords': info['coords'],
-                        'pdb_id': info['entry']['pdb_id'],
+                        "node_embeddings": embeddings,
+                        "atom37_coords": info["coords"],
+                        "pdb_id": info["entry"]["pdb_id"],
                     }
 
                     torch.save(result, cache_path)
@@ -463,14 +511,16 @@ def main() -> None:
             except Exception as e:
                 logger.exception(f"Error processing batch {batch_idx}")
                 for info in batch_info:
-                    failures.append((info['entry']['cache_key'], str(e)))
+                    failures.append((info["entry"]["cache_key"], str(e)))
 
-    logger.info(f"Completed: {success_count}/{len(entries)} entries processed successfully")
+    logger.info(
+        f"Completed: {success_count}/{len(entries)} entries processed successfully"
+    )
 
     # Log failures
     if failures:
         failure_log_path = slae_cache_dir / "embedding_failures.log"
-        with open(failure_log_path, 'a') as f:
+        with open(failure_log_path, "a") as f:
             for cache_key, reason in failures:
                 f.write(f"{cache_key}\t{reason}\n")
         logger.info(f"Logged {len(failures)} failures to {failure_log_path}")

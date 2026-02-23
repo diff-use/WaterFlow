@@ -26,10 +26,8 @@ import numpy as np
 import pandas as pd
 
 # For re-running mate detection
-import pymol2
 import torch
 from loguru import logger
-from mpl_toolkits.mplot3d import Axes3D
 from tqdm import tqdm
 
 from src.dataset import get_crystal_contacts_pymol
@@ -43,16 +41,16 @@ def analyze_mate_distances(cached_data, cutoff=5.0):
     Returns:
         dict with statistics about mate distances
     """
-    protein_pos = cached_data['protein_pos'].numpy()
-    mate_pos = cached_data['mate_pos'].numpy()
+    protein_pos = cached_data["protein_pos"].numpy()
+    mate_pos = cached_data["mate_pos"].numpy()
 
     if mate_pos.shape[0] == 0:
         return {
-            'num_mates': 0,
-            'min_dist': None,
-            'max_dist': None,
-            'mean_dist': None,
-            'within_cutoff': 0,
+            "num_mates": 0,
+            "min_dist": None,
+            "max_dist": None,
+            "mean_dist": None,
+            "within_cutoff": 0,
         }
 
     # Compute pairwise distances between ASU and mates
@@ -60,7 +58,9 @@ def analyze_mate_distances(cached_data, cutoff=5.0):
     n_asu = min(protein_pos.shape[0], 1000)
     n_mate = min(mate_pos.shape[0], 1000)
 
-    asu_sample = protein_pos[np.random.choice(protein_pos.shape[0], n_asu, replace=False)]
+    asu_sample = protein_pos[
+        np.random.choice(protein_pos.shape[0], n_asu, replace=False)
+    ]
     mate_sample = mate_pos[np.random.choice(mate_pos.shape[0], n_mate, replace=False)]
 
     # Compute distances
@@ -68,14 +68,16 @@ def analyze_mate_distances(cached_data, cutoff=5.0):
     min_dists_per_mate = dists.min(axis=0)
 
     return {
-        'num_mates': mate_pos.shape[0],
-        'num_asu': protein_pos.shape[0],
-        'min_dist': float(min_dists_per_mate.min()),
-        'max_dist': float(min_dists_per_mate.max()),
-        'mean_dist': float(min_dists_per_mate.mean()),
-        'median_dist': float(np.median(min_dists_per_mate)),
-        'within_cutoff': int((min_dists_per_mate <= cutoff).sum()),
-        'percent_within_cutoff': float((min_dists_per_mate <= cutoff).sum() / len(min_dists_per_mate) * 100),
+        "num_mates": mate_pos.shape[0],
+        "num_asu": protein_pos.shape[0],
+        "min_dist": float(min_dists_per_mate.min()),
+        "max_dist": float(min_dists_per_mate.max()),
+        "mean_dist": float(min_dists_per_mate.mean()),
+        "median_dist": float(np.median(min_dists_per_mate)),
+        "within_cutoff": int((min_dists_per_mate <= cutoff).sum()),
+        "percent_within_cutoff": float(
+            (min_dists_per_mate <= cutoff).sum() / len(min_dists_per_mate) * 100
+        ),
     }
 
 
@@ -85,45 +87,75 @@ def visualize_mates(cached_data, pdb_id, output_dir):
 
     Saves plot to output_dir.
     """
-    protein_pos = cached_data['protein_pos'].numpy()
-    mate_pos = cached_data['mate_pos'].numpy()
-    water_pos = cached_data['water_pos'].numpy()
+    protein_pos = cached_data["protein_pos"].numpy()
+    mate_pos = cached_data["mate_pos"].numpy()
+    water_pos = cached_data["water_pos"].numpy()
 
     fig = plt.figure(figsize=(12, 10))
-    ax = fig.add_subplot(111, projection='3d')
+    ax = fig.add_subplot(111, projection="3d")
 
     # Subsample for visualization
     n_asu_viz = min(protein_pos.shape[0], 500)
     n_mate_viz = min(mate_pos.shape[0], 500)
     n_water_viz = min(water_pos.shape[0], 100)
 
-    asu_viz = protein_pos[np.random.choice(protein_pos.shape[0], n_asu_viz, replace=False)]
+    asu_viz = protein_pos[
+        np.random.choice(protein_pos.shape[0], n_asu_viz, replace=False)
+    ]
     if mate_pos.shape[0] > 0:
-        mate_viz = mate_pos[np.random.choice(mate_pos.shape[0], n_mate_viz, replace=False)]
+        mate_viz = mate_pos[
+            np.random.choice(mate_pos.shape[0], n_mate_viz, replace=False)
+        ]
     else:
         mate_viz = np.zeros((0, 3))
 
     if water_pos.shape[0] > 0:
-        water_viz = water_pos[np.random.choice(water_pos.shape[0], n_water_viz, replace=False)]
+        water_viz = water_pos[
+            np.random.choice(water_pos.shape[0], n_water_viz, replace=False)
+        ]
     else:
         water_viz = np.zeros((0, 3))
 
     # Plot ASU (blue), mates (red), waters (cyan)
-    ax.scatter(asu_viz[:, 0], asu_viz[:, 1], asu_viz[:, 2],
-               c='blue', marker='o', s=20, alpha=0.6, label=f'ASU ({protein_pos.shape[0]} atoms)')
+    ax.scatter(
+        asu_viz[:, 0],
+        asu_viz[:, 1],
+        asu_viz[:, 2],
+        c="blue",
+        marker="o",
+        s=20,
+        alpha=0.6,
+        label=f"ASU ({protein_pos.shape[0]} atoms)",
+    )
 
     if mate_viz.shape[0] > 0:
-        ax.scatter(mate_viz[:, 0], mate_viz[:, 1], mate_viz[:, 2],
-                   c='red', marker='^', s=20, alpha=0.6, label=f'Mates ({mate_pos.shape[0]} atoms)')
+        ax.scatter(
+            mate_viz[:, 0],
+            mate_viz[:, 1],
+            mate_viz[:, 2],
+            c="red",
+            marker="^",
+            s=20,
+            alpha=0.6,
+            label=f"Mates ({mate_pos.shape[0]} atoms)",
+        )
 
     if water_viz.shape[0] > 0:
-        ax.scatter(water_viz[:, 0], water_viz[:, 1], water_viz[:, 2],
-                   c='cyan', marker='*', s=10, alpha=0.4, label=f'Waters ({water_pos.shape[0]})')
+        ax.scatter(
+            water_viz[:, 0],
+            water_viz[:, 1],
+            water_viz[:, 2],
+            c="cyan",
+            marker="*",
+            s=10,
+            alpha=0.4,
+            label=f"Waters ({water_pos.shape[0]})",
+        )
 
-    ax.set_xlabel('X (Å)')
-    ax.set_ylabel('Y (Å)')
-    ax.set_zlabel('Z (Å)')
-    ax.set_title(f'{pdb_id} - ASU + Symmetry Mates')
+    ax.set_xlabel("X (Å)")
+    ax.set_ylabel("Y (Å)")
+    ax.set_zlabel("Z (Å)")
+    ax.set_title(f"{pdb_id} - ASU + Symmetry Mates")
     ax.legend()
 
     # Equal aspect ratio
@@ -136,7 +168,7 @@ def visualize_mates(cached_data, pdb_id, output_dir):
     ax.set_zlim(mid_z - max_range, mid_z + max_range)
 
     output_path = Path(output_dir) / f"{pdb_id}_mates.png"
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close()
 
     logger.info(f"Saved visualization to {output_path}")
@@ -151,16 +183,16 @@ def compare_mate_detection(pdb_path, cache_path, cutoff=5.0):
     """
     # Load cached mates
     cached = torch.load(cache_path, weights_only=False)
-    cached_mate_pos = cached['mate_pos'].numpy()
+    cached_mate_pos = cached["mate_pos"].numpy()
 
     # Re-run PyMOL mate detection
     crystal_data = get_crystal_contacts_pymol(str(pdb_path), cutoff=cutoff)
-    fresh_mate_coords = crystal_data['mate_coords']
+    fresh_mate_coords = crystal_data["mate_coords"]
 
     return {
-        'cached_num_mates': cached_mate_pos.shape[0],
-        'fresh_num_mates': fresh_mate_coords.shape[0],
-        'match': cached_mate_pos.shape[0] == fresh_mate_coords.shape[0],
+        "cached_num_mates": cached_mate_pos.shape[0],
+        "fresh_num_mates": fresh_mate_coords.shape[0],
+        "match": cached_mate_pos.shape[0] == fresh_mate_coords.shape[0],
     }
 
 
@@ -168,14 +200,24 @@ def main():
     setup_logging_for_tqdm()
     parser = argparse.ArgumentParser(description="QC symmetry mates")
     parser.add_argument("--processed_dir", type=str, required=True)
-    parser.add_argument("--base_pdb_dir", type=str,
-                       default="/sb/wankowicz_lab/data/srivasv/pdb_redo_data")
-    parser.add_argument("--num_samples", type=int, default=10,
-                       help="Number of samples to analyze in detail")
+    parser.add_argument(
+        "--base_pdb_dir",
+        type=str,
+        default="/sb/wankowicz_lab/data/srivasv/pdb_redo_data",
+    )
+    parser.add_argument(
+        "--num_samples",
+        type=int,
+        default=10,
+        help="Number of samples to analyze in detail",
+    )
     parser.add_argument("--output_dir", type=str, default="qc_mates")
     parser.add_argument("--cutoff", type=float, default=5.0)
-    parser.add_argument("--recompute_mates", action="store_true",
-                       help="Re-run PyMOL and compare with cached mates")
+    parser.add_argument(
+        "--recompute_mates",
+        action="store_true",
+        help="Re-run PyMOL and compare with cached mates",
+    )
 
     args = parser.parse_args()
 
@@ -196,13 +238,13 @@ def main():
     # Statistics
     all_stats = []
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("SYMMETRY MATE QC ANALYSIS")
-    print("="*80)
+    print("=" * 80)
 
     for cache_path in tqdm(sample_files, desc="Analyzing samples"):
         cache_key = cache_path.stem
-        parts = cache_key.split('_')
+        parts = cache_key.split("_")
         pdb_id = parts[0]
 
         # Load cached data
@@ -210,7 +252,7 @@ def main():
 
         # Analyze mate distances
         stats = analyze_mate_distances(cached, cutoff=args.cutoff)
-        stats['pdb_id'] = cache_key
+        stats["pdb_id"] = cache_key
 
         # Visualize
         visualize_mates(cached, cache_key, output_dir)
@@ -227,41 +269,47 @@ def main():
     # Create summary report
     df = pd.DataFrame(all_stats)
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("SUMMARY STATISTICS")
-    print("="*80)
+    print("=" * 80)
 
     print(f"\nTotal structures analyzed: {len(df)}")
-    print(f"\nStructures with mates: {(df['num_mates'] > 0).sum()} ({(df['num_mates'] > 0).sum() / len(df) * 100:.1f}%)")
+    print(
+        f"\nStructures with mates: {(df['num_mates'] > 0).sum()} ({(df['num_mates'] > 0).sum() / len(df) * 100:.1f}%)"
+    )
     print(f"Structures without mates: {(df['num_mates'] == 0).sum()}")
 
-    if (df['num_mates'] > 0).any():
-        mate_df = df[df['num_mates'] > 0]
-        print(f"\nFor structures WITH mates:")
+    if (df["num_mates"] > 0).any():
+        mate_df = df[df["num_mates"] > 0]
+        print("\nFor structures WITH mates:")
         print(f"  Number of mate atoms: {mate_df['num_mates'].describe()}")
-        print(f"\n  Distance to nearest ASU atom (Å):")
+        print("\n  Distance to nearest ASU atom (Å):")
         print(f"    Min: {mate_df['min_dist'].min():.2f}")
         print(f"    Max: {mate_df['max_dist'].max():.2f}")
         print(f"    Mean: {mate_df['mean_dist'].mean():.2f}")
         print(f"    Median: {mate_df['median_dist'].median():.2f}")
-        print(f"\n  Percent of mates within cutoff ({args.cutoff}Å): {mate_df['percent_within_cutoff'].mean():.1f}%")
+        print(
+            f"\n  Percent of mates within cutoff ({args.cutoff}Å): {mate_df['percent_within_cutoff'].mean():.1f}%"
+        )
 
         # Check for issues
-        print(f"\n⚠️  POTENTIAL ISSUES:")
-        far_mates = mate_df[mate_df['min_dist'] > args.cutoff]
+        print("\n⚠️  POTENTIAL ISSUES:")
+        far_mates = mate_df[mate_df["min_dist"] > args.cutoff]
         if len(far_mates) > 0:
             print(f"  {len(far_mates)} structures have mates farther than cutoff:")
             for _, row in far_mates.iterrows():
                 print(f"    {row['pdb_id']}: min_dist = {row['min_dist']:.2f}Å")
 
-    if args.recompute_mates and 'match' in df.columns:
-        print(f"\n MATE RECOMPUTATION CHECK:")
+    if args.recompute_mates and "match" in df.columns:
+        print("\n MATE RECOMPUTATION CHECK:")
         print(f"  Matches cached: {df['match'].sum()} / {len(df)}")
-        if not df['match'].all():
-            print(f"  ⚠️  MISMATCHES FOUND:")
-            mismatches = df[~df['match']]
+        if not df["match"].all():
+            print("  ⚠️  MISMATCHES FOUND:")
+            mismatches = df[~df["match"]]
             for _, row in mismatches.iterrows():
-                print(f"    {row['pdb_id']}: cached={row['cached_num_mates']}, fresh={row['fresh_num_mates']}")
+                print(
+                    f"    {row['pdb_id']}: cached={row['cached_num_mates']}, fresh={row['fresh_num_mates']}"
+                )
 
     # Save report
     report_path = output_dir / "mate_qc_report.csv"
@@ -269,44 +317,46 @@ def main():
     logger.info(f"Full report saved to {report_path}")
 
     # Save summary plot
-    if (df['num_mates'] > 0).any():
+    if (df["num_mates"] > 0).any():
         fig, axes = plt.subplots(2, 2, figsize=(12, 10))
 
         # Number of mates histogram
-        axes[0, 0].hist(df['num_mates'], bins=30, edgecolor='black')
-        axes[0, 0].set_xlabel('Number of mate atoms')
-        axes[0, 0].set_ylabel('Count')
-        axes[0, 0].set_title('Distribution of Mate Atoms')
+        axes[0, 0].hist(df["num_mates"], bins=30, edgecolor="black")
+        axes[0, 0].set_xlabel("Number of mate atoms")
+        axes[0, 0].set_ylabel("Count")
+        axes[0, 0].set_title("Distribution of Mate Atoms")
 
         # Distance to ASU
-        mate_df = df[df['num_mates'] > 0]
-        axes[0, 1].hist(mate_df['min_dist'], bins=30, edgecolor='black')
-        axes[0, 1].axvline(args.cutoff, color='red', linestyle='--', label=f'Cutoff ({args.cutoff}Å)')
-        axes[0, 1].set_xlabel('Min distance to ASU (Å)')
-        axes[0, 1].set_ylabel('Count')
-        axes[0, 1].set_title('Mate-ASU Distances')
+        mate_df = df[df["num_mates"] > 0]
+        axes[0, 1].hist(mate_df["min_dist"], bins=30, edgecolor="black")
+        axes[0, 1].axvline(
+            args.cutoff, color="red", linestyle="--", label=f"Cutoff ({args.cutoff}Å)"
+        )
+        axes[0, 1].set_xlabel("Min distance to ASU (Å)")
+        axes[0, 1].set_ylabel("Count")
+        axes[0, 1].set_title("Mate-ASU Distances")
         axes[0, 1].legend()
 
         # Percent within cutoff
-        axes[1, 0].hist(mate_df['percent_within_cutoff'], bins=30, edgecolor='black')
-        axes[1, 0].set_xlabel('% mates within cutoff')
-        axes[1, 0].set_ylabel('Count')
-        axes[1, 0].set_title('Mates Within Cutoff Distribution')
+        axes[1, 0].hist(mate_df["percent_within_cutoff"], bins=30, edgecolor="black")
+        axes[1, 0].set_xlabel("% mates within cutoff")
+        axes[1, 0].set_ylabel("Count")
+        axes[1, 0].set_title("Mates Within Cutoff Distribution")
 
         # ASU vs Mate size
-        axes[1, 1].scatter(mate_df['num_asu'], mate_df['num_mates'], alpha=0.6)
-        axes[1, 1].set_xlabel('Number of ASU atoms')
-        axes[1, 1].set_ylabel('Number of mate atoms')
-        axes[1, 1].set_title('ASU Size vs Mate Size')
+        axes[1, 1].scatter(mate_df["num_asu"], mate_df["num_mates"], alpha=0.6)
+        axes[1, 1].set_xlabel("Number of ASU atoms")
+        axes[1, 1].set_ylabel("Number of mate atoms")
+        axes[1, 1].set_title("ASU Size vs Mate Size")
 
         plt.tight_layout()
         summary_plot_path = output_dir / "mate_qc_summary.png"
-        plt.savefig(summary_plot_path, dpi=150, bbox_inches='tight')
+        plt.savefig(summary_plot_path, dpi=150, bbox_inches="tight")
         logger.info(f"Summary plot saved to {summary_plot_path}")
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("QC COMPLETE")
-    print("="*80)
+    print("=" * 80)
 
 
 if __name__ == "__main__":

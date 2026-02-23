@@ -23,14 +23,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # For parsing PDB metadata
-import biotite.structure as bts
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
 from biotite.structure.io.pdb import PDBFile, get_structure
 from loguru import logger
-from mpl_toolkits.mplot3d import Axes3D
 from scipy.spatial import cKDTree
 from tqdm import tqdm
 
@@ -46,10 +44,10 @@ def analyze_water_protein_distances(protein_pos, water_pos):
     """
     if water_pos.shape[0] == 0:
         return {
-            'num_waters': 0,
-            'min_dist': None,
-            'max_dist': None,
-            'mean_dist': None,
+            "num_waters": 0,
+            "min_dist": None,
+            "max_dist": None,
+            "mean_dist": None,
         }
 
     # Build KD-tree for protein
@@ -59,15 +57,15 @@ def analyze_water_protein_distances(protein_pos, water_pos):
     dists, _ = tree.query(water_pos, k=1)
 
     return {
-        'num_waters': water_pos.shape[0],
-        'min_dist': float(dists.min()),
-        'max_dist': float(dists.max()),
-        'mean_dist': float(dists.mean()),
-        'median_dist': float(np.median(dists)),
-        'std_dist': float(dists.std()),
-        'within_3A': int((dists <= 3.0).sum()),
-        'within_4A': int((dists <= 4.0).sum()),
-        'beyond_6A': int((dists > 6.0).sum()),
+        "num_waters": water_pos.shape[0],
+        "min_dist": float(dists.min()),
+        "max_dist": float(dists.max()),
+        "mean_dist": float(dists.mean()),
+        "median_dist": float(np.median(dists)),
+        "std_dist": float(dists.std()),
+        "within_3A": int((dists <= 3.0).sum()),
+        "within_4A": int((dists <= 4.0).sum()),
+        "beyond_6A": int((dists > 6.0).sum()),
     }
 
 
@@ -81,7 +79,7 @@ def analyze_water_clustering(water_pos, cluster_threshold=3.5):
         dict with clustering statistics
     """
     if water_pos.shape[0] == 0:
-        return {'num_clusters': 0, 'largest_cluster': 0}
+        return {"num_clusters": 0, "largest_cluster": 0}
 
     # Build KD-tree for waters
     tree = cKDTree(water_pos)
@@ -91,9 +89,9 @@ def analyze_water_clustering(water_pos, cluster_threshold=3.5):
     neighbor_counts = [len(n) - 1 for n in neighbor_counts]  # -1 to exclude self
 
     return {
-        'isolated_waters': int((np.array(neighbor_counts) == 0).sum()),
-        'mean_neighbors': float(np.mean(neighbor_counts)),
-        'max_neighbors': int(np.max(neighbor_counts)),
+        "isolated_waters": int((np.array(neighbor_counts) == 0).sum()),
+        "mean_neighbors": float(np.mean(neighbor_counts)),
+        "max_neighbors": int(np.max(neighbor_counts)),
     }
 
 
@@ -105,9 +103,9 @@ def detect_water_issues(protein_pos, water_pos):
         dict with issue counts
     """
     issues = {
-        'too_far': [],     # Waters > 6Å from protein
-        'too_close': [],   # Waters < 2.0Å from protein
-        'overlapping': [], # Waters < 1.5Å from each other
+        "too_far": [],  # Waters > 6Å from protein
+        "too_close": [],  # Waters < 2.0Å from protein
+        "overlapping": [],  # Waters < 1.5Å from each other
     }
 
     if water_pos.shape[0] == 0:
@@ -120,14 +118,14 @@ def detect_water_issues(protein_pos, water_pos):
     too_far_idx = np.where(dists > 6.0)[0]
     too_close_idx = np.where(dists < 2.0)[0]
 
-    issues['too_far'] = too_far_idx.tolist()
-    issues['too_close'] = too_close_idx.tolist()
+    issues["too_far"] = too_far_idx.tolist()
+    issues["too_close"] = too_close_idx.tolist()
 
     # Check water-water distances
     if water_pos.shape[0] > 1:
         water_tree = cKDTree(water_pos)
-        pairs = water_tree.query_pairs(r=1.5, output_type='ndarray')
-        issues['overlapping'] = pairs.tolist()
+        pairs = water_tree.query_pairs(r=1.5, output_type="ndarray")
+        issues["overlapping"] = pairs.tolist()
 
     return issues
 
@@ -144,7 +142,9 @@ def get_water_metadata(pdb_path, chain_filter=None):
         atoms = get_structure(pdb_file, model=1, altloc="occupancy")
 
         if chain_filter is not None:
-            mask = np.isin(atoms.chain_id, np.array(chain_filter, dtype=atoms.chain_id.dtype))
+            mask = np.isin(
+                atoms.chain_id, np.array(chain_filter, dtype=atoms.chain_id.dtype)
+            )
             atoms = atoms[mask]
 
         # Filter for waters
@@ -155,9 +155,9 @@ def get_water_metadata(pdb_path, chain_filter=None):
             return None
 
         return {
-            'b_factors': water_atoms.b_factor,
-            'occupancy': water_atoms.occupancy,
-            'num_waters': len(water_atoms),
+            "b_factors": water_atoms.b_factor,
+            "occupancy": water_atoms.occupancy,
+            "num_waters": len(water_atoms),
         }
     except Exception as e:
         logger.warning(f"Could not parse PDB metadata: {e}")
@@ -171,59 +171,99 @@ def visualize_waters(cached_data, pdb_id, output_dir, show_issues=None):
     Args:
         show_issues: dict from detect_water_issues()
     """
-    protein_pos = cached_data['protein_pos'].numpy()
-    water_pos = cached_data['water_pos'].numpy()
+    protein_pos = cached_data["protein_pos"].numpy()
+    water_pos = cached_data["water_pos"].numpy()
 
     if water_pos.shape[0] == 0:
         logger.info(f"Skipping {pdb_id}: no waters")
         return
 
     fig = plt.figure(figsize=(14, 10))
-    ax = fig.add_subplot(111, projection='3d')
+    ax = fig.add_subplot(111, projection="3d")
 
     # Subsample protein for visualization
     n_protein_viz = min(protein_pos.shape[0], 500)
-    protein_viz = protein_pos[np.random.choice(protein_pos.shape[0], n_protein_viz, replace=False)]
+    protein_viz = protein_pos[
+        np.random.choice(protein_pos.shape[0], n_protein_viz, replace=False)
+    ]
 
     # Plot protein (gray)
-    ax.scatter(protein_viz[:, 0], protein_viz[:, 1], protein_viz[:, 2],
-               c='gray', marker='o', s=1, alpha=0.3, label='Protein')
+    ax.scatter(
+        protein_viz[:, 0],
+        protein_viz[:, 1],
+        protein_viz[:, 2],
+        c="gray",
+        marker="o",
+        s=1,
+        alpha=0.3,
+        label="Protein",
+    )
 
     # Plot waters
     if show_issues is not None:
         # Color waters by issue type
-        normal_idx = set(range(water_pos.shape[0])) - set(show_issues['too_far']) - set(show_issues['too_close'])
+        normal_idx = (
+            set(range(water_pos.shape[0]))
+            - set(show_issues["too_far"])
+            - set(show_issues["too_close"])
+        )
         normal_idx = list(normal_idx)
 
         if normal_idx:
-            ax.scatter(water_pos[normal_idx, 0], water_pos[normal_idx, 1], water_pos[normal_idx, 2],
-                       c='cyan', marker='*', s=50, alpha=0.8, label=f'Normal waters ({len(normal_idx)})')
+            ax.scatter(
+                water_pos[normal_idx, 0],
+                water_pos[normal_idx, 1],
+                water_pos[normal_idx, 2],
+                c="cyan",
+                marker="*",
+                s=50,
+                alpha=0.8,
+                label=f"Normal waters ({len(normal_idx)})",
+            )
 
-        if show_issues['too_far']:
-            ax.scatter(water_pos[show_issues['too_far'], 0],
-                       water_pos[show_issues['too_far'], 1],
-                       water_pos[show_issues['too_far'], 2],
-                       c='red', marker='X', s=100, alpha=1.0,
-                       label=f'Too far (>{6.0}Å) ({len(show_issues["too_far"])})')
+        if show_issues["too_far"]:
+            ax.scatter(
+                water_pos[show_issues["too_far"], 0],
+                water_pos[show_issues["too_far"], 1],
+                water_pos[show_issues["too_far"], 2],
+                c="red",
+                marker="X",
+                s=100,
+                alpha=1.0,
+                label=f"Too far (>{6.0}Å) ({len(show_issues['too_far'])})",
+            )
 
-        if show_issues['too_close']:
-            ax.scatter(water_pos[show_issues['too_close'], 0],
-                       water_pos[show_issues['too_close'], 1],
-                       water_pos[show_issues['too_close'], 2],
-                       c='orange', marker='D', s=100, alpha=1.0,
-                       label=f'Too close (<2Å) ({len(show_issues["too_close"])})')
+        if show_issues["too_close"]:
+            ax.scatter(
+                water_pos[show_issues["too_close"], 0],
+                water_pos[show_issues["too_close"], 1],
+                water_pos[show_issues["too_close"], 2],
+                c="orange",
+                marker="D",
+                s=100,
+                alpha=1.0,
+                label=f"Too close (<2Å) ({len(show_issues['too_close'])})",
+            )
     else:
-        ax.scatter(water_pos[:, 0], water_pos[:, 1], water_pos[:, 2],
-                   c='cyan', marker='*', s=50, alpha=0.8, label=f'Waters ({water_pos.shape[0]})')
+        ax.scatter(
+            water_pos[:, 0],
+            water_pos[:, 1],
+            water_pos[:, 2],
+            c="cyan",
+            marker="*",
+            s=50,
+            alpha=0.8,
+            label=f"Waters ({water_pos.shape[0]})",
+        )
 
-    ax.set_xlabel('X (Å)')
-    ax.set_ylabel('Y (Å)')
-    ax.set_zlabel('Z (Å)')
-    ax.set_title(f'{pdb_id} - Water Placement QC')
+    ax.set_xlabel("X (Å)")
+    ax.set_ylabel("Y (Å)")
+    ax.set_zlabel("Z (Å)")
+    ax.set_title(f"{pdb_id} - Water Placement QC")
     ax.legend()
 
     output_path = Path(output_dir) / f"{pdb_id}_waters.png"
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close()
 
     logger.info(f"Saved visualization to {output_path}")
@@ -233,15 +273,25 @@ def main():
     setup_logging_for_tqdm()
     parser = argparse.ArgumentParser(description="QC water molecules")
     parser.add_argument("--processed_dir", type=str, required=True)
-    parser.add_argument("--base_pdb_dir", type=str,
-                       default="/sb/wankowicz_lab/data/srivasv/pdb_redo_data")
-    parser.add_argument("--num_samples", type=int, default=10,
-                       help="Number of samples to visualize")
+    parser.add_argument(
+        "--base_pdb_dir",
+        type=str,
+        default="/sb/wankowicz_lab/data/srivasv/pdb_redo_data",
+    )
+    parser.add_argument(
+        "--num_samples", type=int, default=10, help="Number of samples to visualize"
+    )
     parser.add_argument("--output_dir", type=str, default="qc_waters")
-    parser.add_argument("--analyze_all", action="store_true",
-                       help="Analyze all cache files (not just samples)")
-    parser.add_argument("--check_pdb_metadata", action="store_true",
-                       help="Parse PDB files for B-factor/occupancy (slower)")
+    parser.add_argument(
+        "--analyze_all",
+        action="store_true",
+        help="Analyze all cache files (not just samples)",
+    )
+    parser.add_argument(
+        "--check_pdb_metadata",
+        action="store_true",
+        help="Parse PDB files for B-factor/occupancy (slower)",
+    )
 
     args = parser.parse_args()
 
@@ -269,25 +319,25 @@ def main():
     all_stats = []
     all_issues = []
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("WATER MOLECULE QC ANALYSIS")
-    print("="*80)
+    print("=" * 80)
 
     for cache_path in tqdm(analyze_files, desc="Analyzing waters"):
         cache_key = cache_path.stem
-        parts = cache_key.split('_')
+        parts = cache_key.split("_")
         pdb_id = parts[0]
         chain_id = parts[-1] if len(parts) >= 3 else None
 
         # Load cached data
         cached = torch.load(cache_path, weights_only=False)
 
-        protein_pos = cached['protein_pos'].numpy()
-        water_pos = cached['water_pos'].numpy()
+        protein_pos = cached["protein_pos"].numpy()
+        water_pos = cached["water_pos"].numpy()
 
         # Analyze distances
         dist_stats = analyze_water_protein_distances(protein_pos, water_pos)
-        dist_stats['pdb_id'] = cache_key
+        dist_stats["pdb_id"] = cache_key
 
         # Analyze clustering
         cluster_stats = analyze_water_clustering(water_pos)
@@ -295,25 +345,29 @@ def main():
 
         # Detect issues
         issues = detect_water_issues(protein_pos, water_pos)
-        dist_stats['num_too_far'] = len(issues['too_far'])
-        dist_stats['num_too_close'] = len(issues['too_close'])
-        dist_stats['num_overlapping'] = len(issues['overlapping'])
+        dist_stats["num_too_far"] = len(issues["too_far"])
+        dist_stats["num_too_close"] = len(issues["too_close"])
+        dist_stats["num_overlapping"] = len(issues["overlapping"])
 
         # Get PDB metadata if requested
         if args.check_pdb_metadata and water_pos.shape[0] > 0:
             pdb_path = Path(args.base_pdb_dir) / pdb_id / f"{pdb_id}_final.pdb"
             if pdb_path.exists():
-                metadata = get_water_metadata(str(pdb_path), chain_filter=[chain_id] if chain_id else None)
+                metadata = get_water_metadata(
+                    str(pdb_path), chain_filter=[chain_id] if chain_id else None
+                )
                 if metadata is not None:
-                    dist_stats['mean_b_factor'] = float(metadata['b_factors'].mean())
-                    dist_stats['median_b_factor'] = float(np.median(metadata['b_factors']))
-                    dist_stats['mean_occupancy'] = float(metadata['occupancy'].mean())
+                    dist_stats["mean_b_factor"] = float(metadata["b_factors"].mean())
+                    dist_stats["median_b_factor"] = float(
+                        np.median(metadata["b_factors"])
+                    )
+                    dist_stats["mean_occupancy"] = float(metadata["occupancy"].mean())
 
         all_stats.append(dist_stats)
 
         # Store issues for problematic structures
-        if dist_stats['num_too_far'] > 0 or dist_stats['num_too_close'] > 0:
-            all_issues.append({'pdb_id': cache_key, **issues})
+        if dist_stats["num_too_far"] > 0 or dist_stats["num_too_close"] > 0:
+            all_issues.append({"pdb_id": cache_key, **issues})
 
         # Visualize samples
         if cache_path in viz_files:
@@ -322,54 +376,78 @@ def main():
     # Create summary report
     df = pd.DataFrame(all_stats)
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("SUMMARY STATISTICS")
-    print("="*80)
+    print("=" * 80)
 
     print(f"\nTotal structures analyzed: {len(df)}")
-    print(f"Structures with waters: {(df['num_waters'] > 0).sum()} ({(df['num_waters'] > 0).sum() / len(df) * 100:.1f}%)")
+    print(
+        f"Structures with waters: {(df['num_waters'] > 0).sum()} ({(df['num_waters'] > 0).sum() / len(df) * 100:.1f}%)"
+    )
     print(f"Structures without waters: {(df['num_waters'] == 0).sum()}")
 
-    if (df['num_waters'] > 0).any():
-        water_df = df[df['num_waters'] > 0]
+    if (df["num_waters"] > 0).any():
+        water_df = df[df["num_waters"] > 0]
 
-        print(f"\nFor structures WITH waters:")
+        print("\nFor structures WITH waters:")
         print(f"  Number of waters: {water_df['num_waters'].describe()}")
 
-        print(f"\n  Distance to nearest protein atom (Å):")
+        print("\n  Distance to nearest protein atom (Å):")
         print(f"    Min: {water_df['min_dist'].min():.2f}")
         print(f"    Max: {water_df['max_dist'].max():.2f}")
-        print(f"    Mean: {water_df['mean_dist'].mean():.2f} ± {water_df['std_dist'].mean():.2f}")
+        print(
+            f"    Mean: {water_df['mean_dist'].mean():.2f} ± {water_df['std_dist'].mean():.2f}"
+        )
         print(f"    Median: {water_df['median_dist'].median():.2f}")
 
-        print(f"\n  Water placement:")
-        print(f"    Within 3Å: {water_df['within_3A'].sum()} ({water_df['within_3A'].sum() / water_df['num_waters'].sum() * 100:.1f}% of all waters)")
-        print(f"    Within 4Å: {water_df['within_4A'].sum()} ({water_df['within_4A'].sum() / water_df['num_waters'].sum() * 100:.1f}%)")
-        print(f"    Beyond 6Å: {water_df['beyond_6A'].sum()} ({water_df['beyond_6A'].sum() / water_df['num_waters'].sum() * 100:.1f}%)")
+        print("\n  Water placement:")
+        print(
+            f"    Within 3Å: {water_df['within_3A'].sum()} ({water_df['within_3A'].sum() / water_df['num_waters'].sum() * 100:.1f}% of all waters)"
+        )
+        print(
+            f"    Within 4Å: {water_df['within_4A'].sum()} ({water_df['within_4A'].sum() / water_df['num_waters'].sum() * 100:.1f}%)"
+        )
+        print(
+            f"    Beyond 6Å: {water_df['beyond_6A'].sum()} ({water_df['beyond_6A'].sum() / water_df['num_waters'].sum() * 100:.1f}%)"
+        )
 
-        print(f"\n  Water clustering:")
-        print(f"    Isolated waters (no neighbors within 3.5Å): {water_df['isolated_waters'].sum()}")
+        print("\n  Water clustering:")
+        print(
+            f"    Isolated waters (no neighbors within 3.5Å): {water_df['isolated_waters'].sum()}"
+        )
         print(f"    Mean neighbors per water: {water_df['mean_neighbors'].mean():.2f}")
         print(f"    Max neighbors: {water_df['max_neighbors'].max()}")
 
-        if args.check_pdb_metadata and 'mean_b_factor' in water_df.columns:
-            print(f"\n  B-factors:")
+        if args.check_pdb_metadata and "mean_b_factor" in water_df.columns:
+            print("\n  B-factors:")
             print(f"    Mean: {water_df['mean_b_factor'].mean():.2f}")
             print(f"    Median: {water_df['median_b_factor'].median():.2f}")
-            print(f"\n  Occupancy:")
+            print("\n  Occupancy:")
             print(f"    Mean: {water_df['mean_occupancy'].mean():.3f}")
 
         # Check for issues
-        print(f"\n⚠️  POTENTIAL ISSUES:")
-        print(f"  Structures with waters too far (>6Å): {(water_df['num_too_far'] > 0).sum()}")
-        print(f"  Structures with waters too close (<2Å): {(water_df['num_too_close'] > 0).sum()}")
-        print(f"  Structures with overlapping waters (<1.5Å): {(water_df['num_overlapping'] > 0).sum()}")
+        print("\n⚠️  POTENTIAL ISSUES:")
+        print(
+            f"  Structures with waters too far (>6Å): {(water_df['num_too_far'] > 0).sum()}"
+        )
+        print(
+            f"  Structures with waters too close (<2Å): {(water_df['num_too_close'] > 0).sum()}"
+        )
+        print(
+            f"  Structures with overlapping waters (<1.5Å): {(water_df['num_overlapping'] > 0).sum()}"
+        )
 
         if len(all_issues) > 0:
-            print(f"\n  Top problematic structures:")
-            issue_counts = [(issue['pdb_id'],
-                           len(issue['too_far']) + len(issue['too_close']) + len(issue['overlapping']))
-                          for issue in all_issues]
+            print("\n  Top problematic structures:")
+            issue_counts = [
+                (
+                    issue["pdb_id"],
+                    len(issue["too_far"])
+                    + len(issue["too_close"])
+                    + len(issue["overlapping"]),
+                )
+                for issue in all_issues
+            ]
             issue_counts.sort(key=lambda x: x[1], reverse=True)
             for pdb_id, count in issue_counts[:10]:
                 print(f"    {pdb_id}: {count} issues")
@@ -380,67 +458,79 @@ def main():
     logger.info(f"Full report saved to {report_path}")
 
     # Save summary plots
-    if (df['num_waters'] > 0).any():
-        water_df = df[df['num_waters'] > 0]
+    if (df["num_waters"] > 0).any():
+        water_df = df[df["num_waters"] > 0]
 
         fig, axes = plt.subplots(2, 3, figsize=(15, 10))
 
         # Number of waters
-        axes[0, 0].hist(water_df['num_waters'], bins=30, edgecolor='black')
-        axes[0, 0].set_xlabel('Number of waters')
-        axes[0, 0].set_ylabel('Count')
-        axes[0, 0].set_title('Distribution of Water Count')
+        axes[0, 0].hist(water_df["num_waters"], bins=30, edgecolor="black")
+        axes[0, 0].set_xlabel("Number of waters")
+        axes[0, 0].set_ylabel("Count")
+        axes[0, 0].set_title("Distribution of Water Count")
 
         # Distance to protein
-        axes[0, 1].hist(water_df['mean_dist'], bins=30, edgecolor='black')
-        axes[0, 1].axvline(3.0, color='green', linestyle='--', label='3Å (H-bond)')
-        axes[0, 1].axvline(6.0, color='red', linestyle='--', label='6Å (far)')
-        axes[0, 1].set_xlabel('Mean distance to protein (Å)')
-        axes[0, 1].set_ylabel('Count')
-        axes[0, 1].set_title('Water-Protein Distances')
+        axes[0, 1].hist(water_df["mean_dist"], bins=30, edgecolor="black")
+        axes[0, 1].axvline(3.0, color="green", linestyle="--", label="3Å (H-bond)")
+        axes[0, 1].axvline(6.0, color="red", linestyle="--", label="6Å (far)")
+        axes[0, 1].set_xlabel("Mean distance to protein (Å)")
+        axes[0, 1].set_ylabel("Count")
+        axes[0, 1].set_title("Water-Protein Distances")
         axes[0, 1].legend()
 
         # Isolated waters
-        axes[0, 2].hist(water_df['isolated_waters'], bins=20, edgecolor='black')
-        axes[0, 2].set_xlabel('Number of isolated waters')
-        axes[0, 2].set_ylabel('Count')
-        axes[0, 2].set_title('Isolated Waters per Structure')
+        axes[0, 2].hist(water_df["isolated_waters"], bins=20, edgecolor="black")
+        axes[0, 2].set_xlabel("Number of isolated waters")
+        axes[0, 2].set_ylabel("Count")
+        axes[0, 2].set_title("Isolated Waters per Structure")
 
         # Mean neighbors
-        axes[1, 0].hist(water_df['mean_neighbors'], bins=30, edgecolor='black')
-        axes[1, 0].set_xlabel('Mean neighbors per water')
-        axes[1, 0].set_ylabel('Count')
-        axes[1, 0].set_title('Water Clustering')
+        axes[1, 0].hist(water_df["mean_neighbors"], bins=30, edgecolor="black")
+        axes[1, 0].set_xlabel("Mean neighbors per water")
+        axes[1, 0].set_ylabel("Count")
+        axes[1, 0].set_title("Water Clustering")
 
         # Issues
-        issue_data = [water_df['num_too_far'].sum(),
-                     water_df['num_too_close'].sum(),
-                     water_df['num_overlapping'].sum()]
-        axes[1, 1].bar(['Too far\n(>6Å)', 'Too close\n(<2Å)', 'Overlapping\n(<1.5Å)'],
-                      issue_data, color=['red', 'orange', 'purple'])
-        axes[1, 1].set_ylabel('Total count')
-        axes[1, 1].set_title('Water Placement Issues')
+        issue_data = [
+            water_df["num_too_far"].sum(),
+            water_df["num_too_close"].sum(),
+            water_df["num_overlapping"].sum(),
+        ]
+        axes[1, 1].bar(
+            ["Too far\n(>6Å)", "Too close\n(<2Å)", "Overlapping\n(<1.5Å)"],
+            issue_data,
+            color=["red", "orange", "purple"],
+        )
+        axes[1, 1].set_ylabel("Total count")
+        axes[1, 1].set_title("Water Placement Issues")
 
         # B-factors if available
-        if 'mean_b_factor' in water_df.columns:
-            axes[1, 2].hist(water_df['mean_b_factor'].dropna(), bins=30, edgecolor='black')
-            axes[1, 2].set_xlabel('Mean B-factor')
-            axes[1, 2].set_ylabel('Count')
-            axes[1, 2].set_title('Water B-factor Distribution')
+        if "mean_b_factor" in water_df.columns:
+            axes[1, 2].hist(
+                water_df["mean_b_factor"].dropna(), bins=30, edgecolor="black"
+            )
+            axes[1, 2].set_xlabel("Mean B-factor")
+            axes[1, 2].set_ylabel("Count")
+            axes[1, 2].set_title("Water B-factor Distribution")
         else:
-            axes[1, 2].text(0.5, 0.5, 'B-factors not analyzed\n(use --check_pdb_metadata)',
-                          ha='center', va='center')
+            axes[1, 2].text(
+                0.5,
+                0.5,
+                "B-factors not analyzed\n(use --check_pdb_metadata)",
+                ha="center",
+                va="center",
+            )
             axes[1, 2].set_xticks([])
             axes[1, 2].set_yticks([])
 
         plt.tight_layout()
         summary_plot_path = output_dir / "water_qc_summary.png"
-        plt.savefig(summary_plot_path, dpi=150, bbox_inches='tight')
+        plt.savefig(summary_plot_path, dpi=150, bbox_inches="tight")
         logger.info(f"Summary plot saved to {summary_plot_path}")
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("QC COMPLETE")
-    print("="*80)
+    print("=" * 80)
 
 
 if __name__ == "__main__":

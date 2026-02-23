@@ -1,6 +1,4 @@
 # esm_encoder.py
-from __future__ import annotations
-
 """
 ESM embeddings wrapper.
 
@@ -10,13 +8,15 @@ GVP message-passing layers (including protein-protein edges) provide all
 geometric processing.
 """
 
+from __future__ import annotations
+
 import torch
 from torch_geometric.data import HeteroData
 
 from src.encoder_base import BaseProteinEncoder, register_encoder
 
 
-@register_encoder('esm')
+@register_encoder("esm")
 class ESMEncoder(BaseProteinEncoder):
     """
     ESM encoder that reads cached embeddings from data.
@@ -39,11 +39,11 @@ class ESMEncoder(BaseProteinEncoder):
     @property
     def output_dims(self) -> tuple[int, int]:
         """Return (esm_dim, 0) — scalars only."""
-        return (self._esm_dim, 0)
+        return self._esm_dim, 0
 
     @property
     def encoder_type(self) -> str:
-        return 'esm'
+        return "esm"
 
     def forward(self, data: HeteroData) -> tuple[torch.Tensor, torch.Tensor, None]:
         """
@@ -57,14 +57,14 @@ class ESMEncoder(BaseProteinEncoder):
             V: (N, 0, 3)    — empty vector features
             pp_edge_attr: None — ESM doesn't process edges
         """
-        if 'esm_embedding' not in data['protein']:
+        if "esm_embedding" not in data["protein"]:
             raise NotImplementedError(
                 "ESM encoder requires cached embeddings. "
                 "Please provide pre-computed esm_embedding in data['protein']. "
                 "Run scripts/generate_esm_embeddings.py first."
             )
 
-        embeddings = data['protein'].esm_embedding
+        embeddings = data["protein"].esm_embedding
         V = embeddings.new_empty(embeddings.size(0), 0, 3)
         return embeddings, V, None
 
@@ -81,5 +81,5 @@ class ESMEncoder(BaseProteinEncoder):
         Returns:
             Instantiated ESMEncoder
         """
-        esm_dim = config.get('esm_dim', 1536)
+        esm_dim = config.get("esm_dim", 1536)
         return cls(esm_dim=esm_dim).to(device)

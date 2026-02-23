@@ -85,7 +85,7 @@ def parse_args():
         type=str,
         default=None,
         help="Geometry cache name to use (e.g., 'geometry' or 'geometry_unfiltered'). "
-             "Overrides the model's config if specified. Use this to evaluate against a specific ground truth.",
+        "Overrides the model's config if specified. Use this to evaluate against a specific ground truth.",
     )
 
     # checkpoint arguments
@@ -147,7 +147,7 @@ def parse_args():
         type=float,
         default=None,
         help="Sample num_residues * water_ratio waters instead of using ground truth count. "
-             "E.g., --water_ratio 0.5 samples 50 waters for a 100-residue protein.",
+        "E.g., --water_ratio 0.5 samples 50 waters for a 100-residue protein.",
     )
 
     args = p.parse_args()
@@ -196,9 +196,12 @@ def build_model_from_config(config: dict, device: torch.device) -> nn.Module:
         encoder=encoder,
         hidden_dims=(config.get("hidden_s") or 256, config.get("hidden_v") or 64),
         edge_scalar_dim=config.get("edge_scalar_dim") or NUM_RBF,
-        layers=config.get("flow_layers") or 5,
-        k_pw=config.get("k_pw") or 24,
-        k_ww=config.get("k_ww") or 24,
+        layers=config.get("flow_layers") or 3,
+        drop_rate=config.get("drop_rate", 0.1),
+        n_message_gvps=config.get("n_message_gvps", 2),
+        n_update_gvps=config.get("n_update_gvps", 2),
+        k_pw=config.get("k_pw") or 16,
+        k_ww=config.get("k_ww") or 16,
     ).to(device)
 
     return model
@@ -263,13 +266,15 @@ def run_inference_batch(
         # build result dicts similar to rk4
         results = []
         for graph, water_pred in zip(graphs, water_preds):
-            results.append({
-                "protein_pos": graph["protein"].pos.numpy(),
-                "water_true": graph["water"].pos.numpy(),
-                "water_pred": water_pred,
-                "trajectory": None,
-                "pdb_id": getattr(graph, 'pdb_id', None),
-            })
+            results.append(
+                {
+                    "protein_pos": graph["protein"].pos.numpy(),
+                    "water_true": graph["water"].pos.numpy(),
+                    "water_pred": water_pred,
+                    "trajectory": None,
+                    "pdb_id": getattr(graph, "pdb_id", None),
+                }
+            )
 
     return results
 
@@ -344,7 +349,9 @@ def main():
     encoder_type = config.get("encoder_type", "gvp")
 
     # Use --geometry_cache if provided, otherwise use config's geometry_cache_name
-    geometry_cache_name = args.geometry_cache or config.get("geometry_cache_name", "geometry")
+    geometry_cache_name = args.geometry_cache or config.get(
+        "geometry_cache_name", "geometry"
+    )
 
     dataset = ProteinWaterDataset(
         pdb_list_file=args.pdb_list,
@@ -365,7 +372,9 @@ def main():
     logger.info(f"Threshold for metrics: {args.threshold}Å")
     logger.info(f"Batch size: {args.batch_size}")
     if args.water_ratio is not None:
-        logger.info(f"Water ratio: {args.water_ratio} (sampling num_residues × {args.water_ratio} waters)")
+        logger.info(
+            f"Water ratio: {args.water_ratio} (sampling num_residues × {args.water_ratio} waters)"
+        )
     else:
         logger.info("Water ratio: None (using ground truth water count)")
     logger.info("-" * 60)
@@ -456,8 +465,12 @@ def main():
             "avg_recall": float(np.mean([m["recall"] for m in all_metrics])),
             "avg_f1": float(np.mean([m["f1"] for m in all_metrics])),
             "avg_auc_pr": float(np.mean([m["auc_pr"] for m in all_metrics])),
-            "avg_n_waters_true": float(np.mean([m["n_waters_true"] for m in all_metrics])),
-            "avg_n_waters_pred": float(np.mean([m["n_waters_pred"] for m in all_metrics])),
+            "avg_n_waters_true": float(
+                np.mean([m["n_waters_true"] for m in all_metrics])
+            ),
+            "avg_n_waters_pred": float(
+                np.mean([m["n_waters_pred"] for m in all_metrics])
+            ),
         }
 
         print("\n" + "=" * 60)
@@ -466,7 +479,9 @@ def main():
         print(f"  Samples processed: {summary['n_samples']}")
         print(f"  Avg waters (true):  {summary['avg_n_waters_true']:.1f}")
         print(f"  Avg waters (pred):  {summary['avg_n_waters_pred']:.1f}")
-        print(f"  Avg RMSD:      {summary['avg_rmsd']:.3f} ± {summary['std_rmsd']:.3f} Å")
+        print(
+            f"  Avg RMSD:      {summary['avg_rmsd']:.3f} ± {summary['std_rmsd']:.3f} Å"
+        )
         print(f"  Avg Precision: {summary['avg_precision']:.3%}")
         print(f"  Avg Recall:    {summary['avg_recall']:.3%}")
         print(f"  Avg F1:        {summary['avg_f1']:.4f}")

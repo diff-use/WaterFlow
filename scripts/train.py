@@ -2,7 +2,6 @@
 
 import argparse
 import json
-import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -54,12 +53,28 @@ def parse_args():
             "embeddings in <processed_dir>/<encoder_name>."
         ),
     )
-    p.add_argument("--base_pdb_dir", type=str, default="/sb/wankowicz_lab/data/srivasv/pdb_redo_data")
-    p.add_argument("--geometry_cache_name", type=str, default="geometry",
-                   help="Base name for geometry cache directory (e.g., 'geometry' -> geometry/ or geometry_unfiltered/)")
-    p.add_argument("--include_mates", action="store_true", help="Include symmetry mate atoms as protein nodes")
-    p.add_argument("--duplicate_single_sample", type=int, default=1,
-                   help="If training on single sample, duplicate it N times for more gradient updates per epoch")
+    p.add_argument(
+        "--base_pdb_dir",
+        type=str,
+        default="/sb/wankowicz_lab/data/srivasv/pdb_redo_data",
+    )
+    p.add_argument(
+        "--geometry_cache_name",
+        type=str,
+        default="geometry",
+        help="Base name for geometry cache directory (e.g., 'geometry' -> geometry/ or geometry_unfiltered/)",
+    )
+    p.add_argument(
+        "--include_mates",
+        action="store_true",
+        help="Include symmetry mate atoms as protein nodes",
+    )
+    p.add_argument(
+        "--duplicate_single_sample",
+        type=int,
+        default=1,
+        help="If training on single sample, duplicate it N times for more gradient updates per epoch",
+    )
     p.add_argument(
         "--edia_dir",
         type=str,
@@ -71,7 +86,8 @@ def parse_args():
     )
 
     # dataset quality checks (always on)
-    p.add_argument("--max_com_dist",
+    p.add_argument(
+        "--max_com_dist",
         type=float,
         default=25.0,
         help="Quality: max allowed protein-water center-of-mass distance (Angstroms).",
@@ -141,18 +157,48 @@ def parse_args():
     p.set_defaults(filter_by_distance=True, filter_by_edia=True, filter_by_bfactor=True)
 
     # model
-    p.add_argument("--encoder_type", type=str, default="gvp", choices=["gvp", "slae", "esm"])
+    p.add_argument(
+        "--encoder_type", type=str, default="gvp", choices=["gvp", "slae", "esm"]
+    )
     p.add_argument("--encoder_ckpt", type=str, default=None)
     p.add_argument("--freeze_encoder", action="store_true")
     p.add_argument("--hidden_s", type=int, default=256)
     p.add_argument("--hidden_v", type=int, default=64)
     p.add_argument("--flow_layers", type=int, default=3)
+    p.add_argument(
+        "--n_message_gvps",
+        type=int,
+        default=2,
+        help="Number of GVPs in message function per edge type (default: 2)",
+    )
+    p.add_argument(
+        "--n_update_gvps",
+        type=int,
+        default=2,
+        help="Number of GVPs in node update function (default: 2)",
+    )
+    p.add_argument(
+        "--drop_rate",
+        type=float,
+        default=0.1,
+        help="Dropout rate for GVP layers (default: 0.1)",
+    )
     p.add_argument("--k_pw", type=int, default=16)
     p.add_argument("--k_ww", type=int, default=16)
 
     # optional encoder-specific overrides
-    p.add_argument("--slae_dim", type=int, default=None, help="Optional SLAE embedding dimension override")
-    p.add_argument("--esm_dim", type=int, default=None, help="Optional ESM embedding dimension override")
+    p.add_argument(
+        "--slae_dim",
+        type=int,
+        default=None,
+        help="Optional SLAE embedding dimension override",
+    )
+    p.add_argument(
+        "--esm_dim",
+        type=int,
+        default=None,
+        help="Optional ESM embedding dimension override",
+    )
 
     # training
     p.add_argument("--epochs", type=int, default=200)
@@ -160,25 +206,58 @@ def parse_args():
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--weight_decay", type=float, default=1e-4)
     p.add_argument("--grad_clip", type=float, default=1.0)
-    p.add_argument("--grad_accum_steps", type=int, default=1,
-                   help="Number of gradient accumulation steps")
+    p.add_argument(
+        "--grad_accum_steps",
+        type=int,
+        default=1,
+        help="Number of gradient accumulation steps",
+    )
     p.add_argument("--num_workers", type=int, default=8)
-    p.add_argument("--prefetch_factor", type=int, default=4,
-                   help="Number of batches to prefetch per worker")
-    p.add_argument("--pin_memory", action="store_true", default=True,
-                   help="Pin memory for faster CPU-GPU transfer")
-    p.add_argument("--no_pin_memory", dest="pin_memory", action="store_false",
-                   help="Disable pin_memory")
-    p.add_argument("--persistent_workers", action="store_true", default=True,
-                   help="Keep workers alive between epochs")
-    p.add_argument("--no_persistent_workers", dest="persistent_workers", action="store_false",
-                   help="Disable persistent_workers")
+    p.add_argument(
+        "--prefetch_factor",
+        type=int,
+        default=4,
+        help="Number of batches to prefetch per worker",
+    )
+    p.add_argument(
+        "--pin_memory",
+        action="store_true",
+        default=True,
+        help="Pin memory for faster CPU-GPU transfer",
+    )
+    p.add_argument(
+        "--no_pin_memory",
+        dest="pin_memory",
+        action="store_false",
+        help="Disable pin_memory",
+    )
+    p.add_argument(
+        "--persistent_workers",
+        action="store_true",
+        default=True,
+        help="Keep workers alive between epochs",
+    )
+    p.add_argument(
+        "--no_persistent_workers",
+        dest="persistent_workers",
+        action="store_false",
+        help="Disable persistent_workers",
+    )
 
     # scheduler
-    p.add_argument("--scheduler", type=str, default="cosine", choices=["cosine", "step", "none"])
+    p.add_argument(
+        "--scheduler", type=str, default="cosine", choices=["cosine", "step", "none"]
+    )
     p.add_argument("--warmup_steps", type=int, default=0, help="Linear warmup steps")
-    p.add_argument("--eta_min_factor", type=float, default=0.001, help="eta_min = lr * eta_min_factor")
-    p.add_argument("--step_size", type=int, default=50, help="StepLR step size (epochs)")
+    p.add_argument(
+        "--eta_min_factor",
+        type=float,
+        default=0.001,
+        help="eta_min = lr * eta_min_factor",
+    )
+    p.add_argument(
+        "--step_size", type=int, default=50, help="StepLR step size (epochs)"
+    )
     p.add_argument("--step_gamma", type=float, default=0.5, help="StepLR gamma")
 
     # flow matching
@@ -191,12 +270,19 @@ def parse_args():
 
     # checkpointing
     p.add_argument("--save_dir", type=str, default="/home/srivasv/flow_checkpoints")
-    p.add_argument("--run_name", type=str, default=None, help="Name for this run (auto-generated if not provided)")
-    p.add_argument("--save_every", type=int, default=100)
+    p.add_argument(
+        "--run_name",
+        type=str,
+        default=None,
+        help="Name for this run (auto-generated if not provided)",
+    )
+    p.add_argument("--save_every", type=int, default=10)
     p.add_argument("--eval_every", type=int, default=5)
     p.add_argument("--n_eval_samples", type=int, default=3)
     p.add_argument("--rk4_steps", type=int, default=100)
-    p.add_argument("--save_gifs", action="store_true", help="Save trajectory GIFs during eval")
+    p.add_argument(
+        "--save_gifs", action="store_true", help="Save trajectory GIFs during eval"
+    )
 
     # logging / wandb
     p.add_argument("--log_level", type=str, default="INFO")
@@ -271,7 +357,9 @@ def _log_dataset_filter_config(args, quality_kwargs: dict):
         logger.info(f"Ignored water-filter thresholds (disabled): {ignored}")
 
     if args.filter_by_edia and args.edia_dir is None:
-        logger.info("EDIA filter enabled but --edia_dir is not set; EDIA filtering will be skipped.")
+        logger.info(
+            "EDIA filter enabled but --edia_dir is not set; EDIA filtering will be skipped."
+        )
 
 
 def _required_embedding_field(encoder_type: str) -> str | None:
@@ -318,9 +406,13 @@ def resolve_encoder_config(args, sample_data, node_scalar_in: int):
     }
 
     if args.encoder_type == "slae":
-        encoder_config["slae_dim"] = _resolve_embedding_dim(sample_data, "slae", args.slae_dim)
+        encoder_config["slae_dim"] = _resolve_embedding_dim(
+            sample_data, "slae", args.slae_dim
+        )
     elif args.encoder_type == "esm":
-        encoder_config["esm_dim"] = _resolve_embedding_dim(sample_data, "esm", args.esm_dim)
+        encoder_config["esm_dim"] = _resolve_embedding_dim(
+            sample_data, "esm", args.esm_dim
+        )
 
     return encoder_config
 
@@ -337,7 +429,9 @@ def log_encoder_sample_stats(sample_data: HeteroData, encoder_type: str) -> None
     )
 
 
-def build_model(args: argparse.Namespace, device: torch.device, encoder_config: dict) -> FlowWaterGVP:
+def build_model(
+    args: argparse.Namespace, device: torch.device, encoder_config: dict
+) -> FlowWaterGVP:
     """Build encoder and flow model using registry-based encoder construction."""
     logger.info(f"Building model with {args.encoder_type.upper()} encoder")
     logger.info(f"Resolved encoder config: {encoder_config}")
@@ -348,6 +442,9 @@ def build_model(args: argparse.Namespace, device: torch.device, encoder_config: 
         encoder=encoder,
         hidden_dims=(args.hidden_s, args.hidden_v),
         layers=args.flow_layers,
+        n_message_gvps=args.n_message_gvps,
+        n_update_gvps=args.n_update_gvps,
+        drop_rate=args.drop_rate,
         k_pw=args.k_pw,
         k_ww=args.k_ww,
     ).to(device)
@@ -355,7 +452,9 @@ def build_model(args: argparse.Namespace, device: torch.device, encoder_config: 
     return model
 
 
-def run_eval_sampling(flow_matcher, val_loader, args, epoch, device, global_step, eval_indices, run_dir):
+def run_eval_sampling(
+    flow_matcher, val_loader, args, epoch, device, global_step, eval_indices, run_dir
+):
     """Run RK4 integration on fixed eval samples and log results.
 
     Args:
@@ -367,7 +466,7 @@ def run_eval_sampling(flow_matcher, val_loader, args, epoch, device, global_step
 
     for i, idx in enumerate(eval_indices):
         graph = val_loader.dataset[idx]
-        if graph['water'].num_nodes == 0:
+        if graph["water"].num_nodes == 0:
             continue
 
         out = flow_matcher.rk4_integrate(
@@ -380,31 +479,31 @@ def run_eval_sampling(flow_matcher, val_loader, args, epoch, device, global_step
 
         # compute metrics
         final_metrics = compute_placement_metrics(
-            pred=out['water_pred'],
-            true=out['water_true'],
-            threshold=1.0
+            pred=out["water_pred"], true=out["water_true"], threshold=1.0
         )
 
-        final_rmsd = compute_rmsd(out['water_pred'], out['water_true'])
+        final_rmsd = compute_rmsd(out["water_pred"], out["water_true"])
 
-        results.append({
-            'rmsd': final_rmsd,
-            'precision': final_metrics['precision'],
-            'recall': final_metrics['recall'],
-            'f1': final_metrics['f1'],
-            'auc_pr': final_metrics['auc_pr']
-        })
+        results.append(
+            {
+                "rmsd": final_rmsd,
+                "precision": final_metrics["precision"],
+                "recall": final_metrics["recall"],
+                "f1": final_metrics["f1"],
+                "auc_pr": final_metrics["auc_pr"],
+            }
+        )
 
         # plot final frame
         fig = plt.figure(figsize=(10, 8))
-        ax = fig.add_subplot(111, projection='3d')
+        ax = fig.add_subplot(111, projection="3d")
         plot_3d_frame(
             ax,
-            out['protein_pos'],
+            out["protein_pos"],
             None,
-            out['water_pred'],
-            out['water_true'],
-            title=f"Epoch {epoch} Sample {i} | RMSD={final_rmsd:.2f}A | F1={final_metrics['f1']:.3f}"
+            out["water_pred"],
+            out["water_true"],
+            title=f"Epoch {epoch} Sample {i} | RMSD={final_rmsd:.2f}A | F1={final_metrics['f1']:.3f}",
         )
 
         plot_path = run_dir / "plots" / f"epoch{epoch}_sample{i}.png"
@@ -413,26 +512,26 @@ def run_eval_sampling(flow_matcher, val_loader, args, epoch, device, global_step
         plt.close()
 
         # save GIF if requested
-        if args.save_gifs and 'trajectory' in out:
+        if args.save_gifs and "trajectory" in out:
             gif_path = run_dir / "gifs" / f"epoch{epoch}_sample{i}.gif"
             gif_path.parent.mkdir(parents=True, exist_ok=True)
             create_trajectory_gif(
-                trajectory=out['trajectory'],
-                protein_pos=out['protein_pos'],
-                water_true=out['water_true'],
+                trajectory=out["trajectory"],
+                protein_pos=out["protein_pos"],
+                water_true=out["water_true"],
                 save_path=str(gif_path),
                 title=f"Epoch {epoch} Sample {i}",
                 fps=10,
-                pdb_id=graph.pdb_id
+                pdb_id=graph.pdb_id,
             )
 
     if results:
         avg_metrics = {
-            "eval/avg_rmsd": np.mean([r['rmsd'] for r in results]),
-            "eval/avg_precision": np.mean([r['precision'] for r in results]),
-            "eval/avg_recall": np.mean([r['recall'] for r in results]),
-            "eval/avg_f1": np.mean([r['f1'] for r in results]),
-            "eval/avg_auc_pr": np.mean([r['auc_pr'] for r in results]),
+            "eval/avg_rmsd": np.mean([r["rmsd"] for r in results]),
+            "eval/avg_precision": np.mean([r["precision"] for r in results]),
+            "eval/avg_recall": np.mean([r["recall"] for r in results]),
+            "eval/avg_f1": np.mean([r["f1"] for r in results]),
+            "eval/avg_auc_pr": np.mean([r["auc_pr"] for r in results]),
         }
         wandb.log(avg_metrics, step=global_step)
         return avg_metrics
@@ -459,7 +558,7 @@ def train_epoch(
     pbar = tqdm(train_loader, desc=f"Epoch {epoch} [Train]")
     for step, batch in enumerate(pbar):
         batch = batch.to(args.device)
-        if batch['water'].num_nodes == 0:
+        if batch["water"].num_nodes == 0:
             skipped_batches += 1
             continue
 
@@ -469,56 +568,68 @@ def train_epoch(
             accumulation_steps=args.grad_accum_steps,
         )
 
-        if metrics['per_sample_info'] is not None:
-            per_sample_losses = metrics['per_sample_info']['losses'].cpu()
-            num_graphs = metrics['per_sample_info']['num_graphs']
+        if metrics["per_sample_info"] is not None:
+            per_sample_losses = metrics["per_sample_info"]["losses"].cpu()
+            num_graphs = metrics["per_sample_info"]["num_graphs"]
 
-            if hasattr(batch, 'pdb_id'):
-                pdb_ids = batch.pdb_id if isinstance(batch.pdb_id, list) else [batch.pdb_id]
+            if hasattr(batch, "pdb_id"):
+                pdb_ids = (
+                    batch.pdb_id if isinstance(batch.pdb_id, list) else [batch.pdb_id]
+                )
                 logger.warning("=" * 60)
                 logger.warning(f"Batch loss {metrics['loss']:.2f} exceeded 100.0!")
                 logger.warning(f"Per-sample losses ({num_graphs} samples):")
                 for i in range(num_graphs):
-                    pdb_id = pdb_ids[i] if i < len(pdb_ids) else 'unknown'
+                    pdb_id = pdb_ids[i] if i < len(pdb_ids) else "unknown"
                     sample_loss = per_sample_losses[i].item()
                     logger.warning(f"[{i}] {pdb_id}: {sample_loss:.2f}")
                 logger.warning("=" * 60)
 
         processed_batches += 1
-        total_loss += metrics['loss']
-        total_rmsd += metrics['rmsd']
+        total_loss += metrics["loss"]
+        total_rmsd += metrics["rmsd"]
 
         # Step optimizer every grad_accum_steps
         if (step + 1) % args.grad_accum_steps == 0:
             if args.grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(
                     [p for p in flow_matcher.model.parameters() if p.requires_grad],
-                    max_norm=args.grad_clip
+                    max_norm=args.grad_clip,
                 )
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
             optimizer_step_count += 1
 
             # Step warmup scheduler per optimizer step
-            if warmup_scheduler is not None and optimizer_step_count <= args.warmup_steps:
+            if (
+                warmup_scheduler is not None
+                and optimizer_step_count <= args.warmup_steps
+            ):
                 warmup_scheduler.step()
 
-        current_lr = optimizer.param_groups[0]['lr']
-        pbar.set_postfix(loss=f"{metrics['loss']:.4f}", rmsd=f"{metrics['rmsd']:.2f}", lr=f"{current_lr:.2e}")
+        current_lr = optimizer.param_groups[0]["lr"]
+        pbar.set_postfix(
+            loss=f"{metrics['loss']:.4f}",
+            rmsd=f"{metrics['rmsd']:.2f}",
+            lr=f"{current_lr:.2e}",
+        )
 
         global_step = (epoch - 1) * len(train_loader) + step
-        wandb.log({
-            "train/iter_loss": metrics['loss'],
-            "train/iter_rmsd": metrics['rmsd'],
-            "lr": current_lr,
-        }, step=global_step)
+        wandb.log(
+            {
+                "train/iter_loss": metrics["loss"],
+                "train/iter_rmsd": metrics["rmsd"],
+                "lr": current_lr,
+            },
+            step=global_step,
+        )
 
     # Handle remaining gradients at end of epoch
     if (step + 1) % args.grad_accum_steps != 0:
         if args.grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(
                 [p for p in flow_matcher.model.parameters() if p.requires_grad],
-                max_norm=args.grad_clip
+                max_norm=args.grad_clip,
             )
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
@@ -529,16 +640,26 @@ def train_epoch(
     final_global_step = (epoch - 1) * len(train_loader) + len(train_loader) - 1
 
     if processed_batches == 0:
-        logger.warning(f"Epoch {epoch}: skipped all {skipped_batches} train batches (no waters).")
-        return {'train/epoch_loss': float('inf'), 'train/epoch_rmsd': float('inf')}, final_global_step, optimizer_step_count
+        logger.warning(
+            f"Epoch {epoch}: skipped all {skipped_batches} train batches (no waters)."
+        )
+        return (
+            {"train/epoch_loss": float("inf"), "train/epoch_rmsd": float("inf")},
+            final_global_step,
+            optimizer_step_count,
+        )
 
     logger.info(
         f"Epoch {epoch} [Train] processed_batches={processed_batches}, skipped_batches={skipped_batches}"
     )
-    return {
-        'train/epoch_loss': total_loss / processed_batches,
-        'train/epoch_rmsd': total_rmsd / processed_batches,
-    }, final_global_step, optimizer_step_count
+    return (
+        {
+            "train/epoch_loss": total_loss / processed_batches,
+            "train/epoch_rmsd": total_rmsd / processed_batches,
+        },
+        final_global_step,
+        optimizer_step_count,
+    )
 
 
 @torch.no_grad()
@@ -556,24 +677,26 @@ def val_epoch(
 
     for batch in tqdm(val_loader, desc=f"Epoch {epoch} [Val]"):
         batch = batch.to(args.device)
-        if batch['water'].num_nodes == 0:
+        if batch["water"].num_nodes == 0:
             skipped_batches += 1
             continue
         metrics = flow_matcher.validation_step(batch)
         processed_batches += 1
-        total_loss += metrics['loss']
-        total_rmsd += metrics['rmsd']
+        total_loss += metrics["loss"]
+        total_rmsd += metrics["rmsd"]
 
     if processed_batches == 0:
-        logger.warning(f"Epoch {epoch}: skipped all {skipped_batches} val batches (no waters).")
-        return {'val/loss': float('inf'), 'val/rmsd': float('inf')}
+        logger.warning(
+            f"Epoch {epoch}: skipped all {skipped_batches} val batches (no waters)."
+        )
+        return {"val/loss": float("inf"), "val/rmsd": float("inf")}
 
     logger.info(
         f"Epoch {epoch} [Val] processed_batches={processed_batches}, skipped_batches={skipped_batches}"
     )
     return {
-        'val/loss': total_loss / processed_batches,
-        'val/rmsd': total_rmsd / processed_batches,
+        "val/loss": total_loss / processed_batches,
+        "val/rmsd": total_rmsd / processed_batches,
     }
 
 
@@ -584,17 +707,33 @@ def count_parameters(model):
     return trainable, total
 
 
-def save_checkpoint(model, optimizer, warmup_scheduler, main_scheduler, epoch, optimizer_step_count, path, best=False):
+def save_checkpoint(
+    model,
+    optimizer,
+    warmup_scheduler,
+    main_scheduler,
+    epoch,
+    optimizer_step_count,
+    path,
+    best=False,
+):
     """Save model checkpoint."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({
-        'epoch': epoch,
-        'optimizer_step_count': optimizer_step_count,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'warmup_scheduler_state_dict': warmup_scheduler.state_dict() if warmup_scheduler else None,
-        'main_scheduler_state_dict': main_scheduler.state_dict() if main_scheduler else None,
-    }, path)
+    torch.save(
+        {
+            "epoch": epoch,
+            "optimizer_step_count": optimizer_step_count,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "warmup_scheduler_state_dict": warmup_scheduler.state_dict()
+            if warmup_scheduler
+            else None,
+            "main_scheduler_state_dict": main_scheduler.state_dict()
+            if main_scheduler
+            else None,
+        },
+        path,
+    )
     logger.info(f"{'Best ' if best else ''}Checkpoint saved: {path}")
 
 
@@ -614,7 +753,9 @@ def build_scheduler(optimizer, args):
             optimizer, T_max=args.epochs, eta_min=args.lr * args.eta_min_factor
         )
     elif args.scheduler == "step":
-        main_scheduler = StepLR(optimizer, step_size=args.step_size, gamma=args.step_gamma)
+        main_scheduler = StepLR(
+            optimizer, step_size=args.step_size, gamma=args.step_gamma
+        )
 
     return warmup_scheduler, main_scheduler
 
@@ -676,26 +817,28 @@ def main():
     eval_indices = np.random.choice(
         len(val_loader.dataset),
         min(args.n_eval_samples, len(val_loader.dataset)),
-        replace=False
+        replace=False,
     ).tolist()
 
     eval_indices_file = run_dir / "eval_indices.txt"
-    with open(eval_indices_file, 'w') as f:
+    with open(eval_indices_file, "w") as f:
         f.write("# Fixed evaluation sample indices\n")
         for idx in eval_indices:
             graph = val_loader.dataset[idx]
-            pdb_id = getattr(graph, 'pdb_id', 'unknown')
+            pdb_id = getattr(graph, "pdb_id", "unknown")
             f.write(f"{idx}\t{pdb_id}\n")
     logger.info(f"Fixed eval indices saved to: {eval_indices_file}")
     logger.info(f"Evaluating on {len(eval_indices)} proteins at each eval epoch")
 
     # detect input dimension and resolve encoder configuration from sample data
     sample_data = train_loader.dataset[0]
-    node_scalar_in = int(sample_data['protein'].x.shape[-1])
+    node_scalar_in = int(sample_data["protein"].x.shape[-1])
     logger.info(f"Detected protein input dimension: {node_scalar_in}")
 
     log_encoder_sample_stats(sample_data, args.encoder_type)
-    encoder_config = resolve_encoder_config(args, sample_data, node_scalar_in=node_scalar_in)
+    encoder_config = resolve_encoder_config(
+        args, sample_data, node_scalar_in=node_scalar_in
+    )
 
     config_dict = vars(args).copy()
     config_dict["active_water_filters"] = {
@@ -703,11 +846,13 @@ def main():
         "edia": args.filter_by_edia,
         "bfactor": args.filter_by_bfactor,
     }
-    config_dict["ignored_water_filter_thresholds"] = _ignored_water_filter_thresholds(args)
+    config_dict["ignored_water_filter_thresholds"] = _ignored_water_filter_thresholds(
+        args
+    )
     config_dict["node_scalar_in"] = node_scalar_in
     config_dict["resolved_encoder_config"] = encoder_config
     config_file = run_dir / "config.json"
-    with open(config_file, 'w') as f:
+    with open(config_file, "w") as f:
         json.dump(config_dict, f, indent=2)
     logger.info(f"Configuration saved to: {config_file}")
 
@@ -730,7 +875,7 @@ def main():
         model.eval()
         batch = next(iter(train_loader)).to(device)
         with torch.no_grad():
-            num_graphs = int(batch['protein'].batch.max().item()) + 1
+            num_graphs = int(batch["protein"].batch.max().item()) + 1
             t = torch.zeros(num_graphs, device=device)
             v_out = model(batch, t)
             logger.info(f"Forward pass successful! Output shape: {v_out.shape}")
@@ -750,20 +895,30 @@ def main():
 
     optimizer = AdamW(
         [p for p in model.parameters() if p.requires_grad],
-        lr=args.lr, weight_decay=args.weight_decay
+        lr=args.lr,
+        weight_decay=args.weight_decay,
     )
     warmup_scheduler, main_scheduler = build_scheduler(optimizer, args)
 
-    best_val_loss = float('inf')
+    best_val_loss = float("inf")
     optimizer_step_count = 0
 
     for epoch in range(1, args.epochs + 1):
         train_metrics, global_step, optimizer_step_count = train_epoch(
-            flow_matcher, train_loader, optimizer, warmup_scheduler, args, epoch, optimizer_step_count
+            flow_matcher,
+            train_loader,
+            optimizer,
+            warmup_scheduler,
+            args,
+            epoch,
+            optimizer_step_count,
         )
+        # Log epoch-level metrics with epoch number for per-epoch tracking
+        train_metrics["epoch"] = epoch
         wandb.log(train_metrics, step=global_step)
 
         val_metrics = val_epoch(flow_matcher, val_loader, args, epoch)
+        val_metrics["epoch"] = epoch
         wandb.log(val_metrics, step=global_step)
 
         # Step main scheduler per epoch (after warmup completes)
@@ -775,22 +930,40 @@ def main():
             f"val_loss={val_metrics['val/loss']:.4f}, val_rmsd={val_metrics['val/rmsd']:.2f}"
         )
 
-        if val_metrics['val/loss'] < best_val_loss:
-            best_val_loss = val_metrics['val/loss']
+        if val_metrics["val/loss"] < best_val_loss:
+            best_val_loss = val_metrics["val/loss"]
             save_checkpoint(
-                model, optimizer, warmup_scheduler, main_scheduler,
-                epoch, optimizer_step_count, run_dir / "checkpoints" / "best.pt", best=True
+                model,
+                optimizer,
+                warmup_scheduler,
+                main_scheduler,
+                epoch,
+                optimizer_step_count,
+                run_dir / "checkpoints" / "best.pt",
+                best=True,
             )
 
         if epoch % args.save_every == 0:
             save_checkpoint(
-                model, optimizer, warmup_scheduler, main_scheduler,
-                epoch, optimizer_step_count, run_dir / "checkpoints" / f"epoch_{epoch}.pt"
+                model,
+                optimizer,
+                warmup_scheduler,
+                main_scheduler,
+                epoch,
+                optimizer_step_count,
+                run_dir / "checkpoints" / f"epoch_{epoch}.pt",
             )
 
         if epoch % args.eval_every == 0:
             eval_metrics = run_eval_sampling(
-                flow_matcher, val_loader, args, epoch, device, global_step, eval_indices, run_dir
+                flow_matcher,
+                val_loader,
+                args,
+                epoch,
+                device,
+                global_step,
+                eval_indices,
+                run_dir,
             )
             if eval_metrics:
                 logger.info(

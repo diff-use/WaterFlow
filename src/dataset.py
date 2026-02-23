@@ -1,4 +1,4 @@
-#dataset.py
+# dataset.py
 
 from __future__ import annotations
 
@@ -6,14 +6,12 @@ import itertools
 from pathlib import Path
 
 import biotite.structure as bts
-import e3nn
 import numpy as np
 import pandas as pd
 import pymol2
 import torch
 import torch.nn.functional as F
 from biotite.structure.io.pdb import PDBFile, get_structure
-from e3nn.math import soft_one_hot_linspace
 from loguru import logger
 from scipy.spatial.distance import cdist
 from torch import Tensor
@@ -25,7 +23,21 @@ from tqdm import tqdm
 from src.constants import EDGE_PP, NUM_RBF
 
 ELEMENT_VOCAB = [
-    "C", "N", "O", "S", "P", "SE", "MG", "ZN", "CA", "FE", "NA", "K", "CL", "F", "BR",
+    "C",
+    "N",
+    "O",
+    "S",
+    "P",
+    "SE",
+    "MG",
+    "ZN",
+    "CA",
+    "FE",
+    "NA",
+    "K",
+    "CL",
+    "F",
+    "BR",
 ]
 ELEM_IDX = {e: i for i, e in enumerate(ELEMENT_VOCAB)}
 
@@ -43,7 +55,9 @@ def _normalize_ins_code(value) -> str:
 def element_onehot(symbols: list[str]) -> Tensor:
     """One-hot encoding with 'other' bucket at end."""
     other_idx = len(ELEMENT_VOCAB)
-    indices = torch.tensor([ELEM_IDX.get(s.upper(), other_idx) for s in symbols], dtype=torch.long)
+    indices = torch.tensor(
+        [ELEM_IDX.get(s.upper(), other_idx) for s in symbols], dtype=torch.long
+    )
     return F.one_hot(indices, num_classes=other_idx + 1).float()
 
 
@@ -82,17 +96,19 @@ def get_crystal_contacts_pymol(pdb_path: str, cutoff: float = 5.0) -> dict:
         mate_atoms = cmd.get_model("sym* and interface", state=1).atom
 
         return {
-            "asu_coords": asu_coords if asu_coords is not None else np.zeros((0, 3), dtype=float),
-            "mate_coords": mate_coords if mate_coords is not None else np.zeros((0, 3), dtype=float),
+            "asu_coords": asu_coords
+            if asu_coords is not None
+            else np.zeros((0, 3), dtype=float),
+            "mate_coords": mate_coords
+            if mate_coords is not None
+            else np.zeros((0, 3), dtype=float),
             "asu_atoms": asu_atoms,
             "mate_atoms": mate_atoms,
         }
 
 
 def match_atoms_to_coords(
-    atoms: bts.AtomArray,
-    target_coords: np.ndarray,
-    tolerance: float = 0.01
+    atoms: bts.AtomArray, target_coords: np.ndarray, tolerance: float = 0.01
 ) -> list[int]:
     """Match biotite atoms to PyMOL coordinates, return indices."""
     if target_coords.shape[0] == 0:
@@ -161,7 +177,9 @@ def _pad_atom_embeddings_for_mates(
     """Pad ASU-only atom embeddings with zeros for symmetry mate atoms."""
     if total_num_atoms <= asu_embedding.size(0):
         return asu_embedding
-    pad = asu_embedding.new_zeros(total_num_atoms - asu_embedding.size(0), asu_embedding.size(1))
+    pad = asu_embedding.new_zeros(
+        total_num_atoms - asu_embedding.size(0), asu_embedding.size(1)
+    )
     return torch.cat([asu_embedding, pad], dim=0)
 
 
@@ -259,11 +277,13 @@ def check_chain_interactions(
         return True, "", "Single Chain"
 
     chain_coords = {
-        cid: torch.tensor(protein_atoms[protein_atoms.chain_id == cid].coord, dtype=torch.float32)
+        cid: torch.tensor(
+            protein_atoms[protein_atoms.chain_id == cid].coord, dtype=torch.float32
+        )
         for cid in chain_ids
     }
 
-    min_interface_dist = float('inf')
+    min_interface_dist = float("inf")
     for chain_a, chain_b in itertools.combinations(chain_ids, 2):
         coords_a = chain_coords[chain_a]
         coords_b = chain_coords[chain_b]
@@ -276,7 +296,7 @@ def check_chain_interactions(
             False,
             f"Multi-chain ({num_chains} chains) min interface distance {min_interface_dist:.1f}A "
             f"> {interface_dist_threshold}A (likely ASU copies, not PPI)",
-            "Non-Interacting (ASU Copies)"
+            "Non-Interacting (ASU Copies)",
         )
 
     return True, "", "Interacting"
@@ -381,9 +401,7 @@ def compute_normalized_bfactors(
     try:
         pdb_file = PDBFile.read(pdb_path)
         atoms = pdb_file.get_structure(
-            model=1,
-            altloc="occupancy",
-            extra_fields=["b_factor"]
+            model=1, altloc="occupancy", extra_fields=["b_factor"]
         )
 
         # filter for water molecules
@@ -391,7 +409,7 @@ def compute_normalized_bfactors(
         water_atoms = atoms[water_mask]
 
         if not water_atoms:
-            return {}, np.array([])
+            return None, None
 
         # Normalize using water-only B-factor statistics.
         water_mean = np.mean(water_atoms.b_factor)
@@ -409,7 +427,9 @@ def compute_normalized_bfactors(
             if key not in bfactor_lookup:
                 raw_bfactor = water_atoms.b_factor[i]
                 # If all water B-factors are identical, assign neutral z-score 0.0.
-                normalized = (raw_bfactor - water_mean) / water_std if water_std > 0 else 0.0
+                normalized = (
+                    (raw_bfactor - water_mean) / water_std if water_std > 0 else 0.0
+                )
                 bfactor_lookup[key] = normalized
 
         return bfactor_lookup, water_atoms.b_factor
@@ -507,7 +527,9 @@ def filter_waters_by_quality(
     lookup_fail = np.zeros(n_waters, dtype=bool)
     for lookup, threshold, fail_if_below, name in lookup_filters:
         if lookup is not None:
-            fail_mask = apply_threshold_filter(water_keys, lookup, threshold, fail_if_below)
+            fail_mask = apply_threshold_filter(
+                water_keys, lookup, threshold, fail_if_below
+            )
             stats[f"removed_{name}"] = int(fail_mask.sum())
             lookup_fail |= fail_mask
 
@@ -519,76 +541,14 @@ def filter_waters_by_quality(
     if cache_key is not None and stats["total"] > 0:
         removed = stats["total"] - stats["kept"]
         if removed > 0:
-            logger.info(f"  {cache_key}: Filtered {removed}/{stats['total']} waters "
-                  f"(dist:{stats['removed_distance']}, "
-                  f"edia:{stats['removed_edia']}, "
-                  f"bfactor:{stats['removed_bfactor']})")
+            logger.info(
+                f"  {cache_key}: Filtered {removed}/{stats['total']} waters "
+                f"(dist:{stats['removed_distance']}, "
+                f"edia:{stats['removed_edia']}, "
+                f"bfactor:{stats['removed_bfactor']})"
+            )
 
     return keep_mask
-
-
-class EmbeddingCache:
-    """
-    Thread-safe LRU cache for embedding tensors.
-
-    Reduces disk I/O by caching frequently accessed embeddings in memory.
-    Uses LRU eviction to stay within memory budget.
-    """
-
-    def __init__(self, max_size_gb: float = 16.0):
-        self._cache: dict[str, torch.Tensor] = {}
-        self._max_bytes = int(max_size_gb * 1024**3)
-        self._current_bytes = 0
-        self._access_order: list[str] = []
-
-    def get(self, key: str) -> torch.Tensor | None:
-        """Get tensor from cache, updating access order. Returns None if not found."""
-        if key in self._cache:
-            self._access_order.remove(key)
-            self._access_order.append(key)
-            return self._cache[key]
-        return None
-
-    def put(self, key: str, tensor: torch.Tensor) -> None:
-        """Add tensor to cache, evicting old entries if needed."""
-        if key in self._cache:
-            return  # Already cached
-
-        size = tensor.element_size() * tensor.numel()
-
-        # Evict oldest entries until we have room
-        while self._current_bytes + size > self._max_bytes and self._access_order:
-            old_key = self._access_order.pop(0)
-            old_tensor = self._cache.pop(old_key)
-            self._current_bytes -= old_tensor.element_size() * old_tensor.numel()
-
-        # Store a clone to avoid mutation issues
-        self._cache[key] = tensor.clone()
-        self._access_order.append(key)
-        self._current_bytes += size
-
-    @property
-    def size_gb(self) -> float:
-        """Current cache size in GB."""
-        return self._current_bytes / (1024**3)
-
-    @property
-    def num_entries(self) -> int:
-        """Number of cached entries."""
-        return len(self._cache)
-
-
-# Global embedding cache singleton
-_EMBEDDING_CACHE: EmbeddingCache | None = None
-
-
-def get_embedding_cache(max_gb: float = 16.0) -> EmbeddingCache:
-    """Get or create the global embedding cache singleton."""
-    global _EMBEDDING_CACHE
-    if _EMBEDDING_CACHE is None:
-        _EMBEDDING_CACHE = EmbeddingCache(max_gb)
-        logger.info(f"Initialized embedding cache with {max_gb} GB limit")
-    return _EMBEDDING_CACHE
 
 
 class ProteinWaterDataset(Dataset):
@@ -624,8 +584,6 @@ class ProteinWaterDataset(Dataset):
         filter_by_distance: bool = True,
         filter_by_edia: bool = True,
         filter_by_bfactor: bool = True,
-        cache_embeddings: bool = True,
-        cache_size_gb: float = 16.0,
     ):
         """
         Args:
@@ -665,8 +623,6 @@ class ProteinWaterDataset(Dataset):
             filter_by_edia: Enable/disable EDIA score filtering.
             filter_by_bfactor: Enable/disable B-factor z-score filtering.
                               If a per-water filter is disabled, its threshold is ignored.
-            cache_embeddings: Cache embeddings in memory for faster access (default True)
-            cache_size_gb: Maximum size of embedding cache in GB (default 16.0)
         """
 
         self.cache_dir = Path(processed_dir)
@@ -695,10 +651,6 @@ class ProteinWaterDataset(Dataset):
         self.filter_by_edia = filter_by_edia
         self.filter_by_bfactor = filter_by_bfactor
 
-        # Initialize embedding cache for faster I/O
-        self.cache_embeddings = cache_embeddings
-        self.embedding_cache = get_embedding_cache(cache_size_gb) if cache_embeddings else None
-
         self.entries = self._parse_pdb_list(pdb_list_file)
 
         if preprocess:
@@ -713,7 +665,9 @@ class ProteinWaterDataset(Dataset):
         # if single sample and duplication requested, set effective length [this is for experiments to check if the model can memorize a sample]
         if len(self.entries) == 1 and duplicate_single_sample > 1:
             self._effective_length = duplicate_single_sample
-            logger.info(f"Single sample detected. Duplicating {duplicate_single_sample}x ")
+            logger.info(
+                f"Single sample detected. Duplicating {duplicate_single_sample}x "
+            )
         else:
             self._effective_length = len(self.entries)
 
@@ -727,7 +681,7 @@ class ProteinWaterDataset(Dataset):
         Constructs path: {base_pdb_dir}/{pdb_id}/{pdb_id}_final.pdb
         """
         entries = []
-        with open(pdb_list_file, 'r') as f:
+        with open(pdb_list_file, "r") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -744,12 +698,14 @@ class ProteinWaterDataset(Dataset):
                 pdb_path = self.base_pdb_dir / pdb_id / f"{pdb_id}_final.pdb"
 
                 # Cache key is just the base key - directory separation handles mates
-                entries.append({
-                    'pdb_id': pdb_id,
-                    'pdb_path': pdb_path,
-                    'cache_key': line,
-                    'embedding_key': line,  # Same as cache_key for embedding lookup
-                })
+                entries.append(
+                    {
+                        "pdb_id": pdb_id,
+                        "pdb_path": pdb_path,
+                        "cache_key": line,
+                        "embedding_key": line,  # Same as cache_key for embedding lookup
+                    }
+                )
 
         logger.info(f"Loaded {len(entries)} entries from {pdb_list_file}")
         return entries
@@ -759,7 +715,8 @@ class ProteinWaterDataset(Dataset):
         self.geometry_dir.mkdir(parents=True, exist_ok=True)
 
         to_process = [
-            e for e in self.entries
+            e
+            for e in self.entries
             if not (self.geometry_dir / f"{e['cache_key']}.pt").exists()
         ]
 
@@ -775,18 +732,19 @@ class ProteinWaterDataset(Dataset):
                 self._preprocess_one(entry, cache_path)
             except Exception as e:
                 logger.warning(f"\nFailed to preprocess {entry['cache_key']}: {e}")
-                failures.append((entry['cache_key'], str(e)))
+                failures.append((entry["cache_key"], str(e)))
 
         # write failures to log file
         if failures:
             failure_log_path = self.geometry_dir / "preprocessing_failures.log"
-            with open(failure_log_path, 'a') as f:
+            with open(failure_log_path, "a") as f:
                 for pdb_id, reason in failures:
                     f.write(f"{pdb_id}\t{reason}\n")
             logger.info(f"Logged {len(failures)} failures to {failure_log_path}")
 
         valid_entries = [
-            e for e in self.entries
+            e
+            for e in self.entries
             if (self.geometry_dir / f"{e['cache_key']}.pt").exists()
         ]
         n_removed = len(self.entries) - len(valid_entries)
@@ -806,7 +764,7 @@ class ProteinWaterDataset(Dataset):
 
         Raises ValueError if structure fails quality filters.
         """
-        pdb_path = str(entry['pdb_path'])
+        pdb_path = str(entry["pdb_path"])
 
         protein_atoms, water_atoms = parse_asu_with_biotite(pdb_path)
 
@@ -835,15 +793,19 @@ class ProteinWaterDataset(Dataset):
         use_distance_filter = self.filter_by_distance
         use_edia_filter = self.filter_by_edia and self.edia_dir is not None
         use_bfactor_filter = self.filter_by_bfactor
-        any_filter_enabled = use_distance_filter or use_edia_filter or use_bfactor_filter
+        any_filter_enabled = (
+            use_distance_filter or use_edia_filter or use_bfactor_filter
+        )
 
         if any_filter_enabled and water_atoms:
             # load EDIA data only when the EDIA filter is active
             edia_lookup = None
             if use_edia_filter:
-                edia_lookup = load_edia_for_pdb(self.edia_dir, entry['pdb_id'])
+                edia_lookup = load_edia_for_pdb(self.edia_dir, entry["pdb_id"])
                 if edia_lookup is None:
-                    logger.warning(f"Warning: EDIA file not found for {entry['pdb_id']}, skipping EDIA filtering")
+                    logger.warning(
+                        f"Warning: EDIA file not found for {entry['pdb_id']}, skipping EDIA filtering"
+                    )
 
             # compute normalized B-factors only when the B-factor filter is active
             bfactor_lookup = None
@@ -851,11 +813,16 @@ class ProteinWaterDataset(Dataset):
                 bfactor_lookup, _ = compute_normalized_bfactors(pdb_path)
 
             # build water keys for filtering
-            water_keys = list(zip(
-                water_atoms.chain_id.astype(str),
-                water_atoms.res_id.astype(int),
-                np.array([_normalize_ins_code(x) for x in water_atoms.ins_code], dtype=object),
-            ))
+            water_keys = list(
+                zip(
+                    water_atoms.chain_id.astype(str),
+                    water_atoms.res_id.astype(int),
+                    np.array(
+                        [_normalize_ins_code(x) for x in water_atoms.ins_code],
+                        dtype=object,
+                    ),
+                )
+            )
 
             # apply quality filters
             keep_mask = filter_waters_by_quality(
@@ -867,7 +834,7 @@ class ProteinWaterDataset(Dataset):
                 max_protein_dist=self.max_protein_dist,
                 min_edia=self.min_edia,
                 max_bfactor_zscore=self.max_bfactor_zscore,
-                cache_key=entry['cache_key'],
+                cache_key=entry["cache_key"],
             )
             water_atoms = water_atoms[keep_mask]
 
@@ -908,7 +875,9 @@ class ProteinWaterDataset(Dataset):
         # compute residue indices (including ins_code to match ESM/SLAE residue counting)
         res_id = protein_atoms.res_id
         chain_id_arr = protein_atoms.chain_id
-        ins_code_arr = np.array([_normalize_ins_code(x) for x in protein_atoms.ins_code], dtype=object)
+        ins_code_arr = np.array(
+            [_normalize_ins_code(x) for x in protein_atoms.ins_code], dtype=object
+        )
         residue_keys = list(zip(chain_id_arr, res_id, ins_code_arr))
         unique_res = {k: i for i, k in enumerate(dict.fromkeys(residue_keys))}
         protein_res_idx = torch.tensor(
@@ -960,9 +929,13 @@ class ProteinWaterDataset(Dataset):
             final_protein_pos = torch.cat([protein_pos, mate_pos], dim=0)
             final_protein_x = torch.cat([protein_x, mate_x], dim=0)
             # Offset mate residue indices by max protein residue index
-            max_res_idx = protein_res_idx.max().item() if protein_res_idx.numel() > 0 else -1
+            max_res_idx = (
+                protein_res_idx.max().item() if protein_res_idx.numel() > 0 else -1
+            )
             offset_mate_res_idx = mate_res_idx + max_res_idx + 1
-            final_protein_res_idx = torch.cat([protein_res_idx, offset_mate_res_idx], dim=0)
+            final_protein_res_idx = torch.cat(
+                [protein_res_idx, offset_mate_res_idx], dim=0
+            )
         else:
             final_protein_pos = protein_pos
             final_protein_x = protein_x
@@ -982,20 +955,23 @@ class ProteinWaterDataset(Dataset):
             )
 
         # Cache all data including PP edges and features
-        torch.save({
-            'protein_pos': final_protein_pos,
-            'protein_x': final_protein_x,
-            'protein_res_idx': final_protein_res_idx,
-            'water_pos': water_pos,
-            'water_x': water_x,
-            # PP topology and features (precomputed)
-            'pp_edge_index': pp_edge_index,
-            'pp_edge_unit': pp_edge_unit,
-            'pp_edge_rbf': pp_edge_rbf,
-            # Metadata
-            'num_asu_protein': num_asu_protein,
-            'num_protein_residues': num_residues,
-        }, cache_path)
+        torch.save(
+            {
+                "protein_pos": final_protein_pos,
+                "protein_x": final_protein_x,
+                "protein_res_idx": final_protein_res_idx,
+                "water_pos": water_pos,
+                "water_x": water_x,
+                # PP topology and features (precomputed)
+                "pp_edge_index": pp_edge_index,
+                "pp_edge_unit": pp_edge_unit,
+                "pp_edge_rbf": pp_edge_rbf,
+                # Metadata
+                "num_asu_protein": num_asu_protein,
+                "num_protein_residues": num_residues,
+            },
+            cache_path,
+        )
 
     def __len__(self) -> int:
         return self._effective_length
@@ -1007,15 +983,6 @@ class ProteinWaterDataset(Dataset):
         total_num_atoms: int,
     ) -> torch.Tensor:
         """Load SLAE atom embeddings from cache_dir/slae."""
-        mem_cache_key = f"slae:{cache_key}"
-
-        # Try memory cache first
-        if self.embedding_cache is not None:
-            cached = self.embedding_cache.get(mem_cache_key)
-            if cached is not None:
-                return _pad_atom_embeddings_for_mates(cached, total_num_atoms)
-
-        # Load from disk
         slae_cache_path = self.slae_dir / f"{cache_key}.pt"
         if not slae_cache_path.exists():
             raise FileNotFoundError(
@@ -1024,18 +991,15 @@ class ProteinWaterDataset(Dataset):
             )
         slae_cached = torch.load(slae_cache_path, weights_only=False)
         if "node_embeddings" not in slae_cached:
-            raise KeyError(f"Missing 'node_embeddings' in SLAE cache: {slae_cache_path}")
+            raise KeyError(
+                f"Missing 'node_embeddings' in SLAE cache: {slae_cache_path}"
+            )
         slae_emb = slae_cached["node_embeddings"]
         if slae_emb.size(0) != num_asu_protein:
             raise ValueError(
                 f"SLAE embedding atom count mismatch for {cache_key}: "
                 f"expected {num_asu_protein}, got {slae_emb.size(0)}"
             )
-
-        # Store in memory cache
-        if self.embedding_cache is not None:
-            self.embedding_cache.put(mem_cache_key, slae_emb)
-
         return _pad_atom_embeddings_for_mates(slae_emb, total_num_atoms)
 
     def _load_esm_embedding(
@@ -1046,16 +1010,6 @@ class ProteinWaterDataset(Dataset):
         total_num_atoms: int,
     ) -> torch.Tensor:
         """Load and broadcast residue-level ESM embeddings from cache_dir/esm."""
-        mem_cache_key = f"esm:{cache_key}"
-
-        # Try memory cache first (caches residue-level embeddings)
-        if self.embedding_cache is not None:
-            cached = self.embedding_cache.get(mem_cache_key)
-            if cached is not None:
-                esm_atom_emb = cached[asu_protein_res_idx]
-                return _pad_atom_embeddings_for_mates(esm_atom_emb, total_num_atoms)
-
-        # Load from disk
         esm_cache_path = self.esm_dir / f"{cache_key}.pt"
         if not esm_cache_path.exists():
             raise FileNotFoundError(
@@ -1064,18 +1018,15 @@ class ProteinWaterDataset(Dataset):
             )
         esm_cached = torch.load(esm_cache_path, weights_only=False)
         if "residue_embeddings" not in esm_cached:
-            raise KeyError(f"Missing 'residue_embeddings' in ESM cache: {esm_cache_path}")
+            raise KeyError(
+                f"Missing 'residue_embeddings' in ESM cache: {esm_cache_path}"
+            )
         residue_embeddings = esm_cached["residue_embeddings"]
         if residue_embeddings.size(0) != num_protein_residues:
             raise ValueError(
                 f"ESM residue count mismatch for {cache_key}: "
                 f"expected {num_protein_residues}, got {residue_embeddings.size(0)}"
             )
-
-        # Store in memory cache (residue-level, before broadcast)
-        if self.embedding_cache is not None:
-            self.embedding_cache.put(mem_cache_key, residue_embeddings)
-
         esm_atom_emb = residue_embeddings[asu_protein_res_idx]
         return _pad_atom_embeddings_for_mates(esm_atom_emb, total_num_atoms)
 
@@ -1128,52 +1079,54 @@ class ProteinWaterDataset(Dataset):
 
         cached = torch.load(cache_path, weights_only=False)
 
-        # Load all data directly from cache (already includes mates if applicable)
-        protein_pos = cached['protein_pos']
-        protein_x = cached['protein_x']
-        protein_res_idx = cached['protein_res_idx']
-        pp_edge_index = cached['pp_edge_index']
-        pp_edge_unit = cached['pp_edge_unit']
-        pp_edge_rbf = cached['pp_edge_rbf']
-        num_asu_protein = cached['num_asu_protein']
-        num_protein_residues = cached['num_protein_residues']
-        water_pos = cached['water_pos']
-        water_x = cached['water_x']
+        # load all data directly from cache (already includes mates if applicable)
+        protein_pos = cached["protein_pos"]
+        protein_x = cached["protein_x"]
+        protein_res_idx = cached["protein_res_idx"]
+        pp_edge_index = cached["pp_edge_index"]
+        pp_edge_unit = cached["pp_edge_unit"]
+        pp_edge_rbf = cached["pp_edge_rbf"]
+        num_asu_protein = cached["num_asu_protein"]
+        num_protein_residues = cached["num_protein_residues"]
+        water_pos = cached["water_pos"]
+        water_x = cached["water_x"]
 
-        # Extract ASU protein residue indices for embedding loading
+        # extract ASU protein residue indices for embedding loading
         asu_protein_res_idx = protein_res_idx[:num_asu_protein]
 
         data = HeteroData()
 
-        # Compute total num_residues (protein + mates)
-        num_residues = int(protein_res_idx.max().item() + 1) if protein_res_idx.numel() > 0 else 0
+        # compute total num_residues (protein + mates)
+        num_residues = (
+            int(protein_res_idx.max().item() + 1) if protein_res_idx.numel() > 0 else 0
+        )
 
-        data['protein'].x = protein_x
-        data['protein'].pos = protein_pos
-        data['protein'].residue_index = protein_res_idx
-        data['protein'].num_nodes = protein_pos.size(0)
-        data['protein'].num_residues = num_residues
-        data['protein'].num_protein_residues = num_protein_residues
+        data["protein"].x = protein_x
+        data["protein"].pos = protein_pos
+        data["protein"].residue_index = protein_res_idx
+        data["protein"].num_nodes = protein_pos.size(0)
+        data["protein"].num_residues = num_residues
+        data["protein"].num_protein_residues = num_protein_residues
 
         self._load_encoder_embeddings(
             data=data,
-            cache_key=entry['embedding_key'],  # Use base key for embeddings
+            cache_key=entry["embedding_key"],  # use base key for embeddings
             asu_protein_res_idx=asu_protein_res_idx,
             num_asu_protein=num_asu_protein,
             num_protein_residues=num_protein_residues,
         )
 
-        data['water'].x = water_x
-        data['water'].pos = water_pos
-        data['water'].num_nodes = water_pos.size(0)
+        data["water"].x = water_x
+        data["water"].pos = water_pos
+        data["water"].num_nodes = water_pos.size(0)
 
-        # Load PP edges and features from cache
+        # load PP edges and features from cache
         data[EDGE_PP].edge_index = pp_edge_index
         data[EDGE_PP].edge_unit = pp_edge_unit
         data[EDGE_PP].edge_rbf = pp_edge_rbf
 
-        # Store metadata (use embedding_key for consistency with existing code)
-        data.pdb_id = entry['embedding_key']
+        # store metadata (use embedding_key for consistency with existing code)
+        data.pdb_id = entry["embedding_key"]
         data.num_asu_protein_atoms = num_asu_protein
 
         return data
@@ -1188,7 +1141,7 @@ def get_dataloader(
     pin_memory: bool = True,
     prefetch_factor: int = 4,
     persistent_workers: bool = True,
-    **dataset_kwargs
+    **dataset_kwargs,
 ) -> DataLoader:
     """
     Create a DataLoader for crystal contact dataset.
@@ -1218,9 +1171,7 @@ def get_dataloader(
         - Then batch_size works normally
     """
     dataset = ProteinWaterDataset(
-        pdb_list_file=pdb_list_file,
-        processed_dir=processed_dir,
-        **dataset_kwargs
+        pdb_list_file=pdb_list_file, processed_dir=processed_dir, **dataset_kwargs
     )
 
     loader = DataLoader(

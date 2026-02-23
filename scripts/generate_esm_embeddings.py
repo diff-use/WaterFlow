@@ -48,10 +48,26 @@ from src.utils import setup_logging_for_tqdm
 
 # Standard 3-letter to 1-letter amino acid mapping (20 canonical only)
 THREE_TO_ONE = {
-    'ALA': 'A', 'CYS': 'C', 'ASP': 'D', 'GLU': 'E', 'PHE': 'F',
-    'GLY': 'G', 'HIS': 'H', 'ILE': 'I', 'LYS': 'K', 'LEU': 'L',
-    'MET': 'M', 'ASN': 'N', 'PRO': 'P', 'GLN': 'Q', 'ARG': 'R',
-    'SER': 'S', 'THR': 'T', 'VAL': 'V', 'TRP': 'W', 'TYR': 'Y',
+    "ALA": "A",
+    "CYS": "C",
+    "ASP": "D",
+    "GLU": "E",
+    "PHE": "F",
+    "GLY": "G",
+    "HIS": "H",
+    "ILE": "I",
+    "LYS": "K",
+    "LEU": "L",
+    "MET": "M",
+    "ASN": "N",
+    "PRO": "P",
+    "GLN": "Q",
+    "ARG": "R",
+    "SER": "S",
+    "THR": "T",
+    "VAL": "V",
+    "TRP": "W",
+    "TYR": "Y",
 }
 
 
@@ -70,13 +86,13 @@ def parse_split_file(split_file: str, base_pdb_dir: Path) -> list[dict]:
     Parse split file and construct entries with paths.
     """
     entries = []
-    with open(split_file, 'r') as f:
+    with open(split_file, "r") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
 
-            parts = line.split('_')
+            parts = line.split("_")
             if len(parts) < 2:
                 logger.warning(f"Skipping malformed line: {line}")
                 continue
@@ -84,11 +100,13 @@ def parse_split_file(split_file: str, base_pdb_dir: Path) -> list[dict]:
             pdb_id = parts[0]
             pdb_path = base_pdb_dir / pdb_id / f"{pdb_id}_final.pdb"
 
-            entries.append({
-                'pdb_id': pdb_id,
-                'pdb_path': pdb_path,
-                'cache_key': line,
-            })
+            entries.append(
+                {
+                    "pdb_id": pdb_id,
+                    "pdb_path": pdb_path,
+                    "cache_key": line,
+                }
+            )
 
     return entries
 
@@ -127,7 +145,9 @@ def get_biotite_residues(pdb_path: str) -> tuple[list[str], int]:
         if key not in key_to_resname:
             key_to_resname[key] = protein_atoms.res_name[i]
 
-    biotite_seq = [THREE_TO_ONE.get(key_to_resname[key], 'X') for key in unique_res_keys]
+    biotite_seq = [
+        THREE_TO_ONE.get(key_to_resname[key], "X") for key in unique_res_keys
+    ]
 
     return biotite_seq, len(biotite_seq)
 
@@ -157,7 +177,7 @@ def align_esm_to_biotite(
 
     esm_idx = 0
     for bt_idx, bt_aa in enumerate(biotite_seq):
-        if bt_aa == 'X':
+        if bt_aa == "X":
             # Non-canonical residue - ESM skipped it, leave as zeros (UNK)
             continue
 
@@ -236,29 +256,34 @@ def main() -> None:
         description="Generate ESM3 embeddings for protein structures"
     )
     parser.add_argument(
-        "--split_file", type=str, required=True,
-        help="Text file with PDB entries (one per line, e.g., '6eey_final')"
+        "--split_file",
+        type=str,
+        required=True,
+        help="Text file with PDB entries (one per line, e.g., '6eey_final')",
     )
     parser.add_argument(
-        "--cache_dir", type=str, required=True,
-        help="Base cache directory; embeddings saved to {cache_dir}/esm/"
+        "--cache_dir",
+        type=str,
+        required=True,
+        help="Base cache directory; embeddings saved to {cache_dir}/esm/",
     )
     parser.add_argument(
-        "--base_pdb_dir", type=str,
+        "--base_pdb_dir",
+        type=str,
         default="/sb/wankowicz_lab/data/srivasv/pdb_redo_data",
-        help="Base directory containing PDB subdirectories"
+        help="Base directory containing PDB subdirectories",
     )
     parser.add_argument(
-        "--device", type=str, default="cuda:0",
-        help="Device to use for ESM model"
+        "--device", type=str, default="cuda:0", help="Device to use for ESM model"
     )
     parser.add_argument(
-        "--batch_limit", type=int, default=None,
-        help="Limit number of files to process (for testing)"
+        "--batch_limit",
+        type=int,
+        default=None,
+        help="Limit number of files to process (for testing)",
     )
     parser.add_argument(
-        "--overwrite", action="store_true",
-        help="Overwrite existing embeddings"
+        "--overwrite", action="store_true", help="Overwrite existing embeddings"
     )
 
     args = parser.parse_args()
@@ -280,7 +305,7 @@ def main() -> None:
     logger.info(f"Found {len(entries)} entries in split file")
 
     if args.batch_limit:
-        entries = entries[:args.batch_limit]
+        entries = entries[: args.batch_limit]
         logger.info(f"Processing first {args.batch_limit} entries")
 
     if not args.overwrite:
@@ -300,8 +325,8 @@ def main() -> None:
     failures = []
 
     for entry in tqdm(entries, desc="Computing ESM embeddings"):
-        pdb_path = entry['pdb_path']
-        cache_key = entry['cache_key']
+        pdb_path = entry["pdb_path"]
+        cache_key = entry["cache_key"]
         cache_path = esm_cache_dir / f"{cache_key}.pt"
 
         if not pdb_path.exists():
@@ -315,18 +340,20 @@ def main() -> None:
         )
 
         if result is not None:
-            result['pdb_id'] = entry['pdb_id']
+            result["pdb_id"] = entry["pdb_id"]
             torch.save(result, cache_path)
             success_count += 1
         else:
             failures.append((cache_key, "Embedding computation failed"))
 
-    logger.info(f"Completed: {success_count}/{len(entries)} entries processed successfully")
+    logger.info(
+        f"Completed: {success_count}/{len(entries)} entries processed successfully"
+    )
 
     # Log failures
     if failures:
         failure_log_path = esm_cache_dir / "embedding_failures.log"
-        with open(failure_log_path, 'a') as f:
+        with open(failure_log_path, "a") as f:
             for cache_key, reason in failures:
                 f.write(f"{cache_key}\t{reason}\n")
         logger.info(f"Logged {len(failures)} failures to {failure_log_path}")

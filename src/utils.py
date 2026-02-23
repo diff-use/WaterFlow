@@ -1,6 +1,4 @@
 # utils.py
-from __future__ import annotations
-
 """
 Utility functions organized by category:
 1. Feature encoding (rbf, atom37_to_atoms)
@@ -8,6 +6,8 @@ Utility functions organized by category:
 3. Metrics (recall_precision, compute_rmsd, compute_placement_metrics)
 4. Visualization (plot_3d_frame, create_trajectory_gif, save_protein_plot)
 """
+
+from __future__ import annotations
 
 from collections.abc import Sequence
 import matplotlib.pyplot as plt
@@ -24,6 +24,7 @@ from tqdm import tqdm
 from src.constants import NUM_RBF, RBF_CUTOFF
 
 ATOM37_FILL = 1e-5
+
 
 def setup_logging_for_tqdm(
     level: str = "INFO",
@@ -56,20 +57,18 @@ def setup_logging_for_tqdm(
         log_path.parent.mkdir(parents=True, exist_ok=True)
         logger.add(str(log_path), level=level.upper(), enqueue=True)
 
+
 def rbf(r: Tensor, num_gaussians: int = NUM_RBF, cutoff: float = RBF_CUTOFF) -> Tensor:
     """Radial basis function encoding of distances using Bessel functions."""
     r = r.clamp(min=1e-4)
     return soft_one_hot_linspace(
-        r,
-        start=0.0,
-        end=cutoff,
-        number=num_gaussians,
-        basis='bessel',
-        cutoff=True
+        r, start=0.0, end=cutoff, number=num_gaussians, basis="bessel", cutoff=True
     )
 
 
-def atom37_to_atoms(atom_tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def atom37_to_atoms(
+    atom_tensor: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Convert atom37 representation to flat atom list.
 
@@ -91,6 +90,7 @@ def atom37_to_atoms(atom_tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tens
     coords = flat[flat_mask]
 
     return coords, residue_index, atom_type
+
 
 @torch.no_grad()
 def ot_coupling(
@@ -114,7 +114,7 @@ def ot_coupling(
     x1_star = torch.empty_like(x1)
 
     for g in torch.unique(batch):
-        m = (batch == g)
+        m = batch == g
         if m.sum() == 0:
             continue
 
@@ -130,7 +130,9 @@ def ot_coupling(
 
     return x0_star, x1_star
 
-#eval metric functions
+
+# eval metric functions
+
 
 @torch.no_grad()
 def recall_precision(
@@ -238,7 +240,7 @@ def compute_placement_metrics(
         true = true.detach().cpu().numpy()
 
     if pred.size == 0 or true.size == 0:
-        return {'precision': 0.0, 'recall': 0.0, 'f1': 0.0, 'auc_pr': 0.0}
+        return {"precision": 0.0, "recall": 0.0, "f1": 0.0, "auc_pr": 0.0}
 
     D = spdist.cdist(true, pred)
 
@@ -260,9 +262,10 @@ def compute_placement_metrics(
     sorted_idx = np.argsort(recalls)
     auc_pr = auc(np.array(recalls)[sorted_idx], np.array(precisions)[sorted_idx])
 
-    return {'precision': precision, 'recall': recall, 'f1': f1, 'auc_pr': auc_pr}
+    return {"precision": precision, "recall": recall, "f1": f1, "auc_pr": auc_pr}
 
-#viz functions
+
+# viz functions
 def plot_3d_frame(
     ax,
     protein_pos: np.ndarray,
@@ -279,31 +282,52 @@ def plot_3d_frame(
 
     if protein_pos.size > 0:
         ax.scatter(
-            protein_pos[:, 0], protein_pos[:, 1], protein_pos[:, 2],
-            c='gray', alpha=0.3, s=8, label='Protein'
+            protein_pos[:, 0],
+            protein_pos[:, 1],
+            protein_pos[:, 2],
+            c="gray",
+            alpha=0.3,
+            s=8,
+            label="Protein",
         )
 
     if mate_pos is not None and mate_pos.size > 0:
         ax.scatter(
-            mate_pos[:, 0], mate_pos[:, 1], mate_pos[:, 2],
-            c='dimgrey', alpha=0.6, s=10, label='Mates'
+            mate_pos[:, 0],
+            mate_pos[:, 1],
+            mate_pos[:, 2],
+            c="dimgrey",
+            alpha=0.6,
+            s=10,
+            label="Mates",
         )
 
     ax.scatter(
-        water_true[:, 0], water_true[:, 1], water_true[:, 2],
-        c='red', marker='*', alpha=0.9, s=16, label='True Water'
+        water_true[:, 0],
+        water_true[:, 1],
+        water_true[:, 2],
+        c="red",
+        marker="*",
+        alpha=0.9,
+        s=16,
+        label="True Water",
     )
 
     ax.scatter(
-        water_pred[:, 0], water_pred[:, 1], water_pred[:, 2],
-        c='blue', alpha=0.9, s=14, label='Predicted Water'
+        water_pred[:, 0],
+        water_pred[:, 1],
+        water_pred[:, 2],
+        c="blue",
+        alpha=0.9,
+        s=14,
+        label="Predicted Water",
     )
 
-    ax.set_xlabel('X (Å)')
-    ax.set_ylabel('Y (Å)')
-    ax.set_zlabel('Z (Å)')
+    ax.set_xlabel("X (Å)")
+    ax.set_ylabel("Y (Å)")
+    ax.set_zlabel("Z (Å)")
     ax.set_title(title)
-    ax.legend(loc='upper right')
+    ax.legend(loc="upper right")
 
     if xlim is not None:
         ax.set_xlim(xlim)
@@ -356,15 +380,22 @@ def create_trajectory_gif(
     for i in frame_indices:
         water_pred = trajectory[i]
         fig = plt.figure(figsize=(10, 8))
-        ax = fig.add_subplot(111, projection='3d')
+        ax = fig.add_subplot(111, projection="3d")
 
-        frame_title = f"{title} Step {i}/{len(trajectory)-1}"
+        frame_title = f"{title} Step {i}/{len(trajectory) - 1}"
         if pdb_id:
             frame_title = f"{pdb_id} | {frame_title}"
 
         plot_3d_frame(
-            ax, protein_pos, None, water_pred, water_true,
-            title=frame_title, xlim=xlim, ylim=ylim, zlim=zlim
+            ax,
+            protein_pos,
+            None,
+            water_pred,
+            water_true,
+            title=frame_title,
+            xlim=xlim,
+            ylim=ylim,
+            zlim=zlim,
         )
 
         fig.canvas.draw()
@@ -382,7 +413,7 @@ def create_trajectory_gif(
             save_all=True,
             append_images=all_frames[1:],
             duration=1000 // fps,
-            loop=0
+            loop=0,
         )
 
 
@@ -411,9 +442,24 @@ def save_protein_plot(
     P_aligned = np.dot(P, R)
 
     fig = plt.figure(figsize=(8, 8))
-    ax = fig.add_subplot(111, projection='3d')
-    ax.plot(Q[:, 0], Q[:, 1], Q[:, 2], color='black', linewidth=2, label='Ground Truth', alpha=0.6)
-    ax.plot(P_aligned[:, 0], P_aligned[:, 1], P_aligned[:, 2], color='red', linewidth=2, label='Prediction')
+    ax = fig.add_subplot(111, projection="3d")
+    ax.plot(
+        Q[:, 0],
+        Q[:, 1],
+        Q[:, 2],
+        color="black",
+        linewidth=2,
+        label="Ground Truth",
+        alpha=0.6,
+    )
+    ax.plot(
+        P_aligned[:, 0],
+        P_aligned[:, 1],
+        P_aligned[:, 2],
+        color="red",
+        linewidth=2,
+        label="Prediction",
+    )
     ax.legend()
     ax.set_title(f"Step {step}")
     plt.savefig(f"{save_dir}/step_{step}.png")

@@ -6,7 +6,6 @@ Usage: python parse_edia_json.py <input_file> [output_file]
 
 import json
 import sys
-from pathlib import Path
 
 import pandas as pd
 from loguru import logger
@@ -23,24 +22,24 @@ def parse_protein_data(file_path):
         pandas.DataFrame: Parsed data as a DataFrame
     """
     try:
-        with open(file_path, 'r') as f:
+        with open(file_path, "r") as f:
             content = f.read().strip()
 
             # Handle malformed JSON (missing opening/closing brackets)
-            if not content.startswith('['):
-                content = '[' + content
-            if not content.endswith(']'):
-                content = content + ']'
+            if not content.startswith("["):
+                content = "[" + content
+            if not content.endswith("]"):
+                content = content + "]"
 
             data = json.loads(content)
 
         df = pd.DataFrame(data)
 
         # Flatten the nested 'pdb' column if it exists
-        if 'pdb' in df.columns:
-            pdb_df = pd.json_normalize(df['pdb'])
-            pdb_df.columns = ['pdb_' + col for col in pdb_df.columns]
-            df = pd.concat([df.drop('pdb', axis=1), pdb_df], axis=1)
+        if "pdb" in df.columns:
+            pdb_df = pd.json_normalize(df["pdb"])
+            pdb_df.columns = ["pdb_" + col for col in pdb_df.columns]
+            df = pd.concat([df.drop("pdb", axis=1), pdb_df], axis=1)
 
         return df
 

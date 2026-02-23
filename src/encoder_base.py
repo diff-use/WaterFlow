@@ -5,6 +5,7 @@ This module provides:
 - BaseProteinEncoder: Abstract base class that all encoders must implement
 - Registry pattern: Decorator-based registration and build_encoder() function
 """
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -38,7 +39,9 @@ class BaseProteinEncoder(ABC, nn.Module):
         pass
 
     @abstractmethod
-    def forward(self, data: HeteroData) -> tuple[torch.Tensor, torch.Tensor, tuple | None]:
+    def forward(
+        self, data: HeteroData
+    ) -> tuple[torch.Tensor, torch.Tensor, tuple | None]:
         """
         Encode protein data.
 
@@ -83,11 +86,13 @@ def register_encoder(name: str):
         class MyEncoder(BaseProteinEncoder):
             ...
     """
+
     def decorator(cls: BaseProteinEncoder) -> BaseProteinEncoder:
         if name in _ENCODER_REGISTRY:
             raise ValueError(f"Encoder '{name}' is already registered")
         _ENCODER_REGISTRY[name] = cls
         return cls
+
     return decorator
 
 
@@ -123,8 +128,8 @@ def build_encoder(config: dict, device: torch.device) -> BaseProteinEncoder:
     Returns:
         Instantiated encoder implementing BaseProteinEncoder
     """
-    if 'encoder_type' not in config:
+    if "encoder_type" not in config:
         raise ValueError("'encoder_type' must be specified in config")
-    encoder_type = config['encoder_type']
+    encoder_type = config["encoder_type"]
     encoder_cls = get_encoder_class(encoder_type)
     return encoder_cls.from_config(config, device)
