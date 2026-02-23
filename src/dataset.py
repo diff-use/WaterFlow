@@ -527,6 +527,70 @@ def filter_waters_by_quality(
     return keep_mask
 
 
+class EmbeddingCache:
+    """
+    Thread-safe LRU cache for embedding tensors.
+
+    Reduces disk I/O by caching frequently accessed embeddings in memory.
+    Uses LRU eviction to stay within memory budget.
+    """
+
+    def __init__(self, max_size_gb: float = 16.0):
+        self._cache: dict[str, torch.Tensor] = {}
+        self._max_bytes = int(max_size_gb * 1024**3)
+        self._current_bytes = 0
+        self._access_order: list[str] = []
+
+    def get(self, key: str) -> torch.Tensor | None:
+        """Get tensor from cache, updating access order. Returns None if not found."""
+        if key in self._cache:
+            self._access_order.remove(key)
+            self._access_order.append(key)
+            return self._cache[key]
+        return None
+
+    def put(self, key: str, tensor: torch.Tensor) -> None:
+        """Add tensor to cache, evicting old entries if needed."""
+        if key in self._cache:
+            return  # Already cached
+
+        size = tensor.element_size() * tensor.numel()
+
+        # Evict oldest entries until we have room
+        while self._current_bytes + size > self._max_bytes and self._access_order:
+            old_key = self._access_order.pop(0)
+            old_tensor = self._cache.pop(old_key)
+            self._current_bytes -= old_tensor.element_size() * old_tensor.numel()
+
+        # Store a clone to avoid mutation issues
+        self._cache[key] = tensor.clone()
+        self._access_order.append(key)
+        self._current_bytes += size
+
+    @property
+    def size_gb(self) -> float:
+        """Current cache size in GB."""
+        return self._current_bytes / (1024**3)
+
+    @property
+    def num_entries(self) -> int:
+        """Number of cached entries."""
+        return len(self._cache)
+
+
+# Global embedding cache singleton
+_EMBEDDING_CACHE: EmbeddingCache | None = None
+
+
+def get_embedding_cache(max_gb: float = 16.0) -> EmbeddingCache:
+    """Get or create the global embedding cache singleton."""
+    global _EMBEDDING_CACHE
+    if _EMBEDDING_CACHE is None:
+        _EMBEDDING_CACHE = EmbeddingCache(max_gb)
+        logger.info(f"Initialized embedding cache with {max_gb} GB limit")
+    return _EMBEDDING_CACHE
+
+
 class ProteinWaterDataset(Dataset):
     """
     Dataset for protein crystal contact prediction.
@@ -560,6 +624,8 @@ class ProteinWaterDataset(Dataset):
         filter_by_distance: bool = True,
         filter_by_edia: bool = True,
         filter_by_bfactor: bool = True,
+        cache_embeddings: bool = True,
+        cache_size_gb: float = 16.0,
     ):
         """
         Args:
@@ -599,6 +665,8 @@ class ProteinWaterDataset(Dataset):
             filter_by_edia: Enable/disable EDIA score filtering.
             filter_by_bfactor: Enable/disable B-factor z-score filtering.
                               If a per-water filter is disabled, its threshold is ignored.
+            cache_embeddings: Cache embeddings in memory for faster access (default True)
+            cache_size_gb: Maximum size of embedding cache in GB (default 16.0)
         """
 
         self.cache_dir = Path(processed_dir)
@@ -626,6 +694,10 @@ class ProteinWaterDataset(Dataset):
         self.filter_by_distance = filter_by_distance
         self.filter_by_edia = filter_by_edia
         self.filter_by_bfactor = filter_by_bfactor
+
+        # Initialize embedding cache for faster I/O
+        self.cache_embeddings = cache_embeddings
+        self.embedding_cache = get_embedding_cache(cache_size_gb) if cache_embeddings else None
 
         self.entries = self._parse_pdb_list(pdb_list_file)
 
@@ -935,6 +1007,15 @@ class ProteinWaterDataset(Dataset):
         total_num_atoms: int,
     ) -> torch.Tensor:
         """Load SLAE atom embeddings from cache_dir/slae."""
+        mem_cache_key = f"slae:{cache_key}"
+
+        # Try memory cache first
+        if self.embedding_cache is not None:
+            cached = self.embedding_cache.get(mem_cache_key)
+            if cached is not None:
+                return _pad_atom_embeddings_for_mates(cached, total_num_atoms)
+
+        # Load from disk
         slae_cache_path = self.slae_dir / f"{cache_key}.pt"
         if not slae_cache_path.exists():
             raise FileNotFoundError(
@@ -950,6 +1031,11 @@ class ProteinWaterDataset(Dataset):
                 f"SLAE embedding atom count mismatch for {cache_key}: "
                 f"expected {num_asu_protein}, got {slae_emb.size(0)}"
             )
+
+        # Store in memory cache
+        if self.embedding_cache is not None:
+            self.embedding_cache.put(mem_cache_key, slae_emb)
+
         return _pad_atom_embeddings_for_mates(slae_emb, total_num_atoms)
 
     def _load_esm_embedding(
@@ -960,6 +1046,16 @@ class ProteinWaterDataset(Dataset):
         total_num_atoms: int,
     ) -> torch.Tensor:
         """Load and broadcast residue-level ESM embeddings from cache_dir/esm."""
+        mem_cache_key = f"esm:{cache_key}"
+
+        # Try memory cache first (caches residue-level embeddings)
+        if self.embedding_cache is not None:
+            cached = self.embedding_cache.get(mem_cache_key)
+            if cached is not None:
+                esm_atom_emb = cached[asu_protein_res_idx]
+                return _pad_atom_embeddings_for_mates(esm_atom_emb, total_num_atoms)
+
+        # Load from disk
         esm_cache_path = self.esm_dir / f"{cache_key}.pt"
         if not esm_cache_path.exists():
             raise FileNotFoundError(
@@ -975,6 +1071,11 @@ class ProteinWaterDataset(Dataset):
                 f"ESM residue count mismatch for {cache_key}: "
                 f"expected {num_protein_residues}, got {residue_embeddings.size(0)}"
             )
+
+        # Store in memory cache (residue-level, before broadcast)
+        if self.embedding_cache is not None:
+            self.embedding_cache.put(mem_cache_key, residue_embeddings)
+
         esm_atom_emb = residue_embeddings[asu_protein_res_idx]
         return _pad_atom_embeddings_for_mates(esm_atom_emb, total_num_atoms)
 
@@ -1083,8 +1184,10 @@ def get_dataloader(
     processed_dir: str,
     batch_size: int = 8,
     shuffle: bool = True,
-    num_workers: int = 4,
-    pin_memory: bool = False,
+    num_workers: int = 8,
+    pin_memory: bool = True,
+    prefetch_factor: int = 4,
+    persistent_workers: bool = True,
     **dataset_kwargs
 ) -> DataLoader:
     """
@@ -1098,6 +1201,11 @@ def get_dataloader(
         encoder_type: Encoder used downstream ('gvp', 'slae', or 'esm').
                       Embeddings are loaded only for this type.
         batch_size: Number of graphs per batch
+        shuffle: Whether to shuffle the data
+        num_workers: Number of DataLoader workers (default 8)
+        pin_memory: Pin memory for faster CPU-GPU transfer (default True)
+        prefetch_factor: Number of batches to prefetch per worker (default 4)
+        persistent_workers: Keep workers alive between epochs (default True)
         **dataset_kwargs: Additional arguments passed to ProteinWaterDataset
                          (e.g., cutoff, include_mates, duplicate_single_sample)
 
@@ -1121,6 +1229,8 @@ def get_dataloader(
         shuffle=shuffle,
         num_workers=num_workers,
         pin_memory=pin_memory,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None,
+        persistent_workers=persistent_workers and num_workers > 0,
         collate_fn=lambda batch: Batch.from_data_list(batch),
     )
 

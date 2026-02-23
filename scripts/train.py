@@ -162,7 +162,17 @@ def parse_args():
     p.add_argument("--grad_clip", type=float, default=1.0)
     p.add_argument("--grad_accum_steps", type=int, default=1,
                    help="Number of gradient accumulation steps")
-    p.add_argument("--num_workers", type=int, default=4)
+    p.add_argument("--num_workers", type=int, default=8)
+    p.add_argument("--prefetch_factor", type=int, default=4,
+                   help="Number of batches to prefetch per worker")
+    p.add_argument("--pin_memory", action="store_true", default=True,
+                   help="Pin memory for faster CPU-GPU transfer")
+    p.add_argument("--no_pin_memory", dest="pin_memory", action="store_false",
+                   help="Disable pin_memory")
+    p.add_argument("--persistent_workers", action="store_true", default=True,
+                   help="Keep workers alive between epochs")
+    p.add_argument("--no_persistent_workers", dest="persistent_workers", action="store_false",
+                   help="Disable persistent_workers")
 
     # scheduler
     p.add_argument("--scheduler", type=str, default="cosine", choices=["cosine", "step", "none"])
@@ -641,6 +651,9 @@ def main():
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
+        pin_memory=args.pin_memory,
+        prefetch_factor=args.prefetch_factor,
+        persistent_workers=args.persistent_workers,
         duplicate_single_sample=args.duplicate_single_sample,
         **dataset_kwargs,
     )
@@ -651,6 +664,9 @@ def main():
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
+        pin_memory=args.pin_memory,
+        prefetch_factor=args.prefetch_factor,
+        persistent_workers=args.persistent_workers,
         duplicate_single_sample=args.duplicate_single_sample,
         **dataset_kwargs,
     )

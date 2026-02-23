@@ -27,6 +27,7 @@ import torch.nn as nn
 from loguru import logger
 from tqdm import tqdm
 
+from src.constants import NUM_RBF
 from src.dataset import ProteinWaterDataset
 from src.encoder_base import build_encoder
 from src.flow import FlowMatcher, FlowWaterGVP
@@ -78,6 +79,13 @@ def parse_args():
         "--include_mates",
         action="store_true",
         help="Include symmetry mate atoms as protein nodes",
+    )
+    p.add_argument(
+        "--geometry_cache",
+        type=str,
+        default=None,
+        help="Geometry cache name to use (e.g., 'geometry' or 'geometry_unfiltered'). "
+             "Overrides the model's config if specified. Use this to evaluate against a specific ground truth.",
     )
 
     # checkpoint arguments
@@ -161,34 +169,36 @@ def load_config(run_dir: Path) -> dict:
 
 def build_model_from_config(config: dict, device: torch.device) -> nn.Module:
     """Build model architecture from config using registry-based encoder construction."""
-    use_slae = config.get("use_slae", False)
-    hidden_s = config.get("hidden_s", 256)
-    hidden_v = config.get("hidden_v", 64)
-    flow_layers = config.get("flow_layers", 5)
-    k_pw = config.get("k_pw", 24)
-    k_ww = config.get("k_ww", 24)
-    freeze_encoder = config.get("freeze_encoder", False)
+    # Use resolved_encoder_config if available (from training), otherwise build from config
+    resolved = config.get("resolved_encoder_config")
+    if resolved:
+        encoder_config = resolved.copy()
+    else:
+        encoder_type = config.get("encoder_type", "gvp")
+        encoder_config = {
+            "encoder_type": encoder_type,
+            "hidden_s": config.get("hidden_s") or 256,
+            "hidden_v": config.get("hidden_v") or 64,
+            "node_scalar_in": config.get("node_scalar_in") or 16,
+            "freeze_encoder": config.get("freeze_encoder", False),
+            "encoder_ckpt": config.get("encoder_ckpt"),
+        }
 
-    # Build encoder config for registry
-    encoder_config = {
-        'encoder_type': 'slae' if use_slae else 'gvp',
-        'hidden_s': hidden_s,
-        'hidden_v': hidden_v,
-        'node_scalar_in': config.get("node_scalar_in", 16),
-        'freeze_encoder': freeze_encoder,
-        'slae_dim': config.get("slae_dim", 128),
-        'encoder_ckpt': config.get("encoder_ckpt"),
-    }
+        # Add encoder-specific dimension (use 'or' to handle None values)
+        if encoder_type == "slae":
+            encoder_config["slae_dim"] = config.get("slae_dim") or 128
+        elif encoder_type == "esm":
+            encoder_config["esm_dim"] = config.get("esm_dim") or 1536
 
     encoder = build_encoder(encoder_config, device)
 
     model = FlowWaterGVP(
         encoder=encoder,
-        hidden_dims=(hidden_s, hidden_v),
-        edge_scalar_dim=32,
-        layers=flow_layers,
-        k_pw=k_pw,
-        k_ww=k_ww,
+        hidden_dims=(config.get("hidden_s") or 256, config.get("hidden_v") or 64),
+        edge_scalar_dim=config.get("edge_scalar_dim") or NUM_RBF,
+        layers=config.get("flow_layers") or 5,
+        k_pw=config.get("k_pw") or 24,
+        k_ww=config.get("k_ww") or 24,
     ).to(device)
 
     return model
@@ -331,16 +341,23 @@ def main():
 
     # Determine include_mates from args or config
     include_mates = args.include_mates or config.get("include_mates", False)
+    encoder_type = config.get("encoder_type", "gvp")
+
+    # Use --geometry_cache if provided, otherwise use config's geometry_cache_name
+    geometry_cache_name = args.geometry_cache or config.get("geometry_cache_name", "geometry")
 
     dataset = ProteinWaterDataset(
         pdb_list_file=args.pdb_list,
         processed_dir=args.processed_dir,
         base_pdb_dir=args.base_pdb_dir,
+        encoder_type=encoder_type,
         include_mates=include_mates,
+        geometry_cache_name=geometry_cache_name,
         preprocess=True,
     )
 
     logger.info(f"Found {len(dataset)} PDB entries")
+    logger.info(f"Using geometry cache: {geometry_cache_name}")
 
     # run inference
     logger.info(f"Running inference with method={args.method}, steps={args.num_steps}")
@@ -390,8 +407,8 @@ def main():
         # process each result in the batch
         for result in batch_results:
             pdb_id = result.get("pdb_id", f"unknown_{len(all_metrics)}")
-            water_true = result["water_true"]
             water_pred = result["water_pred"]
+            water_true = result["water_true"]
 
             # compute metrics
             metrics = compute_placement_metrics(
@@ -472,6 +489,7 @@ def main():
                         "threshold": args.threshold,
                         "include_mates": include_mates,
                         "water_ratio": args.water_ratio,
+                        "geometry_cache": geometry_cache_name,
                     },
                 },
                 f,
