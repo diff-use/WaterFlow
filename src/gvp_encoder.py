@@ -20,7 +20,7 @@ from torch_scatter import scatter_add, scatter_max, scatter_mean
 from src.constants import EDGE_PP, NODE_FEATURE_DIM, NUM_RBF, RBF_CUTOFF
 from src.encoder_base import BaseProteinEncoder, register_encoder
 from src.gvp import GVP, EdgeUpdate, GVPConvLayer
-from src.utils import rbf as _rbf
+from src.utils import rbf
 
 
 def _edge_vectors(pos: torch.Tensor, edge_index: torch.Tensor):
@@ -237,7 +237,7 @@ class ProteinGVPEncoder(nn.Module):
         else:
             # Fallback: compute from positions
             d, u = _edge_vectors(data.pos, data.edge_index)
-            s_edge_raw = _rbf(d, num_gaussians=self.num_edge_rbf, cutoff=self.radius)
+            s_edge_raw = rbf(d, num_gaussians=self.num_edge_rbf, cutoff=self.radius)
 
         s_edge = self.edge_in_proj(s_edge_raw)
         V_edge = u.unsqueeze(1)
