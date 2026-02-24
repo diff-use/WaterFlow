@@ -2,12 +2,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from pathlib import Path
-
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from src.gvp import GVP, tuple_sum, tuple_cat, _merge, _split, LayerNorm, Dropout
+from src.gvp import GVP, Dropout, LayerNorm, _merge, _split, tuple_cat, tuple_sum
 
 
 class TestGVPHelpers:

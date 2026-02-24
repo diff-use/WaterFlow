@@ -1,4 +1,5 @@
 # utils.py
+from __future__ import annotations
 
 """
 Utility functions organized by category:
@@ -6,19 +7,38 @@ Utility functions organized by category:
 2. Optimal transport (ot_coupling)
 3. Metrics (recall_precision, compute_rmsd, compute_placement_metrics)
 4. Visualization (plot_3d_frame, create_trajectory_gif, save_protein_plot)
+5. Logging (setup_logging_for_tqdm)
 """
 
-import torch
-from torch import Tensor
-import numpy as np
-from typing import Tuple, Dict, Union, Sequence
-from scipy.optimize import linear_sum_assignment
-import scipy.spatial.distance as spdist
+from collections.abc import Sequence
 
-from e3nn.math import soft_one_hot_linspace
 import matplotlib.pyplot as plt
-
+import numpy as np
+import scipy.spatial.distance as spdist
+import torch
+from e3nn.math import soft_one_hot_linspace
 from PIL import Image
+from scipy.optimize import linear_sum_assignment
+from torch import Tensor
+from tqdm import tqdm
+
+
+def setup_logging_for_tqdm():
+    """
+    Configure loguru to work with tqdm progress bars.
+
+    Redirects log output through tqdm.write() so log messages don't
+    break progress bar rendering. Call this once at the start of
+    scripts that use both logging and tqdm.
+    """
+    from loguru import logger
+
+    logger.remove()
+    logger.add(
+        lambda msg: tqdm.write(msg, end=""),
+        colorize=True,
+        format="<level>{level: <8}</level> | <level>{message}</level>",
+    )
 
 ATOM37_FILL = 1e-5
 
@@ -35,7 +55,7 @@ def rbf(r: Tensor, num_gaussians: int = 16, cutoff: float = 8.0) -> Tensor:
     )
 
 
-def atom37_to_atoms(atom_tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def atom37_to_atoms(atom_tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Convert atom37 representation to flat atom list.
 
@@ -63,7 +83,7 @@ def ot_coupling(
     x1: torch.Tensor,
     batch: torch.Tensor,
     x0: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Hard OT (Hungarian) pairing per graph for flow matching.
 
@@ -101,10 +121,10 @@ def ot_coupling(
 
 @torch.no_grad()
 def recall_precision(
-    pred: Union[torch.Tensor, np.ndarray],
-    true: Union[torch.Tensor, np.ndarray],
+    pred: torch.Tensor | np.ndarray,
+    true: torch.Tensor | np.ndarray,
     thresh: float = 1.0,
-) -> Tuple[float, float]:
+) -> tuple[float, float]:
     """
     Compute recall and precision for point set matching.
 
@@ -143,9 +163,9 @@ def recall_precision(
 
 @torch.no_grad()
 def compute_rmsd(
-    pred: Union[torch.Tensor, np.ndarray],
-    target: Union[torch.Tensor, np.ndarray],
-    batch: Union[torch.Tensor, np.ndarray, None] = None,
+    pred: torch.Tensor | np.ndarray,
+    target: torch.Tensor | np.ndarray,
+    batch: torch.Tensor | np.ndarray | None = None,
 ) -> float:
     """
     Compute RMSD with optimal assignment using Hungarian algorithm.
@@ -182,10 +202,10 @@ def compute_rmsd(
 
 
 def compute_placement_metrics(
-    pred: Union[torch.Tensor, np.ndarray],
-    true: Union[torch.Tensor, np.ndarray],
+    pred: torch.Tensor | np.ndarray,
+    true: torch.Tensor | np.ndarray,
     threshold: float = 1.0,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """
     Compute standard metrics for water placement evaluation.
 
@@ -237,9 +257,9 @@ def plot_3d_frame(
     water_pred: np.ndarray,
     water_true: np.ndarray,
     title: str = "",
-    xlim: Tuple[float, float] = None,
-    ylim: Tuple[float, float] = None,
-    zlim: Tuple[float, float] = None,
+    xlim: tuple[float, float] = None,
+    ylim: tuple[float, float] = None,
+    zlim: tuple[float, float] = None,
 ):
     """Plot a single 3D frame showing protein, mates, and waters."""
     ax.clear()

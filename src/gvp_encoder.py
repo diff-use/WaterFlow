@@ -1,48 +1,88 @@
-# encoder.py
+"""
+GVP (Geometric Vector Perceptron) encoder implementation.
 
+This encoder processes protein structure directly using GVP layers
+to produce geometric features for the flow model.
+"""
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-import numpy as np
-
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
+from typing import Any, Literal
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F 
+import torch.nn.functional as F
+from loguru import logger
+from torch_geometric.data import Batch, Data, HeteroData
+from torch_scatter import scatter_add, scatter_max, scatter_mean
 
-from typing import Callable, Literal, Optional, Tuple, Any, Dict
-
-from torch_geometric.data import Batch, Data
-from torch_scatter import scatter_add, scatter_mean, scatter_max
-
-from abc import ABC, abstractmethod
-from enum import Enum
-from pathlib import Path
-
-import yaml
-
-from src.gvp import EdgeUpdate, GVP, GVPConvLayer
-import e3nn
-from e3nn.math import soft_one_hot_linspace
-
+from src.constants import EDGE_PP
+from src.encoder_base import BaseProteinEncoder, register_encoder
+from src.gvp import GVP, EdgeUpdate, GVPConvLayer
 from src.utils import rbf as _rbf
 
+
 def _edge_vectors(pos: torch.Tensor, edge_index: torch.Tensor):
+    """Compute edge vectors and distances."""
     src, dst = edge_index[0], edge_index[1]
     vec = pos[dst] - pos[src]
-    rij = torch.linalg.norm(vec, dim=-1).clamp(min=1e-4) 
+    rij = torch.linalg.norm(vec, dim=-1).clamp(min=1e-4)
     r_hat = vec / rij[:, None]
     return rij, r_hat
 
 
+def make_encoder_data(data: HeteroData) -> Data:
+    """
+    Build a homogeneous Data with protein nodes for GVP encoder.
+
+    Extracts protein subgraph from HeteroData for use with GVP encoder.
+    Edge features are computed by the encoder itself.
+
+    Args:
+        data: HeteroData with protein nodes
+
+    Returns:
+        enc_data: Data with x, pos, edge_index
+    """
+    device = data['protein'].pos.device
+    prot = data['protein']
+
+    x = prot.x
+    pos = prot.pos
+
+    # protein-protein edges (topology only - features computed by encoder)
+    if EDGE_PP in data.edge_types:
+        edge_index = data[EDGE_PP].edge_index
+    else:
+        edge_index = torch.empty(2, 0, dtype=torch.long, device=device)
+
+    enc_data = Data(
+        x=x,
+        pos=pos,
+        edge_index=edge_index,
+    )
+
+    # batch for multi-complex batches
+    if hasattr(prot, "batch"):
+        enc_data.batch = prot.batch
+
+    return enc_data
+
+
 class ProteinGVPEncoder(nn.Module):
+    """
+    Core GVP encoder architecture for protein structures.
+
+    This is the underlying encoder that processes protein graphs
+    using GVP message passing layers.
+    """
+
     def __init__(
         self,
-        node_scalar_in: int = 17,  # input feature dim from data.x
+        node_scalar_in: int = 17,
         node_vec_in: int = 1,
-        hidden_dims: Tuple[int, int] = (256, 32),
+        hidden_dims: tuple[int, int] = (256, 32),
         edge_scalar_in: int = 16,
         edge_vec_in: int = 1,
         edge_scalar_out: int = 16,
@@ -58,9 +98,8 @@ class ProteinGVPEncoder(nn.Module):
         pool_residue: bool = False,
         pool_aggr: Literal["mean", "sum", "max"] = "mean",
         update_w_distance: bool = True,
-        distance_dim: Optional[int] = None,
+        distance_dim: int | None = None,
         radius: float = 8.0,
-        max_neighbors: Optional[int] = 256,
         num_edge_rbf: int = 16,
     ):
         super().__init__()
@@ -80,10 +119,10 @@ class ProteinGVPEncoder(nn.Module):
         self.radius = radius
         self.num_edge_rbf = num_edge_rbf
         self.pooled_dim = pooled_dim
-        
+
         distance_dim = distance_dim or edge_scalar_in
         self.distance_dim = distance_dim
-        
+
         activations = (scalar_activation, vector_activation)
         S_hid, V_hid = hidden_dims
 
@@ -198,31 +237,33 @@ class ProteinGVPEncoder(nn.Module):
 
         return x
 
+
 def load_encoder_from_checkpoint(
     checkpoint_path: str,
-    node_scalar_in: int,
+    node_scalar_in: int | None = None,
     device: str = "cuda",
-    freeze: bool = True,
-    default_hidden_dims: Tuple[int, int] = (256, 64),
+    default_hidden_dims: tuple[int, int] = (256, 64),
     default_pooled_dim: int = 128,
     default_num_edge_rbf: int = 16,
     default_radius: float = 8.0,
-    default_max_neighbors: int = 64,
-) -> Tuple[ProteinGVPEncoder, Dict[str, Any]]:
+) -> tuple[ProteinGVPEncoder, dict[str, Any]]:
     """
-    Load pretrained ProteinGVPEncoder from SLAE checkpoint.
+    Load pretrained ProteinGVPEncoder from checkpoint.
     Falls back to blank encoder if checkpoint doesn't exist or fails to load.
 
     Args:
         checkpoint_path: Path to checkpoint file
-        node_scalar_in: Input feature dimension (from data.x.shape[-1])
+        node_scalar_in: Input feature dimension. Read from checkpoint if not provided.
+            Required if checkpoint doesn't exist (for fallback blank encoder).
+
+    Returns:
+        Tuple of (encoder, args_dict)
     """
     args = {
         "hidden_dims": list(default_hidden_dims),
         "pooled_dim": default_pooled_dim,
         "num_edge_rbf": default_num_edge_rbf,
         "radius": default_radius,
-        "max_neighbors": default_max_neighbors,
     }
 
     loaded = False
@@ -234,12 +275,28 @@ def load_encoder_from_checkpoint(
             args = ckpt.get("args", args)
             state_dict = ckpt.get("encoder", ckpt)
             loaded = True
-            print(f"Loaded encoder checkpoint from {checkpoint_path}")
+            logger.info(f"Loaded encoder checkpoint from {checkpoint_path}")
+
+            # use node_scalar_in from checkpoint if not specified
+            if node_scalar_in is None:
+                if "node_scalar_in" not in args:
+                    raise ValueError("node_scalar_in not in checkpoint and not provided")
+                node_scalar_in = args["node_scalar_in"]
+            elif "node_scalar_in" in args and args["node_scalar_in"] != node_scalar_in:
+                raise ValueError(
+                    f"node_scalar_in mismatch: checkpoint has {args['node_scalar_in']}, "
+                    f"but {node_scalar_in} was specified"
+                )
+        except ValueError:
+            raise
         except Exception as e:
-            print(f"Failed to load checkpoint {checkpoint_path}: {e}")
-            print("Initializing blank encoder instead.")
+            logger.warning(f"Failed to load checkpoint {checkpoint_path}: {e}")
+            logger.info("Initializing blank encoder instead.")
     else:
-        print(f"Checkpoint not found at {checkpoint_path}, initializing blank encoder.")
+        logger.warning(f"Checkpoint not found at {checkpoint_path}, initializing blank encoder.")
+
+    if node_scalar_in is None:
+        raise ValueError("node_scalar_in required when checkpoint doesn't exist")
 
     hidden_dims = tuple(args.get("hidden_dims", list(default_hidden_dims)))
 
@@ -252,7 +309,6 @@ def load_encoder_from_checkpoint(
         update_w_distance=True,
         pooled_dim=args.get("pooled_dim", default_pooled_dim),
         radius=args.get("radius", default_radius),
-        max_neighbors=args.get("max_neighbors", default_max_neighbors),
         num_edge_rbf=args.get("num_edge_rbf", default_num_edge_rbf),
     ).to(device)
 
@@ -260,73 +316,138 @@ def load_encoder_from_checkpoint(
         try:
             encoder.load_state_dict(state_dict)
         except Exception as e:
-            print(f"Failed to load state dict: {e}")
-            print("Using randomly initialized weights.")
-
-    if freeze:
-        for p in encoder.parameters():
-            p.requires_grad = False
-        encoder.eval()
+            logger.warning(f"Failed to load state dict: {e}")
+            logger.info("Using randomly initialized weights.")
 
     return encoder, args
 
 
-class FlowEncoder(nn.Module):
+@register_encoder('gvp')
+class GVPEncoder(BaseProteinEncoder):
     """
-    Wrapper that loads pretrained encoder and provides forward pass
-    for combined protein+mate homogeneous graphs.
+    GVP encoder implementing the BaseProteinEncoder interface.
+
+    This encoder wraps ProteinGVPEncoder to provide the standard interface
+    expected by the flow model.
     """
 
     def __init__(
         self,
+        encoder: ProteinGVPEncoder,
+        freeze: bool = False,
+    ):
+        """
+        Args:
+            encoder: Underlying ProteinGVPEncoder instance
+            freeze: If True, freeze encoder parameters
+        """
+        super().__init__()
+        self.encoder = encoder
+        self._freeze = freeze
+
+        if freeze:
+            for p in self.encoder.parameters():
+                p.requires_grad = False
+            self.encoder.eval()
+
+    @property
+    def output_dims(self) -> tuple[int, int]:
+        """Return (scalar_dim, vector_dim)."""
+        return self.encoder.hidden_dims
+
+    @property
+    def encoder_type(self) -> str:
+        """Return encoder type identifier."""
+        return 'gvp'
+
+    def forward(self, data: HeteroData) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Encode protein data.
+
+        Args:
+            data: HeteroData with protein nodes
+
+        Returns:
+            Tuple of (s, V) features
+        """
+        # Convert HeteroData to homogeneous Data for GVP encoder
+        enc_data = make_encoder_data(data)
+
+        with torch.set_grad_enabled(not self._freeze):
+            s, V = self.encoder(enc_data)
+
+        return s, V
+
+    @classmethod
+    def from_config(cls, config: dict, device: torch.device) -> GVPEncoder:
+        """
+        Construct GVPEncoder from config dict.
+
+        Args:
+            config: Configuration dictionary with:
+                - encoder_ckpt: Path to checkpoint (optional)
+                - node_scalar_in: Input feature dimension (default: 16)
+                - hidden_s, hidden_v: Hidden dimensions
+                - freeze_encoder: Whether to freeze encoder
+            device: Device to place the encoder on
+
+        Returns:
+            Instantiated GVPEncoder
+        """
+        encoder_ckpt = config.get('encoder_ckpt')
+        node_scalar_in = config.get('node_scalar_in', 16)
+        hidden_s = config.get('hidden_s', 256)
+        hidden_v = config.get('hidden_v', 32)
+        freeze = config.get('freeze_encoder', False)
+
+        if encoder_ckpt:
+            encoder, _ = load_encoder_from_checkpoint(
+                encoder_ckpt,
+                node_scalar_in=node_scalar_in,
+                device=str(device),
+            )
+        else:
+            encoder = ProteinGVPEncoder(
+                node_scalar_in=node_scalar_in,
+                hidden_dims=(hidden_s, hidden_v),
+                edge_scalar_in=16,
+            ).to(device)
+
+        return cls(encoder=encoder, freeze=freeze)
+
+    @classmethod
+    def from_checkpoint(
+        cls,
         checkpoint_path: str,
-        node_scalar_in: int,
         device: str = "cuda",
         freeze: bool = True,
-    ):
-        super().__init__()
-        self.encoder, self.args = load_encoder_from_checkpoint(
-            checkpoint_path, node_scalar_in, device, freeze
-        )
-        self.freeze = freeze
-        self.hidden_dims = self.encoder.hidden_dims
-        self.pooled_dim = self.args.get("pooled_dim", 128)
-        
-    @property
-    def device(self):
-        return next(self.encoder.parameters()).device
-        
-    def forward(self, data: Data) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> GVPEncoder:
         """
-        Forward pass returning (scalar, vector) tuple before pooling.
-        
+        Load GVPEncoder from checkpoint.
+
         Args:
-            data: PyG Data with pos, x, edge_index
-            
+            checkpoint_path: Path to checkpoint file
+            device: Device to place encoder on
+            freeze: Whether to freeze encoder parameters
+
         Returns:
-            Tuple of (scalar_features, vector_features) at atom level
+            Instantiated GVPEncoder
         """
-        with torch.set_grad_enabled(not self.freeze):
-            x_scalar = self.encoder.input_scalar_encoder(data.x)
-            node_features = self.encoder._initial_node_tuple(x_scalar)
-            x = self.encoder.input_gvp(node_features)
-            edge_attr, dist_feat = self.encoder._compute_edge_attr(
-                data.pos, data.edge_index
-            )
-            
-            for layer in self.encoder.layers:
-                x = layer(x, data.edge_index, edge_attr)
-                edge_attr = self.encoder.edge_update(
-                    node_tuple=x,
-                    edge_index=data.edge_index,
-                    edge_attr=edge_attr,
-                    distance_feat=(dist_feat if self.encoder.update_w_distance else None),
-                )
-            
-            return x  # (s, V) tuple
-    
-    def forward_pooled(self, data: Data) -> torch.Tensor:
-        with torch.set_grad_enabled(not self.freeze):
-            return self.encoder(data)
+        ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        args = ckpt["args"]
+        state_dict = ckpt.get("encoder", ckpt)
 
+        encoder = ProteinGVPEncoder(
+            node_scalar_in=args["node_scalar_in"],
+            hidden_dims=tuple(args["hidden_dims"]),
+            edge_scalar_in=args.get("num_edge_rbf", 16),
+            edge_vec_in=1,
+            edge_scalar_out=16,
+            update_w_distance=True,
+            pooled_dim=args.get("pooled_dim", 128),
+            radius=args.get("radius", 8.0),
+            num_edge_rbf=args.get("num_edge_rbf", 16),
+        ).to(device)
 
+        encoder.load_state_dict(state_dict)
+        return cls(encoder=encoder, freeze=freeze)

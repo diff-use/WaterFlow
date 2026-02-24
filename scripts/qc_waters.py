@@ -17,21 +17,22 @@ Usage:
 """
 
 import argparse
-from pathlib import Path
 import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
+from pathlib import Path
 
-import torch
-import numpy as np
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
-import pandas as pd
-from tqdm import tqdm
-from scipy.spatial import cKDTree
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # For parsing PDB metadata
 import biotite.structure as bts
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import torch
 from biotite.structure.io.pdb import PDBFile, get_structure
+from loguru import logger
+from mpl_toolkits.mplot3d import Axes3D
+from scipy.spatial import cKDTree
+from tqdm import tqdm
 
 
 def analyze_water_protein_distances(protein_pos, water_pos):
@@ -157,7 +158,7 @@ def get_water_metadata(pdb_path, chain_filter=None):
             'num_waters': len(water_atoms),
         }
     except Exception as e:
-        print(f"  Warning: Could not parse PDB metadata: {e}")
+        logger.warning(f"  Warning: Could not parse PDB metadata: {e}")
         return None
 
 
@@ -172,7 +173,7 @@ def visualize_waters(cached_data, pdb_id, output_dir, show_issues=None):
     water_pos = cached_data['water_pos'].numpy()
 
     if water_pos.shape[0] == 0:
-        print(f"  Skipping {pdb_id}: no waters")
+        logger.info(f"  Skipping {pdb_id}: no waters")
         return
 
     fig = plt.figure(figsize=(14, 10))
@@ -223,7 +224,7 @@ def visualize_waters(cached_data, pdb_id, output_dir, show_issues=None):
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
 
-    print(f"  Saved visualization to {output_path}")
+    logger.info(f"  Saved visualization to {output_path}")
 
 
 def main():
@@ -247,7 +248,7 @@ def main():
 
     # Find all cache files
     cache_files = sorted(processed_dir.glob("*.pt"))
-    print(f"Found {len(cache_files)} cache files")
+    logger.info(f"Found {len(cache_files)} cache files")
 
     # Determine which files to analyze
     if args.analyze_all:
@@ -265,9 +266,9 @@ def main():
     all_stats = []
     all_issues = []
 
-    print("\n" + "="*80)
-    print("WATER MOLECULE QC ANALYSIS")
-    print("="*80)
+    logger.info("\n" + "="*80)
+    logger.info("WATER MOLECULE QC ANALYSIS")
+    logger.info("="*80)
 
     for cache_path in tqdm(analyze_files, desc="Analyzing waters"):
         cache_key = cache_path.stem
@@ -318,62 +319,62 @@ def main():
     # Create summary report
     df = pd.DataFrame(all_stats)
 
-    print("\n" + "="*80)
-    print("SUMMARY STATISTICS")
-    print("="*80)
+    logger.info("\n" + "="*80)
+    logger.info("SUMMARY STATISTICS")
+    logger.info("="*80)
 
-    print(f"\nTotal structures analyzed: {len(df)}")
-    print(f"Structures with waters: {(df['num_waters'] > 0).sum()} ({(df['num_waters'] > 0).sum() / len(df) * 100:.1f}%)")
-    print(f"Structures without waters: {(df['num_waters'] == 0).sum()}")
+    logger.info(f"\nTotal structures analyzed: {len(df)}")
+    logger.info(f"Structures with waters: {(df['num_waters'] > 0).sum()} ({(df['num_waters'] > 0).sum() / len(df) * 100:.1f}%)")
+    logger.info(f"Structures without waters: {(df['num_waters'] == 0).sum()}")
 
     if (df['num_waters'] > 0).any():
         water_df = df[df['num_waters'] > 0]
 
-        print(f"\nFor structures WITH waters:")
-        print(f"  Number of waters: {water_df['num_waters'].describe()}")
+        logger.info(f"\nFor structures WITH waters:")
+        logger.info(f"  Number of waters: {water_df['num_waters'].describe()}")
 
-        print(f"\n  Distance to nearest protein atom (Å):")
-        print(f"    Min: {water_df['min_dist'].min():.2f}")
-        print(f"    Max: {water_df['max_dist'].max():.2f}")
-        print(f"    Mean: {water_df['mean_dist'].mean():.2f} ± {water_df['std_dist'].mean():.2f}")
-        print(f"    Median: {water_df['median_dist'].median():.2f}")
+        logger.info(f"\n  Distance to nearest protein atom (Å):")
+        logger.info(f"    Min: {water_df['min_dist'].min():.2f}")
+        logger.info(f"    Max: {water_df['max_dist'].max():.2f}")
+        logger.info(f"    Mean: {water_df['mean_dist'].mean():.2f} ± {water_df['std_dist'].mean():.2f}")
+        logger.info(f"    Median: {water_df['median_dist'].median():.2f}")
 
-        print(f"\n  Water placement:")
-        print(f"    Within 3Å: {water_df['within_3A'].sum()} ({water_df['within_3A'].sum() / water_df['num_waters'].sum() * 100:.1f}% of all waters)")
-        print(f"    Within 4Å: {water_df['within_4A'].sum()} ({water_df['within_4A'].sum() / water_df['num_waters'].sum() * 100:.1f}%)")
-        print(f"    Beyond 6Å: {water_df['beyond_6A'].sum()} ({water_df['beyond_6A'].sum() / water_df['num_waters'].sum() * 100:.1f}%)")
+        logger.info(f"\n  Water placement:")
+        logger.info(f"    Within 3Å: {water_df['within_3A'].sum()} ({water_df['within_3A'].sum() / water_df['num_waters'].sum() * 100:.1f}% of all waters)")
+        logger.info(f"    Within 4Å: {water_df['within_4A'].sum()} ({water_df['within_4A'].sum() / water_df['num_waters'].sum() * 100:.1f}%)")
+        logger.info(f"    Beyond 6Å: {water_df['beyond_6A'].sum()} ({water_df['beyond_6A'].sum() / water_df['num_waters'].sum() * 100:.1f}%)")
 
-        print(f"\n  Water clustering:")
-        print(f"    Isolated waters (no neighbors within 3.5Å): {water_df['isolated_waters'].sum()}")
-        print(f"    Mean neighbors per water: {water_df['mean_neighbors'].mean():.2f}")
-        print(f"    Max neighbors: {water_df['max_neighbors'].max()}")
+        logger.info(f"\n  Water clustering:")
+        logger.info(f"    Isolated waters (no neighbors within 3.5Å): {water_df['isolated_waters'].sum()}")
+        logger.info(f"    Mean neighbors per water: {water_df['mean_neighbors'].mean():.2f}")
+        logger.info(f"    Max neighbors: {water_df['max_neighbors'].max()}")
 
         if args.check_pdb_metadata and 'mean_b_factor' in water_df.columns:
-            print(f"\n  B-factors:")
-            print(f"    Mean: {water_df['mean_b_factor'].mean():.2f}")
-            print(f"    Median: {water_df['median_b_factor'].median():.2f}")
-            print(f"\n  Occupancy:")
-            print(f"    Mean: {water_df['mean_occupancy'].mean():.3f}")
+            logger.info(f"\n  B-factors:")
+            logger.info(f"    Mean: {water_df['mean_b_factor'].mean():.2f}")
+            logger.info(f"    Median: {water_df['median_b_factor'].median():.2f}")
+            logger.info(f"\n  Occupancy:")
+            logger.info(f"    Mean: {water_df['mean_occupancy'].mean():.3f}")
 
         # Check for issues
-        print(f"\n⚠️  POTENTIAL ISSUES:")
-        print(f"  Structures with waters too far (>6Å): {(water_df['num_too_far'] > 0).sum()}")
-        print(f"  Structures with waters too close (<2Å): {(water_df['num_too_close'] > 0).sum()}")
-        print(f"  Structures with overlapping waters (<1.5Å): {(water_df['num_overlapping'] > 0).sum()}")
+        logger.warning(f"\n⚠️  POTENTIAL ISSUES:")
+        logger.info(f"  Structures with waters too far (>6Å): {(water_df['num_too_far'] > 0).sum()}")
+        logger.info(f"  Structures with waters too close (<2Å): {(water_df['num_too_close'] > 0).sum()}")
+        logger.info(f"  Structures with overlapping waters (<1.5Å): {(water_df['num_overlapping'] > 0).sum()}")
 
         if len(all_issues) > 0:
-            print(f"\n  Top problematic structures:")
+            logger.info(f"\n  Top problematic structures:")
             issue_counts = [(issue['pdb_id'],
                            len(issue['too_far']) + len(issue['too_close']) + len(issue['overlapping']))
                           for issue in all_issues]
             issue_counts.sort(key=lambda x: x[1], reverse=True)
             for pdb_id, count in issue_counts[:10]:
-                print(f"    {pdb_id}: {count} issues")
+                logger.info(f"    {pdb_id}: {count} issues")
 
     # Save report
     report_path = output_dir / "water_qc_report.csv"
     df.to_csv(report_path, index=False)
-    print(f"\n✓ Full report saved to {report_path}")
+    logger.info(f"\n✓ Full report saved to {report_path}")
 
     # Save summary plots
     if (df['num_waters'] > 0).any():
@@ -432,11 +433,11 @@ def main():
         plt.tight_layout()
         summary_plot_path = output_dir / "water_qc_summary.png"
         plt.savefig(summary_plot_path, dpi=150, bbox_inches='tight')
-        print(f"✓ Summary plot saved to {summary_plot_path}")
+        logger.info(f"✓ Summary plot saved to {summary_plot_path}")
 
-    print("\n" + "="*80)
-    print("QC COMPLETE")
-    print("="*80)
+    logger.info("\n" + "="*80)
+    logger.info("QC COMPLETE")
+    logger.info("="*80)
 
 
 if __name__ == "__main__":

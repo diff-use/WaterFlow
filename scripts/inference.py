@@ -18,27 +18,28 @@ Usage:
 
 import argparse
 import json
-import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
-import matplotlib.pyplot as plt
+from loguru import logger
 from tqdm import tqdm
 
 from src.dataset import ProteinWaterDataset
-from src.encoder import ProteinGVPEncoder, load_encoder_from_checkpoint
-from src.encoder_adapters import SLAEToGVPAdapter
-from src.flow import FlowWaterGVP, FlowMatcher
+from src.encoder_base import build_encoder
+from src.flow import FlowMatcher, FlowWaterGVP
 from src.utils import (
-    plot_3d_frame,
-    create_trajectory_gif,
     compute_placement_metrics,
     compute_rmsd,
+    create_trajectory_gif,
+    plot_3d_frame,
+    setup_logging_for_tqdm,
 )
+
+# Configure logging to work with tqdm progress bars
+setup_logging_for_tqdm()
 
 
 def parse_args():
@@ -162,71 +163,33 @@ def load_config(run_dir: Path) -> dict:
 
 
 def build_model_from_config(config: dict, device: torch.device) -> nn.Module:
-    """Build model architecture from config (without loading weights)."""
-    use_slae = config.get("use_slae", False)
-    hidden_s = config.get("hidden_s", 256)
-    hidden_v = config.get("hidden_v", 64)
-    flow_layers = config.get("flow_layers", 5)
-    k_pw = config.get("k_pw", 24)
-    k_ww = config.get("k_ww", 24)
-    freeze_encoder = config.get("freeze_encoder", False)
+    """Build model architecture from config using registry-based encoder construction."""
+    # Build encoder config for registry
+    # Example GVP config:
+    #   {'encoder_type': 'gvp', 'hidden_s': 256, 'hidden_v': 64, 'node_scalar_in': 16}
+    # Example SLAE config:
+    #   {'encoder_type': 'slae', 'hidden_s': 256, 'hidden_v': 64, 'slae_dim': 128,
+    #    'encoder_ckpt': '/path/to/slae_checkpoint.pt'}
+    encoder_config = {
+        'encoder_type': 'slae' if config.get("use_slae", False) else 'gvp',
+        'hidden_s': config.get("hidden_s", 256),
+        'hidden_v': config.get("hidden_v", 64),
+        'node_scalar_in': config.get("node_scalar_in", 16),
+        'freeze_encoder': config.get("freeze_encoder", False),
+        'slae_dim': config.get("slae_dim", 128),
+        'encoder_ckpt': config.get("encoder_ckpt"),
+    }
 
-    if use_slae:
-        slae_dim = config.get("slae_dim", 128)
-        slae_adapter_dims = config.get("slae_adapter_dims", None)
+    encoder = build_encoder(encoder_config, device)
 
-        if slae_adapter_dims is not None:
-            s_dim, v_dim = map(int, slae_adapter_dims.split(","))
-        else:
-            s_dim, v_dim = hidden_s, hidden_v
-
-        adapter = SLAEToGVPAdapter(slae_dim=slae_dim, out_dims=(s_dim, v_dim)).to(
-            device
-        )
-
-        encoder = nn.Identity()
-
-        model = FlowWaterGVP(
-            encoder=encoder,
-            hidden_dims=(hidden_s, hidden_v),
-            edge_scalar_dim=32,
-            layers=flow_layers,
-            k_pw=k_pw,
-            k_ww=k_ww,
-            freeze_encoder=True,
-            encoder_type="slae",
-            use_cached_slae=True,
-            slae_adapter=adapter,
-        ).to(device)
-
-    else:
-        encoder_ckpt = config.get("encoder_ckpt", None)
-
-        node_scalar_in = config.get("node_scalar_in", 17)
-        if encoder_ckpt:
-            encoder, _ = load_encoder_from_checkpoint(
-                encoder_ckpt,
-                node_scalar_in=node_scalar_in,
-                device=device,
-                freeze=freeze_encoder,
-            )
-        else:
-            encoder = ProteinGVPEncoder(
-                node_scalar_in=node_scalar_in,
-                hidden_dims=(hidden_s, hidden_v),
-                edge_scalar_in=16,
-            ).to(device)
-
-        model = FlowWaterGVP(
-            encoder=encoder,
-            hidden_dims=(hidden_s, hidden_v),
-            edge_scalar_dim=32,
-            layers=flow_layers,
-            k_pw=k_pw,
-            k_ww=k_ww,
-            freeze_encoder=freeze_encoder,
-            encoder_type="gvp",
-        ).to(device)
+    model = FlowWaterGVP(
+        encoder=encoder,
+        hidden_dims=(config.get("hidden_s", 256), config.get("hidden_v", 64)),
+        edge_scalar_dim=32,
+        layers=config.get("flow_layers", 5),
+        k_pw=config.get("k_pw", 24),
+        k_ww=config.get("k_ww", 24),
+    ).to(device)
 
     return model
 
@@ -344,17 +307,17 @@ def main():
 
     # Device
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    logger.info(f"Using device: {device}")
 
     # load config and build model
-    print(f"\nLoading model from: {run_dir}")
+    logger.info(f"\nLoading model from: {run_dir}")
     config = load_config(run_dir)
     model = build_model_from_config(config, device)
 
     # load checkpoint
     checkpoint_path = run_dir / "checkpoints" / args.checkpoint
     epoch = load_checkpoint(model, checkpoint_path, device)
-    print(f"Loaded checkpoint: {checkpoint_path} (epoch {epoch})")
+    logger.info(f"Loaded checkpoint: {checkpoint_path} (epoch {epoch})")
 
     # Create FlowMatcher
     flow_matcher = FlowMatcher(
@@ -363,7 +326,7 @@ def main():
     )
 
     # Load dataset
-    print(f"\nLoading PDBs from: {args.pdb_list}")
+    logger.info(f"\nLoading PDBs from: {args.pdb_list}")
 
     # Determine include_mates from args or config
     include_mates = args.include_mates or config.get("include_mates", False)
@@ -376,18 +339,18 @@ def main():
         preprocess=True,
     )
 
-    print(f"Found {len(dataset)} PDB entries")
+    logger.info(f"Found {len(dataset)} PDB entries")
 
     # run inference
-    print(f"\nRunning inference with method={args.method}, steps={args.num_steps}")
-    print(f"Self-conditioning: {args.use_sc}")
-    print(f"Threshold for metrics: {args.threshold}Å")
-    print(f"Batch size: {args.batch_size}")
+    logger.info(f"\nRunning inference with method={args.method}, steps={args.num_steps}")
+    logger.info(f"Self-conditioning: {args.use_sc}")
+    logger.info(f"Threshold for metrics: {args.threshold}Å")
+    logger.info(f"Batch size: {args.batch_size}")
     if args.water_ratio is not None:
-        print(f"Water ratio: {args.water_ratio} (sampling num_residues × {args.water_ratio} waters)")
+        logger.info(f"Water ratio: {args.water_ratio} (sampling num_residues × {args.water_ratio} waters)")
     else:
-        print("Water ratio: None (using ground truth water count)")
-    print("-" * 60)
+        logger.info("Water ratio: None (using ground truth water count)")
+    logger.info("-" * 60)
 
     all_metrics = []
 
@@ -402,7 +365,7 @@ def main():
             valid_graphs.append(graph)
 
     if skipped_pdbs:
-        print(f"Skipping {len(skipped_pdbs)} PDBs with no water molecules")
+        logger.info(f"Skipping {len(skipped_pdbs)} PDBs with no water molecules")
 
     # process in batches
     num_batches = (len(valid_graphs) + args.batch_size - 1) // args.batch_size
@@ -479,18 +442,18 @@ def main():
             "avg_n_waters_pred": float(np.mean([m["n_waters_pred"] for m in all_metrics])),
         }
 
-        print("\n" + "=" * 60)
-        print("SUMMARY METRICS")
-        print("=" * 60)
-        print(f"  Samples processed: {summary['n_samples']}")
-        print(f"  Avg waters (true):  {summary['avg_n_waters_true']:.1f}")
-        print(f"  Avg waters (pred):  {summary['avg_n_waters_pred']:.1f}")
-        print(f"  Avg RMSD:      {summary['avg_rmsd']:.3f} ± {summary['std_rmsd']:.3f} Å")
-        print(f"  Avg Precision: {summary['avg_precision']:.3%}")
-        print(f"  Avg Recall:    {summary['avg_recall']:.3%}")
-        print(f"  Avg F1:        {summary['avg_f1']:.4f}")
-        print(f"  Avg AUC-PR:    {summary['avg_auc_pr']:.4f}")
-        print("=" * 60)
+        logger.info("\n" + "=" * 60)
+        logger.info("SUMMARY METRICS")
+        logger.info("=" * 60)
+        logger.info(f"  Samples processed: {summary['n_samples']}")
+        logger.info(f"  Avg waters (true):  {summary['avg_n_waters_true']:.1f}")
+        logger.info(f"  Avg waters (pred):  {summary['avg_n_waters_pred']:.1f}")
+        logger.info(f"  Avg RMSD:      {summary['avg_rmsd']:.3f} ± {summary['std_rmsd']:.3f} Å")
+        logger.info(f"  Avg Precision: {summary['avg_precision']:.3%}")
+        logger.info(f"  Avg Recall:    {summary['avg_recall']:.3%}")
+        logger.info(f"  Avg F1:        {summary['avg_f1']:.4f}")
+        logger.info(f"  Avg AUC-PR:    {summary['avg_auc_pr']:.4f}")
+        logger.info("=" * 60)
 
         # Save metrics to JSON
         metrics_path = output_dir / "metrics.json"
@@ -513,16 +476,16 @@ def main():
                 f,
                 indent=2,
             )
-        print(f"\nMetrics saved to: {metrics_path}")
+        logger.info(f"\nMetrics saved to: {metrics_path}")
 
     else:
-        print("\nNo valid samples processed.")
+        logger.info("\nNo valid samples processed.")
 
-    print(f"Plots saved to: {output_dir / 'plots'}")
+    logger.info(f"Plots saved to: {output_dir / 'plots'}")
     if args.save_gifs:
-        print(f"GIFs saved to: {output_dir / 'gifs'}")
+        logger.info(f"GIFs saved to: {output_dir / 'gifs'}")
 
-    print("\nInference complete.")
+    logger.info("\nInference complete.")
 
 
 if __name__ == "__main__":

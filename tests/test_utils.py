@@ -12,33 +12,32 @@ Organized by category to match utils.py structure:
 All test cases created with assistance from Claude Code and refined.
 """
 
+import matplotlib
+import numpy as np
 import pytest
 import torch
-import numpy as np
-import matplotlib
+
 matplotlib.use('Agg')
 
 from pathlib import Path
 
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 from src.utils import (
-    # Feature encoding
-    rbf,
-    atom37_to_atoms,
     ATOM37_FILL,
+    atom37_to_atoms,
+    compute_placement_metrics,
+    compute_rmsd,
+    create_trajectory_gif,
     # Optimal transport
     ot_coupling,
-    # Metrics
-    recall_precision,
-    compute_rmsd,
-    compute_placement_metrics,
     # Visualization
     plot_3d_frame,
+    # Feature encoding
+    rbf,
+    # Metrics
+    recall_precision,
     save_protein_plot,
-    create_trajectory_gif,
 )
+
 
 @pytest.mark.unit
 class TestRBF:

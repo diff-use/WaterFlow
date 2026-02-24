@@ -3,23 +3,20 @@
 All test cases created with assistance from Claude Code and refined.
 """
 
+from unittest.mock import MagicMock, Mock, patch
+
+import numpy as np
 import pytest
 import torch
-import numpy as np
-from unittest.mock import Mock, MagicMock, patch
-from torch_geometric.data import HeteroData, Data
-
-from pathlib import Path
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
+from torch_geometric.data import Data, HeteroData
 
 from src.flow import (
-    build_knn_edges,
-    make_protein_encoder_data,
-    ProteinWaterUpdate,
-    FlowWaterGVP,
     FlowMatcher,
+    FlowWaterGVP,
+    ProteinWaterUpdate,
+    build_knn_edges,
 )
+from src.gvp_encoder import GVPEncoder, ProteinGVPEncoder, make_encoder_data
 
 
 @pytest.fixture
@@ -80,19 +77,19 @@ def batched_hetero_data(device):
 
 @pytest.fixture
 def mock_encoder(device):
-    """Mock ProteinGVPEncoder."""
+    """Mock BaseProteinEncoder."""
     encoder = Mock()
-    encoder.hidden_dims = (256, 32)
-    encoder.edge_scalar_in = 16
+    encoder.output_dims = (256, 32)  # Required by FlowWaterGVP
+    encoder.encoder_type = 'mock'
     encoder.parameters = Mock(return_value=iter([torch.nn.Parameter(torch.randn(1))]))
     encoder.eval = Mock()
-    
+
     def mock_forward(data):
-        n = data.x.size(0)
+        n = data['protein'].pos.size(0)
         s = torch.randn(n, 256, device=device)
         v = torch.randn(n, 32, 3, device=device)
         return s, v
-    
+
     encoder.side_effect = mock_forward
     encoder.__call__ = mock_forward
     return encoder
@@ -148,10 +145,10 @@ class TestBuildKnnEdges:
 
 
 @pytest.mark.unit
-class TestMakeProteinEncoderData:
+class TestMakeEncoderData:
     
     def test_basic_output(self, simple_hetero_data):
-        enc_data = make_protein_encoder_data(simple_hetero_data)
+        enc_data = make_encoder_data(simple_hetero_data)
 
         assert isinstance(enc_data, Data)
         assert hasattr(enc_data, 'x')
@@ -159,7 +156,7 @@ class TestMakeProteinEncoderData:
         assert hasattr(enc_data, 'edge_index')
     
     def test_shapes(self, simple_hetero_data):
-        enc_data = make_protein_encoder_data(simple_hetero_data)
+        enc_data = make_encoder_data(simple_hetero_data)
 
         n_nodes = simple_hetero_data['protein'].pos.size(0)
         n_edges = simple_hetero_data['protein', 'pp', 'protein'].edge_index.size(1)
@@ -169,7 +166,7 @@ class TestMakeProteinEncoderData:
         assert enc_data.edge_index.shape == (2, n_edges)
     
     def test_batch_preserved(self, batched_hetero_data):
-        enc_data = make_protein_encoder_data(batched_hetero_data)
+        enc_data = make_encoder_data(batched_hetero_data)
 
         assert hasattr(enc_data, 'batch')
         assert enc_data.batch.shape[0] == batched_hetero_data['protein'].pos.size(0)
@@ -180,7 +177,7 @@ class TestMakeProteinEncoderData:
         data['protein'].x = torch.randn(10, 16, device=device)
         # No edges defined
 
-        enc_data = make_protein_encoder_data(data)
+        enc_data = make_encoder_data(data)
 
         assert enc_data.edge_index.shape == (2, 0)
 
@@ -199,14 +196,13 @@ class TestProteinWaterUpdate:
         assert ('protein', 'pw', 'water') in updater.etypes
         assert ('water', 'ww', 'water') in updater.etypes
     
-    def test_init_with_protein_update(self):
+    def test_init_always_includes_all_edge_types(self):
         updater = ProteinWaterUpdate(
             hidden_dims=(128, 16),
             rbf_dim=16,
             layers=2,
-            update_protein=True,
         )
-        
+
         assert ('protein', 'pp', 'protein') in updater.etypes
         assert ('water', 'wp', 'protein') in updater.etypes
     
@@ -268,15 +264,14 @@ class TestFlowWaterGVP:
         assert model.layers == 2
     
     def test_forward_output_shape(self, simple_hetero_data, device):
-        # Use real encoder for integration
-        from src.encoder import ProteinGVPEncoder
-        encoder = ProteinGVPEncoder(
+        base_encoder = ProteinGVPEncoder(
             node_scalar_in=16,
             hidden_dims=(64, 8),
             edge_scalar_in=16,
             pool_residue=False,
         ).to(device)
-        
+        encoder = GVPEncoder(encoder=base_encoder, freeze=False)
+
         model = FlowWaterGVP(
             encoder=encoder,
             hidden_dims=(64, 8),
@@ -290,14 +285,14 @@ class TestFlowWaterGVP:
         assert v_pred.shape == (n_water, 3)
     
     def test_forward_no_water(self, device):
-        from src.encoder import ProteinGVPEncoder
-        encoder = ProteinGVPEncoder(
+        base_encoder = ProteinGVPEncoder(
             node_scalar_in=16,
             hidden_dims=(64, 8),
             edge_scalar_in=16,
             pool_residue=False,
         ).to(device)
-        
+        encoder = GVPEncoder(encoder=base_encoder, freeze=False)
+
         model = FlowWaterGVP(
             encoder=encoder,
             hidden_dims=(64, 8),
@@ -319,14 +314,14 @@ class TestFlowWaterGVP:
         assert v_pred.shape == (0, 3)
     
     def test_self_conditioning(self, simple_hetero_data, device):
-        from src.encoder import ProteinGVPEncoder
-        encoder = ProteinGVPEncoder(
+        base_encoder = ProteinGVPEncoder(
             node_scalar_in=16,
             hidden_dims=(64, 8),
             edge_scalar_in=16,
             pool_residue=False,
         ).to(device)
-        
+        encoder = GVPEncoder(encoder=base_encoder, freeze=False)
+
         model = FlowWaterGVP(
             encoder=encoder,
             hidden_dims=(64, 8),
@@ -349,20 +344,20 @@ class TestFlowMatcher:
     
     @pytest.fixture
     def flow_matcher(self, device):
-        from src.encoder import ProteinGVPEncoder
-        encoder = ProteinGVPEncoder(
+        base_encoder = ProteinGVPEncoder(
             node_scalar_in=16,
             hidden_dims=(64, 8),
             edge_scalar_in=16,
             pool_residue=False,
         ).to(device)
-        
+        encoder = GVPEncoder(encoder=base_encoder, freeze=False)
+
         model = FlowWaterGVP(
             encoder=encoder,
             hidden_dims=(64, 8),
             layers=1,
         ).to(device)
-        
+
         return FlowMatcher(model, p_self_cond=0.5)
     
     def test_compute_sigma(self, simple_hetero_data):
@@ -451,28 +446,28 @@ class TestFlowMatcher:
 class TestDistortion:
     
     def test_distortion_enabled(self, device):
-        from src.encoder import ProteinGVPEncoder
-        encoder = ProteinGVPEncoder(
+        base_encoder = ProteinGVPEncoder(
             node_scalar_in=16,
             hidden_dims=(64, 8),
             edge_scalar_in=16,
             pool_residue=False,
         ).to(device)
-        
+        encoder = GVPEncoder(encoder=base_encoder, freeze=False)
+
         model = FlowWaterGVP(
             encoder=encoder,
             hidden_dims=(64, 8),
             layers=1,
         ).to(device)
-        
+
         fm = FlowMatcher(
-            model, 
-            use_distortion=True, 
+            model,
+            use_distortion=True,
             p_distort=1.0,  # Always apply
             t_distort=0.0,  # Apply at all times
             sigma_distort=0.5
         )
-        
+
         assert fm.use_distortion is True
         assert fm.p_distort == 1.0
 
@@ -483,14 +478,14 @@ class TestDistortion:
 class TestEdgeCases:
     
     def test_single_water_molecule(self, device):
-        from src.encoder import ProteinGVPEncoder
-        encoder = ProteinGVPEncoder(
+        base_encoder = ProteinGVPEncoder(
             node_scalar_in=16,
             hidden_dims=(64, 8),
             edge_scalar_in=16,
             pool_residue=False,
         ).to(device)
-        
+        encoder = GVPEncoder(encoder=base_encoder, freeze=False)
+
         model = FlowWaterGVP(
             encoder=encoder,
             hidden_dims=(64, 8),
@@ -513,24 +508,24 @@ class TestEdgeCases:
         
         assert v_pred.shape == (1, 3)
     
-    def test_freeze_encoder(self, device):
-        from src.encoder import ProteinGVPEncoder
-        encoder = ProteinGVPEncoder(
+    def test_frozen_gvp_encoder(self, device):
+        """Freezing is handled by the encoder itself, not FlowWaterGVP."""
+        base_encoder = ProteinGVPEncoder(
             node_scalar_in=16,
             hidden_dims=(64, 8),
             edge_scalar_in=16,
             pool_residue=False,
         ).to(device)
+        encoder = GVPEncoder(encoder=base_encoder, freeze=True)
 
         model = FlowWaterGVP(
             encoder=encoder,
             hidden_dims=(64, 8),
             layers=1,
-            freeze_encoder=True,
         ).to(device)
 
         # Verify encoder params are frozen
-        for p in model.encoder.parameters():
+        for p in model.encoder.encoder.parameters():
             assert p.requires_grad is False
 
 

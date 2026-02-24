@@ -19,33 +19,30 @@ Integration tests use real PDB files:
 All test cases created with assistance from Claude Code.
 """
 
+from pathlib import Path
+
+import numpy as np
 import pytest
 import torch
-import numpy as np
-from pathlib import Path
-import tempfile
-import os
-
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.dataset import (
-    element_onehot,
-    ELEMENT_VOCAB,
     ELEM_IDX,
+    ELEMENT_VOCAB,
+    ProteinWaterDataset,
     _make_undirected,
-    match_atoms_to_coords,
-    parse_asu_with_biotite,
-    get_crystal_contacts_pymol,
+    check_chain_interactions,
     check_com_distance,
     check_water_clashes,
-    check_chain_interactions,
-    load_edia_for_pdb,
     compute_normalized_bfactors,
+    element_onehot,
     filter_waters_by_quality,
-    ProteinWaterDataset,
+    get_crystal_contacts_pymol,
     get_dataloader,
+    load_edia_for_pdb,
+    match_atoms_to_coords,
+    parse_asu_with_biotite,
 )
+
 
 @pytest.fixture
 def pdb_base_dir():
@@ -1039,7 +1036,7 @@ class TestFilterWatersByQuality:
 
     def test_distance_filtering(self, mock_water_coords, mock_water_keys, mock_protein_coords):
         """Waters far from protein should be removed."""
-        keep_mask, stats = filter_waters_by_quality(
+        keep_mask = filter_waters_by_quality(
             mock_water_coords,
             mock_water_keys,
             protein_coords=mock_protein_coords,
@@ -1050,8 +1047,6 @@ class TestFilterWatersByQuality:
 
         # Waters at 0, 5, 3 A should pass; 15, 20 A should fail
         assert keep_mask.sum() == 3
-        assert stats["removed_distance"] == 2
-        assert stats["kept"] == 3
 
     def test_edia_filtering(self, mock_water_coords, mock_water_keys):
         """Waters with low EDIA should be removed."""
@@ -1063,7 +1058,7 @@ class TestFilterWatersByQuality:
             ("B", 202): 0.60,  # Pass
         }
 
-        keep_mask, stats = filter_waters_by_quality(
+        keep_mask = filter_waters_by_quality(
             mock_water_coords,
             mock_water_keys,
             protein_coords=None,
@@ -1073,7 +1068,6 @@ class TestFilterWatersByQuality:
         )
 
         assert keep_mask.sum() == 3
-        assert stats["removed_edia"] == 2
 
     def test_bfactor_filtering(self, mock_water_coords, mock_water_keys):
         """Waters with high B-factor z-score should be removed."""
@@ -1085,7 +1079,7 @@ class TestFilterWatersByQuality:
             ("B", 202): 0.5,   # Pass
         }
 
-        keep_mask, stats = filter_waters_by_quality(
+        keep_mask = filter_waters_by_quality(
             mock_water_coords,
             mock_water_keys,
             protein_coords=None,
@@ -1095,7 +1089,6 @@ class TestFilterWatersByQuality:
         )
 
         assert keep_mask.sum() == 3
-        assert stats["removed_bfactor"] == 2
 
     def test_combined_filters(self, mock_water_coords, mock_water_keys, mock_protein_coords):
         """Waters failing ANY criterion should be removed."""
@@ -1114,7 +1107,7 @@ class TestFilterWatersByQuality:
             ("B", 202): 1.0,   # Pass B-factor
         }
 
-        keep_mask, stats = filter_waters_by_quality(
+        keep_mask = filter_waters_by_quality(
             mock_water_coords,
             mock_water_keys,
             protein_coords=mock_protein_coords,
@@ -1127,7 +1120,6 @@ class TestFilterWatersByQuality:
 
         # Only water 0 (A, 101) should pass all three filters
         assert keep_mask.sum() == 1
-        assert stats["kept"] == 1
 
     def test_missing_edia_data_keeps_water(self, mock_water_coords, mock_water_keys):
         """Waters without EDIA data should be kept (conservative)."""
@@ -1138,7 +1130,7 @@ class TestFilterWatersByQuality:
             # A,103, B,201, B,202 have no EDIA data - should be kept
         }
 
-        keep_mask, stats = filter_waters_by_quality(
+        keep_mask = filter_waters_by_quality(
             mock_water_coords,
             mock_water_keys,
             protein_coords=None,
@@ -1149,11 +1141,10 @@ class TestFilterWatersByQuality:
 
         # 4 should pass (1 with good EDIA + 3 with no EDIA data)
         assert keep_mask.sum() == 4
-        assert stats["removed_edia"] == 1
 
     def test_empty_water_array(self):
         """Empty water array should return empty array."""
-        keep_mask, stats = filter_waters_by_quality(
+        keep_mask = filter_waters_by_quality(
             np.zeros((0, 3)),
             [],
             protein_coords=np.zeros((10, 3)),
@@ -1162,12 +1153,10 @@ class TestFilterWatersByQuality:
         )
 
         assert len(keep_mask) == 0
-        assert stats["total"] == 0
-        assert stats["kept"] == 0
 
     def test_all_filters_disabled(self, mock_water_coords, mock_water_keys):
         """With all filters disabled, all waters should pass."""
-        keep_mask, stats = filter_waters_by_quality(
+        keep_mask = filter_waters_by_quality(
             mock_water_coords,
             mock_water_keys,
             protein_coords=None,
@@ -1176,26 +1165,7 @@ class TestFilterWatersByQuality:
         )
 
         assert keep_mask.sum() == 5
-        assert stats["kept"] == 5
-        assert stats["removed_distance"] == 0
-        assert stats["removed_edia"] == 0
-        assert stats["removed_bfactor"] == 0
 
-    def test_stats_dict_has_required_keys(self, mock_water_coords, mock_water_keys):
-        """Stats dict should have all required keys."""
-        _, stats = filter_waters_by_quality(
-            mock_water_coords,
-            mock_water_keys,
-            protein_coords=None,
-            edia_lookup=None,
-            bfactor_lookup=None,
-        )
-
-        assert "total" in stats
-        assert "removed_distance" in stats
-        assert "removed_edia" in stats
-        assert "removed_bfactor" in stats
-        assert "kept" in stats
 
 
 @pytest.mark.integration
@@ -1227,7 +1197,7 @@ class TestWaterFilteringIntegration:
         ))
 
         # Apply filtering with distance and bfactor
-        keep_mask, stats = filter_waters_by_quality(
+        keep_mask = filter_waters_by_quality(
             water_atoms.coord,
             water_keys,
             protein_coords=protein_atoms.coord,
@@ -1236,10 +1206,9 @@ class TestWaterFilteringIntegration:
             max_protein_dist=6.0,
         )
 
-        # Some waters should be filtered
-        assert stats["total"] > 0
-        # Filtered count should be <= total
-        assert stats["kept"] <= stats["total"]
+        # Should return a valid boolean mask
+        assert len(keep_mask) == len(water_keys)
+        assert keep_mask.dtype == bool
 
     def test_dataset_with_filtering_disabled(self, single_pdb_list_file, tmp_path, pdb_base_dir):
         """Dataset with filtering disabled should have same waters."""

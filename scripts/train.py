@@ -2,27 +2,32 @@
 
 import argparse
 import os
+from datetime import datetime
 from pathlib import Path
 
-import sys
-sys.path.insert(0, str(Path(__file__).parent))
-sys.path.append(str(Path(__file__).parent.parent))
-
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
 import torch.nn as nn
+import wandb
+from loguru import logger
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
-import numpy as np
-import matplotlib.pyplot as plt
 from tqdm import tqdm
-import wandb
 
 from src.dataset import get_dataloader
-from src.encoder import ProteinGVPEncoder, load_encoder_from_checkpoint
-from src.encoder_adapters import SLAEToGVPAdapter
-from src.flow import FlowWaterGVP, FlowMatcher
-from src.utils import plot_3d_frame, compute_placement_metrics, create_trajectory_gif, compute_rmsd
-from datetime import datetime
+from src.encoder_base import build_encoder
+from src.flow import FlowMatcher, FlowWaterGVP
+from src.utils import (
+    compute_placement_metrics,
+    compute_rmsd,
+    create_trajectory_gif,
+    plot_3d_frame,
+    setup_logging_for_tqdm,
+)
+
+# Configure logging to work with tqdm progress bars
+setup_logging_for_tqdm()
 
 
 def generate_run_name(args):
@@ -59,8 +64,6 @@ def parse_args():
     # SLAE encoder options
     p.add_argument("--use_slae", action="store_true", help="Use SLAE encoder instead of GVP")
     p.add_argument("--slae_dim", type=int, default=128, help="SLAE embedding dimension")
-    p.add_argument("--slae_adapter_dims", type=str, default=None,
-                   help="Adapter output dimensions as 's,v' (default: use hidden_s,hidden_v)")
 
     # training
     p.add_argument("--epochs", type=int, default=100)
@@ -96,67 +99,33 @@ def parse_args():
 
 
 def build_model(args, device, node_scalar_in=16):
-    """Build encoder and flow model."""
+    """Build encoder and flow model using registry-based encoder construction."""
+    encoder_type = 'slae' if args.use_slae else 'gvp'
+    logger.info(f"Building model with {encoder_type.upper()} encoder")
+
     if args.use_slae:
-        # SLAE mode: use cached embeddings with adapter
-        print("Building model with SLAE encoder (using cached embeddings)")
-        print(f"  SLAE dim: {args.slae_dim}, Adapter output dims: {args.slae_adapter_dims or f'{args.hidden_s},{args.hidden_v}'}")
+        logger.info(f"  SLAE dim: {args.slae_dim}")
 
-        # parse adapter dimensions
-        if args.slae_adapter_dims is not None:
-            s_dim, v_dim = map(int, args.slae_adapter_dims.split(','))
-        else:
-            s_dim, v_dim = args.hidden_s, args.hidden_v
+    encoder_config = {
+        'encoder_type': encoder_type,
+        'hidden_s': args.hidden_s,
+        'hidden_v': args.hidden_v,
+        'node_scalar_in': node_scalar_in,
+        'freeze_encoder': args.freeze_encoder,
+        'slae_dim': args.slae_dim,
+        'encoder_ckpt': args.encoder_ckpt,
+    }
 
-        # create adapter to convert SLAE embeddings to GVP format
-        adapter = SLAEToGVPAdapter(
-            slae_dim=args.slae_dim,
-            out_dims=(s_dim, v_dim)
-        ).to(device)
+    encoder = build_encoder(encoder_config, device)
 
-        # dummy encoder (not used, slae embeddings are cached), flowgvp needs an encoder object
-        encoder = nn.Identity()
-
-        model = FlowWaterGVP(
-            encoder=encoder,
-            hidden_dims=(args.hidden_s, args.hidden_v),
-            edge_scalar_dim=32,
-            layers=args.flow_layers,
-            k_pw=args.k_pw,
-            k_ww=args.k_ww,
-            freeze_encoder=True,  # encoder is dummy, embeddings are precomputed
-            encoder_type="slae",
-            use_cached_slae=True,
-            slae_adapter=adapter,
-        ).to(device)
-
-    else:
-        # GVP mode: original encoder
-        print("Building model with GVP encoder")
-        if args.encoder_ckpt:
-            encoder, enc_args = load_encoder_from_checkpoint(
-                args.encoder_ckpt,
-                node_scalar_in=node_scalar_in,
-                device=device,
-                freeze=args.freeze_encoder,
-            )
-        else:
-            encoder = ProteinGVPEncoder(
-                node_scalar_in=node_scalar_in,
-                hidden_dims=(args.hidden_s, args.hidden_v),
-                edge_scalar_in=16,
-            ).to(device)
-
-        model = FlowWaterGVP(
-            encoder=encoder,
-            hidden_dims=(args.hidden_s, args.hidden_v),
-            edge_scalar_dim=32,
-            layers=args.flow_layers,
-            k_pw=args.k_pw,
-            k_ww=args.k_ww,
-            freeze_encoder=args.freeze_encoder,
-            encoder_type="gvp",
-        ).to(device)
+    model = FlowWaterGVP(
+        encoder=encoder,
+        hidden_dims=(args.hidden_s, args.hidden_v),
+        edge_scalar_dim=32,
+        layers=args.flow_layers,
+        k_pw=args.k_pw,
+        k_ww=args.k_ww,
+    ).to(device)
 
     return model
 
@@ -270,14 +239,14 @@ def train_epoch(flow_matcher, train_loader, optimizer, args, epoch):
             if hasattr(batch, 'pdb_id'):
                 # pdb_id might be a list when batched
                 pdb_ids = batch.pdb_id if isinstance(batch.pdb_id, list) else [batch.pdb_id]
-                print(f"\n{'='*60}")
-                print(f"WARNING: Batch loss {metrics['loss']:.2f} exceeded 100.0!")
-                print(f"Per-sample losses ({num_graphs} samples):")
+                logger.info(f"\n{'='*60}")
+                logger.warning(f"WARNING: Batch loss {metrics['loss']:.2f} exceeded 100.0!")
+                logger.info(f"Per-sample losses ({num_graphs} samples):")
                 for i in range(num_graphs):
                     pdb_id = pdb_ids[i] if i < len(pdb_ids) else 'unknown'
                     sample_loss = per_sample_losses[i].item()
-                    print(f"  [{i}] {pdb_id}: {sample_loss:.2f}")
-                print(f"{'='*60}")
+                    logger.info(f"  [{i}] {pdb_id}: {sample_loss:.2f}")
+                logger.info(f"{'='*60}")
 
         total_loss += metrics['loss']
         total_rmsd += metrics['rmsd']
@@ -321,22 +290,22 @@ def count_parameters(model):
 
 def check_slae_embeddings(loader, device):
     """Check if SLAE embeddings are present and compute statistics."""
-    print("\nChecking SLAE embeddings in dataset...")
+    logger.info("\nChecking SLAE embeddings in dataset...")
     batch = next(iter(loader))
     batch = batch.to(device)
 
     if 'slae_embedding' not in batch['protein']:
-        print("  WARNING: No SLAE embeddings found in data!")
-        print("  Please run scripts/precompute_slae_embeddings.py first")
+        logger.warning("  WARNING: No SLAE embeddings found in data!")
+        logger.info("  Please run scripts/precompute_slae_embeddings.py first")
         return False
 
     emb = batch['protein'].slae_embedding
-    print(f"  SLAE embedding shape: {emb.shape}")
-    print(f"  SLAE embedding stats: mean={emb.mean():.4f}, std={emb.std():.4f}, min={emb.min():.4f}, max={emb.max():.4f}")
+    logger.info(f"  SLAE embedding shape: {emb.shape}")
+    logger.info(f"  SLAE embedding stats: mean={emb.mean():.4f}, std={emb.std():.4f}, min={emb.min():.4f}, max={emb.max():.4f}")
 
     # check if embeddings are all zeros or constant
     if emb.std() < 1e-6:
-        print("  WARNING: SLAE embeddings appear to be constant/zero!")
+        logger.warning("  WARNING: SLAE embeddings appear to be constant/zero!")
         return False
 
     return True
@@ -350,7 +319,7 @@ def save_checkpoint(model, optimizer, scheduler, epoch, path, best=False):
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
     }, path)
-    print(f"{'Best ' if best else ''}Checkpoint saved: {path}")
+    logger.info(f"{'Best ' if best else ''}Checkpoint saved: {path}")
 
 
 def main():
@@ -366,16 +335,16 @@ def main():
     (run_dir / "plots").mkdir(exist_ok=True)
     (run_dir / "gifs").mkdir(exist_ok=True)
 
-    print(f"\n{'='*60}")
-    print(f"Run name: {args.run_name}")
-    print(f"Run directory: {run_dir}")
-    print(f"{'='*60}\n")
+    logger.info(f"\n{'='*60}")
+    logger.info(f"Run name: {args.run_name}")
+    logger.info(f"Run directory: {run_dir}")
+    logger.info(f"{'='*60}\n")
 
     import json
     config_file = run_dir / "config.json"
     with open(config_file, 'w') as f:
         json.dump(vars(args), f, indent=2)
-    print(f"Configuration saved to: {config_file}\n")
+    logger.info(f"Configuration saved to: {config_file}\n")
     
     # dataloaders
     train_loader = get_dataloader(
@@ -411,8 +380,8 @@ def main():
             graph = val_loader.dataset[idx]
             pdb_id = getattr(graph, 'pdb_id', 'unknown')
             f.write(f"{idx}\t{pdb_id}\n")
-    print(f"Fixed eval indices saved to: {eval_indices_file}")
-    print(f"Evaluating on {len(eval_indices)} proteins at each eval epoch\n")
+    logger.info(f"Fixed eval indices saved to: {eval_indices_file}")
+    logger.info(f"Evaluating on {len(eval_indices)} proteins at each eval epoch\n")
 
     wandb.init(
         project=args.wandb_project,
@@ -424,27 +393,27 @@ def main():
     # detect input dimension from data (16 for element_onehot, 37 for atom37 format)
     sample_data = train_loader.dataset[0]
     node_scalar_in = sample_data['protein'].x.shape[-1]
-    print(f"Detected protein input dimension: {node_scalar_in}")
+    logger.info(f"Detected protein input dimension: {node_scalar_in}")
 
     model = build_model(args, device, node_scalar_in=node_scalar_in)
     trainable_params, total_params = count_parameters(model)
-    print(f"\nModel statistics:")
-    print(f"  Trainable parameters: {trainable_params:,}")
-    print(f"  Total parameters: {total_params:,}")
+    logger.info(f"\nModel statistics:")
+    logger.info(f"  Trainable parameters: {trainable_params:,}")
+    logger.info(f"  Total parameters: {total_params:,}")
 
     # check SLAE embeddings if using SLAE mode
     if args.use_slae:
         embeddings_ok = check_slae_embeddings(train_loader, device)
         if not embeddings_ok:
-            print("\nERROR: SLAE embeddings are missing or invalid!")
-            print("Please run: python scripts/precompute_slae_embeddings.py \\")
-            print(f"  --train_list {args.train_list} \\")
-            print(f"  --val_list {args.val_list} \\")
-            print(f"  --processed_dir {args.processed_dir}")
+            logger.error("\nERROR: SLAE embeddings are missing or invalid!")
+            logger.info("Please run: python scripts/precompute_slae_embeddings.py \\")
+            logger.info(f"  --train_list {args.train_list} \\")
+            logger.info(f"  --val_list {args.val_list} \\")
+            logger.info(f"  --processed_dir {args.processed_dir}")
             return
 
         # test forward pass to check if adapter is working
-        print("\nTesting forward pass with SLAE...")
+        logger.info("\nTesting forward pass with SLAE...")
         model.eval()
         batch = next(iter(train_loader)).to(device)
         with torch.no_grad():
@@ -453,12 +422,12 @@ def main():
             t = torch.zeros(num_graphs, device=device)
             try:
                 v_out = model(batch, t)
-                print(f"  Forward pass successful! Output shape: {v_out.shape}")
-                print(f"  Output stats: mean={v_out.mean():.4f}, std={v_out.std():.4f}")
+                logger.info(f"  Forward pass successful! Output shape: {v_out.shape}")
+                logger.info(f"  Output stats: mean={v_out.mean():.4f}, std={v_out.std():.4f}")
                 if v_out.std() < 1e-6:
-                    print("  WARNING: Model output is constant! This indicates a problem.")
+                    logger.warning("  WARNING: Model output is constant! This indicates a problem.")
             except Exception as e:
-                print(f"  ERROR in forward pass: {e}")
+                logger.error(f"  ERROR in forward pass: {e}")
                 return
         model.train()
     
@@ -494,7 +463,7 @@ def main():
 
         scheduler.step()
 
-        print(f"Epoch {epoch}: train_loss={train_metrics['train/epoch_loss']:.4f}, "
+        logger.info(f"Epoch {epoch}: train_loss={train_metrics['train/epoch_loss']:.4f}, "
               f"val_loss={val_metrics['val/loss']:.4f}, val_rmsd={val_metrics['val/rmsd']:.2f}")
 
         # save best
@@ -514,14 +483,14 @@ def main():
                 flow_matcher, val_loader, args, epoch, device, global_step, eval_indices, run_dir
             )
             if eval_metrics:
-                print(f"  Eval: RMSD={eval_metrics['eval/avg_rmsd']:.2f}Å, "
+                logger.info(f"  Eval: RMSD={eval_metrics['eval/avg_rmsd']:.2f}Å, "
                       f"Precision={eval_metrics['eval/avg_precision']:.2%}, "
                       f"Recall={eval_metrics['eval/avg_recall']:.2%}, "
                       f"F1={eval_metrics['eval/avg_f1']:.3f}, "
                       f"AUC-PR={eval_metrics['eval/avg_auc_pr']:.3f}")
     
     wandb.finish()
-    print("Training complete.")
+    logger.info("Training complete.")
 
 
 if __name__ == "__main__":
