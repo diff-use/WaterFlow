@@ -1,4 +1,22 @@
-# train.py
+"""
+Training pipeline for WaterFlow model.
+
+This module provides the main training script for the WaterFlow water placement
+model. It handles:
+- Dataset loading and preprocessing with configurable quality filters
+- Model construction with pluggable encoders (GVP, SLAE, ESM)
+- Training loop with gradient accumulation and warmup scheduling
+- Validation and evaluation with RK4 trajectory integration
+- Checkpointing and W&B logging
+
+Usage:
+    python scripts/train.py \\
+        --train_list /path/to/train.txt \\
+        --val_list /path/to/val.txt \\
+        --encoder_type gvp \\
+        --epochs 200 \\
+        --batch_size 4
+"""
 
 import argparse
 import json
@@ -39,6 +57,12 @@ def generate_run_name(args: argparse.Namespace) -> str:
 
 
 def parse_args():
+    """
+    Parse command-line arguments for training configuration.
+
+    Returns:
+        argparse.Namespace with all training hyperparameters and paths
+    """
     p = argparse.ArgumentParser()
 
     # data
@@ -318,7 +342,18 @@ def _extract_water_filter_config(args: argparse.Namespace) -> dict:
 
 
 def _build_dataset_config(args: argparse.Namespace) -> tuple[dict, dict, dict]:
-    """Build grouped dataset kwargs and merged kwargs for DataLoader creation."""
+    """
+    Build grouped dataset configuration from command-line arguments.
+
+    Args:
+        args: Parsed command-line arguments
+
+    Returns:
+        Tuple of (dataset_kwargs, quality_kwargs, water_filter_kwargs):
+            - dataset_kwargs: Merged dict for DataLoader creation
+            - quality_kwargs: Structure-level quality check parameters
+            - water_filter_kwargs: Per-water filtering parameters
+    """
     quality_kwargs = _extract_quality_config(args)
     water_filter_kwargs = _extract_water_filter_config(args)
     dataset_kwargs = {
@@ -333,6 +368,15 @@ def _build_dataset_config(args: argparse.Namespace) -> tuple[dict, dict, dict]:
 
 
 def _ignored_water_filter_thresholds(args) -> list[str]:
+    """
+    Identify water filter thresholds that are disabled.
+
+    Args:
+        args: Parsed command-line arguments with filter_by_* flags
+
+    Returns:
+        List of threshold parameter names that are disabled (e.g., ['min_edia'])
+    """
     ignored = []
     if not args.filter_by_distance:
         ignored.append("max_protein_dist")
@@ -344,6 +388,13 @@ def _ignored_water_filter_thresholds(args) -> list[str]:
 
 
 def _log_dataset_filter_config(args, quality_kwargs: dict):
+    """
+    Log dataset quality check and water filter configuration.
+
+    Args:
+        args: Parsed command-line arguments with filter settings
+        quality_kwargs: Structure-level quality check parameters to log
+    """
     active_filters = {
         "distance": args.filter_by_distance,
         "edia": args.filter_by_edia,
@@ -363,6 +414,15 @@ def _log_dataset_filter_config(args, quality_kwargs: dict):
 
 
 def _required_embedding_field(encoder_type: str) -> str | None:
+    """
+    Get the required embedding field name for a given encoder type.
+
+    Args:
+        encoder_type: Encoder identifier ('gvp', 'slae', or 'esm')
+
+    Returns:
+        Field name string (e.g., 'slae_embedding') or None if encoder doesn't need embeddings
+    """
     if encoder_type == "slae":
         return "slae_embedding"
     if encoder_type == "esm":
@@ -375,6 +435,20 @@ def _resolve_embedding_dim(
     encoder_type: str,
     override_dim: int | None,
 ) -> int | None:
+    """
+    Infer or validate embedding dimension from sample data.
+
+    Args:
+        sample_data: HeteroData sample from the dataset
+        encoder_type: Encoder identifier ('gvp', 'slae', or 'esm')
+        override_dim: User-specified dimension override, or None to infer
+
+    Returns:
+        Embedding dimension, or None if encoder doesn't use embeddings
+
+    Raises:
+        ValueError: If required embedding field is missing or dimension mismatch
+    """
     field = _required_embedding_field(encoder_type)
     if field is None:
         return None
@@ -717,7 +791,19 @@ def save_checkpoint(
     path,
     best=False,
 ):
-    """Save model checkpoint."""
+    """
+    Save model checkpoint with optimizer and scheduler states.
+
+    Args:
+        model: FlowWaterGVP model instance
+        optimizer: AdamW optimizer instance
+        warmup_scheduler: LinearLR warmup scheduler, or None
+        main_scheduler: Main LR scheduler (CosineAnnealingLR or StepLR), or None
+        epoch: Current epoch number
+        optimizer_step_count: Total number of optimizer steps taken
+        path: Path object for checkpoint file destination
+        best: If True, log as best checkpoint
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
@@ -738,7 +824,19 @@ def save_checkpoint(
 
 
 def build_scheduler(optimizer, args):
-    """Build warmup and main schedulers separately for hybrid stepping."""
+    """
+    Build warmup and main learning rate schedulers.
+
+    Supports hybrid stepping: warmup scheduler steps per optimizer step,
+    main scheduler steps per epoch after warmup completes.
+
+    Args:
+        optimizer: AdamW optimizer instance
+        args: Parsed arguments with scheduler configuration
+
+    Returns:
+        Tuple of (warmup_scheduler, main_scheduler), either may be None
+    """
     # Warmup scheduler (stepped per optimizer step)
     warmup_scheduler = None
     if args.warmup_steps > 0:
@@ -761,6 +859,7 @@ def build_scheduler(optimizer, args):
 
 
 def main():
+    """Run the full training pipeline."""
     args = parse_args()
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 

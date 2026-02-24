@@ -59,7 +59,19 @@ def setup_logging_for_tqdm(
 
 
 def rbf(r: Tensor, num_gaussians: int = NUM_RBF, cutoff: float = RBF_CUTOFF) -> Tensor:
-    """Radial basis function encoding of distances using Bessel functions."""
+    """
+    Compute radial basis function encoding of distances.
+
+    Uses Bessel basis functions with smooth cutoff for distance encoding.
+
+    Args:
+        r: (N,) distance tensor in Angstroms
+        num_gaussians: Number of RBF basis functions
+        cutoff: Maximum distance in Angstroms (values beyond are zeroed)
+
+    Returns:
+        (N, num_gaussians) RBF feature tensor
+    """
     r = r.clamp(min=1e-4)
     return soft_one_hot_linspace(
         r, start=0.0, end=cutoff, number=num_gaussians, basis="bessel", cutoff=True
@@ -277,7 +289,20 @@ def plot_3d_frame(
     ylim: tuple[float, float] = None,
     zlim: tuple[float, float] = None,
 ):
-    """Plot a single 3D frame showing protein, mates, and waters."""
+    """
+    Plot a single 3D frame showing protein structure and water positions.
+
+    Args:
+        ax: Matplotlib 3D axes object
+        protein_pos: (N_p, 3) protein atom coordinates
+        mate_pos: (N_m, 3) symmetry mate coordinates, or None
+        water_pred: (N_w, 3) predicted water positions
+        water_true: (N_w, 3) ground truth water positions
+        title: Plot title string
+        xlim: Optional (min, max) x-axis limits in Angstroms
+        ylim: Optional (min, max) y-axis limits in Angstroms
+        zlim: Optional (min, max) z-axis limits in Angstroms
+    """
     ax.clear()
 
     if protein_pos.size > 0:
@@ -423,7 +448,15 @@ def save_protein_plot(
     step: int,
     save_dir: str,
 ):
-    """Align and plot CA traces with Kabsch alignment."""
+    """
+    Save 3D plot of predicted vs true CA traces with Kabsch alignment.
+
+    Args:
+        pred_ca: (N_res, 3) predicted CA coordinates
+        true_ca: (N_res, 3) ground truth CA coordinates
+        step: Step number for filename
+        save_dir: Directory to save plot image
+    """
 
     P = pred_ca.detach().float().cpu().numpy()
     Q = true_ca.detach().float().cpu().numpy()

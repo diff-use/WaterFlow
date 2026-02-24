@@ -24,7 +24,17 @@ from src.utils import rbf
 
 
 def _edge_vectors(pos: torch.Tensor, edge_index: torch.Tensor):
-    """Compute edge vectors and distances."""
+    """
+    Compute edge vectors and distances from node positions.
+
+    Args:
+        pos: (N, 3) node position coordinates
+        edge_index: (2, E) edge indices with source in row 0, destination in row 1
+
+    Returns:
+        rij: (E,) edge distances clamped to minimum 1e-4
+        r_hat: (E, 3) unit vectors pointing from source to destination
+    """
     src, dst = edge_index[0], edge_index[1]
     vec = pos[dst] - pos[src]
     rij = torch.linalg.norm(vec, dim=-1).clamp(min=1e-4)
@@ -111,6 +121,33 @@ class ProteinGVPEncoder(nn.Module):
         num_edge_rbf: int = NUM_RBF,
         use_edge_update: bool = True,
     ):
+        """
+        Initialize GVP encoder for protein structure processing.
+
+        Args:
+            node_scalar_in: Input scalar feature dimension (e.g., element one-hot)
+            node_vec_in: Input vector feature channels (typically 1 for orientation)
+            hidden_dims: (scalar_dim, vector_dim) hidden layer dimensions
+            edge_scalar_in: Input edge scalar dimension (RBF features)
+            edge_vec_in: Input edge vector channels (unit vectors)
+            edge_scalar_out: Output edge scalar dimension
+            n_layers: Number of GVP convolution layers
+            n_message: Number of GVPs in message function
+            n_feedforward: Number of GVPs in feedforward function
+            drop_rate: Dropout rate for regularization
+            vector_gate: Whether to use vector gating in GVP layers
+            scalar_activation: Activation function for scalar channels
+            vector_activation: Activation function for vector gating
+            init_vec_zero: If True, initialize input vectors as zeros
+            pooled_dim: Output dimension when pooling by residue
+            pool_residue: If True, pool atom features to residue level
+            pool_aggr: Aggregation method for residue pooling ('mean', 'sum', 'max')
+            update_w_distance: Include distance features in edge updates
+            distance_dim: Dimension for distance conditioning, defaults to edge_scalar_in
+            radius: Distance cutoff in Angstroms for RBF encoding
+            num_edge_rbf: Number of RBF basis functions
+            use_edge_update: Whether to update edge features between layers
+        """
         super().__init__()
         self.node_scalar_in = node_scalar_in
         self.node_vec_in = node_vec_in
@@ -191,6 +228,15 @@ class ProteinGVPEncoder(nn.Module):
 
     @staticmethod
     def _tuple_to_scalar_dense(x_tuple: tuple) -> torch.Tensor:
+        """
+        Convert GVP tuple to dense scalar representation.
+
+        Args:
+            x_tuple: (s, V) where s is (N, scalar_dim) and V is (N, vector_dim, 3)
+
+        Returns:
+            (N, scalar_dim + vector_dim) concatenation of scalars and vector norms
+        """
         s, V = x_tuple
         vnorm = torch.linalg.norm(V, dim=-1)
         return torch.cat([s, vnorm], dim=-1)
@@ -198,6 +244,17 @@ class ProteinGVPEncoder(nn.Module):
     def _pool_by_residue(
         self, atom_embed: torch.Tensor, residue_index: torch.Tensor, num_residues: int
     ) -> torch.Tensor:
+        """
+        Pool atom-level embeddings to residue level.
+
+        Args:
+            atom_embed: (N_atoms, embed_dim) atom embeddings
+            residue_index: (N_atoms,) residue index per atom
+            num_residues: Total number of residues
+
+        Returns:
+            (num_residues, embed_dim) pooled residue embeddings
+        """
         aggr = self.pool_aggr
         if aggr == "mean":
             return scatter_mean(atom_embed, residue_index, dim=0, dim_size=num_residues)

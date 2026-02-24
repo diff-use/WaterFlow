@@ -1,4 +1,13 @@
-# dataset.py
+"""
+Dataset utilities for protein-water structure loading and preprocessing.
+
+This module provides:
+- PDB parsing with biotite and PyMOL for crystal contacts
+- Per-water quality filtering (distance, EDIA, B-factor)
+- Structure-level quality checks (CoM distance, clashes, chain interactions)
+- ProteinWaterDataset: PyTorch Dataset returning HeteroData graphs
+- get_dataloader: Convenience function for DataLoader creation
+"""
 
 from __future__ import annotations
 
@@ -64,7 +73,16 @@ def element_onehot(symbols: list[str]) -> Tensor:
 def parse_asu_with_biotite(
     path: str,
 ) -> tuple[bts.AtomArray, bts.AtomArray]:
-    """Parse PDB and return (protein_atoms, water_atoms)."""
+    """
+    Parse PDB file and extract protein and water atoms.
+
+    Args:
+        path: Path to PDB file
+
+    Returns:
+        Tuple of (protein_atoms, water_atoms) as biotite AtomArrays.
+        Hydrogen atoms are excluded.
+    """
     pdb_file = PDBFile.read(path)
     atoms = get_structure(pdb_file, model=1, altloc="occupancy")
 
@@ -80,7 +98,23 @@ def parse_asu_with_biotite(
 
 
 def get_crystal_contacts_pymol(pdb_path: str, cutoff: float = 5.0) -> dict:
-    """Get ASU and symmetry mate atoms using PyMOL."""
+    """
+    Extract ASU and symmetry mate atoms within crystal contact distance.
+
+    Uses PyMOL's symexp command to generate symmetry mates and selects
+    interface atoms within the specified cutoff distance.
+
+    Args:
+        pdb_path: Path to PDB file with crystal symmetry information
+        cutoff: Distance cutoff in Angstroms for interface detection
+
+    Returns:
+        Dict with keys:
+            - 'asu_coords': (N_asu, 3) ASU atom coordinates
+            - 'mate_coords': (N_mate, 3) symmetry mate atom coordinates
+            - 'asu_atoms': List of PyMOL atom objects for ASU
+            - 'mate_atoms': List of PyMOL atom objects for mates
+    """
     with pymol2.PyMOL() as pm:
         cmd = pm.cmd
         cmd.reinitialize()
@@ -110,7 +144,17 @@ def get_crystal_contacts_pymol(pdb_path: str, cutoff: float = 5.0) -> dict:
 def match_atoms_to_coords(
     atoms: bts.AtomArray, target_coords: np.ndarray, tolerance: float = 0.01
 ) -> list[int]:
-    """Match biotite atoms to PyMOL coordinates, return indices."""
+    """
+    Match biotite atoms to target coordinates by nearest neighbor.
+
+    Args:
+        atoms: Biotite AtomArray with coord attribute
+        target_coords: (N, 3) array of target coordinates to match
+        tolerance: Maximum distance in Angstroms for a valid match
+
+    Returns:
+        List of indices into atoms array for matched atoms
+    """
     if target_coords.shape[0] == 0:
         return []
 
@@ -124,7 +168,15 @@ def match_atoms_to_coords(
 
 
 def _make_undirected(edge_index: torch.Tensor) -> torch.Tensor:
-    """Symmetrize and deduplicate edges: edge_index shape [2, E]."""
+    """
+    Convert directed edges to undirected by adding reverse edges.
+
+    Args:
+        edge_index: (2, E) directed edge index tensor
+
+    Returns:
+        (2, E') undirected edge index with reverse edges added and duplicates removed
+    """
     if edge_index.numel() == 0:
         return edge_index
     ei = torch.cat([edge_index, edge_index.flip(0)], dim=1)  # add reverse edges
@@ -174,7 +226,16 @@ def _pad_atom_embeddings_for_mates(
     asu_embedding: torch.Tensor,
     total_num_atoms: int,
 ) -> torch.Tensor:
-    """Pad ASU-only atom embeddings with zeros for symmetry mate atoms."""
+    """
+    Pad ASU-only atom embeddings with zeros for symmetry mate atoms.
+
+    Args:
+        asu_embedding: (N_asu, embed_dim) embeddings for ASU atoms only
+        total_num_atoms: Total number of atoms including symmetry mates
+
+    Returns:
+        (total_num_atoms, embed_dim) padded embeddings with zeros for mate atoms
+    """
     if total_num_atoms <= asu_embedding.size(0):
         return asu_embedding
     pad = asu_embedding.new_zeros(
@@ -711,7 +772,13 @@ class ProteinWaterDataset(Dataset):
         return entries
 
     def _preprocess_all(self):
-        """Preprocess all PDB files that don't have cached results."""
+        """
+        Preprocess all PDB files that don't have cached geometry results.
+
+        Iterates through entries, runs PyMOL crystal contact detection,
+        applies quality filters, and caches results. Entries that fail
+        preprocessing are logged and removed from the dataset.
+        """
         self.geometry_dir.mkdir(parents=True, exist_ok=True)
 
         to_process = [
@@ -982,7 +1049,21 @@ class ProteinWaterDataset(Dataset):
         num_asu_protein: int,
         total_num_atoms: int,
     ) -> torch.Tensor:
-        """Load SLAE atom embeddings from cache_dir/slae."""
+        """
+        Load SLAE atom-level embeddings from cache.
+
+        Args:
+            cache_key: Identifier for the cached embedding file
+            num_asu_protein: Expected number of ASU protein atoms
+            total_num_atoms: Total protein atoms including symmetry mates
+
+        Returns:
+            (total_num_atoms, slae_dim) tensor with zeros padded for mate atoms
+
+        Raises:
+            FileNotFoundError: If SLAE cache file doesn't exist
+            ValueError: If atom count doesn't match expected ASU count
+        """
         slae_cache_path = self.slae_dir / f"{cache_key}.pt"
         if not slae_cache_path.exists():
             raise FileNotFoundError(
@@ -1009,7 +1090,22 @@ class ProteinWaterDataset(Dataset):
         num_protein_residues: int,
         total_num_atoms: int,
     ) -> torch.Tensor:
-        """Load and broadcast residue-level ESM embeddings from cache_dir/esm."""
+        """
+        Load ESM residue embeddings and broadcast to atom level.
+
+        Args:
+            cache_key: Identifier for the cached embedding file
+            asu_protein_res_idx: (N_asu,) residue index per ASU atom
+            num_protein_residues: Expected number of unique residues
+            total_num_atoms: Total protein atoms including symmetry mates
+
+        Returns:
+            (total_num_atoms, esm_dim) tensor with zeros padded for mate atoms
+
+        Raises:
+            FileNotFoundError: If ESM cache file doesn't exist
+            ValueError: If residue count doesn't match expected count
+        """
         esm_cache_path = self.esm_dir / f"{cache_key}.pt"
         if not esm_cache_path.exists():
             raise FileNotFoundError(
@@ -1038,7 +1134,19 @@ class ProteinWaterDataset(Dataset):
         num_asu_protein: int,
         num_protein_residues: int,
     ) -> None:
-        """Load encoder-specific embeddings only for the selected encoder."""
+        """
+        Load encoder-specific embeddings and attach to data object.
+
+        Only loads embeddings for the encoder type specified at dataset init.
+        GVP encoder doesn't require pre-computed embeddings.
+
+        Args:
+            data: HeteroData object to attach embeddings to (modified in-place)
+            cache_key: Identifier for cached embedding files
+            asu_protein_res_idx: (N_asu,) residue index per ASU atom
+            num_asu_protein: Number of ASU protein atoms
+            num_protein_residues: Number of unique protein residues
+        """
         if self.encoder_type == "slae":
             data["protein"].slae_embedding = self._load_slae_embedding(
                 cache_key=cache_key,

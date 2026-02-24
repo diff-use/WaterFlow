@@ -1,3 +1,13 @@
+"""
+Flow matching model components for water placement prediction.
+
+This module provides:
+- build_knn_edges: KNN edge construction for graph building
+- ProteinWaterUpdate: Heterogeneous GVP message passing across 4 edge types
+- FlowWaterGVP: End-to-end flow model combining encoder + GVP updates + vector field head
+- FlowMatcher: High-level training, validation, and numerical integration interface
+"""
+
 from __future__ import annotations
 
 import copy
@@ -25,7 +35,18 @@ def build_knn_edges(
     batch_dst: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
-    KNN edges from src -> dst (source indices in row 0, dest in row 1).
+    Build KNN edges from source to destination nodes.
+
+    Args:
+        src_pos: (N_src, 3) source node positions
+        dst_pos: (N_dst, 3) destination node positions
+        k: Number of nearest neighbors per source node
+        batch_src: (N_src,) batch indices for source nodes, or None if single graph
+        batch_dst: (N_dst,) batch indices for destination nodes, or None if single graph
+
+    Returns:
+        (2, E) edge index tensor with source indices in row 0, destination in row 1.
+        Self-edges are removed for homogeneous graphs (src_pos is dst_pos).
     """
     if src_pos.numel() == 0 or dst_pos.numel() == 0:
         return torch.empty(2, 0, dtype=torch.long, device=src_pos.device)
@@ -61,6 +82,20 @@ class ProteinWaterUpdate(nn.Module):
         aggr_edges="sum",
         use_dst_feats=True,
     ):
+        """
+        Initialize heterogeneous protein-water message passing module.
+
+        Args:
+            hidden_dims: (scalar_dim, vector_dim) hidden dimensions for GVP layers
+            rbf_dim: Number of radial basis functions for distance encoding
+            layers: Number of GVP message passing layers
+            drop_rate: Dropout rate for regularization
+            n_message_gvps: Number of GVPs in message function per edge type
+            n_update_gvps: Number of GVPs in node update function
+            vector_gate: Whether to use vector gating in GVP layers
+            aggr_edges: Edge aggregation method ('sum' or 'mean')
+            use_dst_feats: Whether to include destination features in messages
+        """
         super().__init__()
         s_h, v_h = hidden_dims
 
@@ -180,13 +215,22 @@ class ProteinWaterUpdate(nn.Module):
         pp_edge_attr: tuple | None = None,
     ):
         """
-        x_dict: {
-            'protein': (s_p, v_p),
-            'water':   (s_w, v_w)
-        }
-        pp_edge_attr: Optional encoder-learned edge features (s_edge, V_edge) for PP edges.
-                      If provided, uses learned scalar features with original cached unit vectors.
-                      If None, uses cached geometric edge features from the dataset.
+        Run heterogeneous message passing across protein and water nodes.
+
+        Args:
+            x_dict: Node features dict with:
+                - 'protein': (s_p, v_p) where s_p is (N_p, scalar_dim), v_p is (N_p, vector_dim, 3)
+                - 'water': (s_w, v_w) where s_w is (N_w, scalar_dim), v_w is (N_w, vector_dim, 3)
+            data: HeteroData with 'protein' and 'water' node positions
+            k_pw: Number of nearest neighbors for protein-water edges
+            k_ww: Number of nearest neighbors for water-water edges
+            k_wp: Number of nearest neighbors for water-protein edges
+            pp_edge_attr: Optional encoder-learned edge features (s_edge, V_edge) for PP edges.
+                If provided, uses learned scalar features with original cached unit vectors.
+                If None, uses cached geometric edge features from the dataset.
+
+        Returns:
+            Updated x_dict with same structure as input
         """
         pos_dict = {nt: data[nt].pos for nt in data.node_types if "pos" in data[nt]}
 
@@ -246,6 +290,23 @@ class FlowWaterGVP(nn.Module):
         k_wp: int = 8,
         water_input_dim: int = 16,  # 1 hot with oxygen, same as encoder
     ):
+        """
+        Initialize end-to-end flow model for water placement.
+
+        Args:
+            encoder: Protein encoder implementing BaseProteinEncoder interface
+            hidden_dims: (scalar_dim, vector_dim) hidden dimensions for flow model
+            edge_scalar_dim: Dimension of edge scalar features (typically NUM_RBF)
+            layers: Number of heterogeneous GVP message passing layers
+            drop_rate: Dropout rate for regularization
+            n_message_gvps: Number of GVPs in message function per edge type
+            n_update_gvps: Number of GVPs in node update function
+            vector_gate: Whether to use vector gating in GVP layers
+            k_pw: K nearest neighbors for protein-water edges
+            k_ww: K nearest neighbors for water-water edges
+            k_wp: K nearest neighbors for water-protein edges
+            water_input_dim: Input dimension for water node features (element one-hot)
+        """
         super().__init__()
         self.encoder = encoder
         self.hidden_dims = hidden_dims
@@ -323,12 +384,18 @@ class FlowWaterGVP(nn.Module):
         sc: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """
-        data: HeteroData with node types 'protein' (may include mates), 'water'
-        t: (B,) diffusion time per complex
-        sc: optional dict with 'x1_pred' for score conditioning (same shape as water.pos)
+        Predict velocity field for water nodes given protein context and time.
+
+        Args:
+            data: HeteroData with:
+                - 'protein' nodes (may include symmetry mates): pos (N_p, 3), x (N_p, feat_dim)
+                - 'water' nodes: pos (N_w, 3), x (N_w, 16)
+            t: (B,) flow time per complex in batch, values in [0, 1]
+            sc: Optional self-conditioning dict with 'x1_pred' key containing
+                previous prediction (N_w, 3) for iterative refinement
 
         Returns:
-            v_pred: (N_water, 3) vector field at each water node.
+            (N_w, 3) predicted velocity vector field at each water node
         """
         device = data["protein"].pos.device
 
@@ -411,6 +478,18 @@ class FlowMatcher:
         sigma_distort: float = 0.5,
         loss_eps: float = 1e-3,
     ):
+        """
+        Initialize flow matcher for training and inference.
+
+        Args:
+            model: FlowWaterGVP model instance
+            p_self_cond: Probability of using self-conditioning during training
+            use_distortion: Whether to apply late-stage path distortion
+            p_distort: Probability of applying distortion per sample
+            t_distort: Time threshold after which distortion may be applied
+            sigma_distort: Standard deviation of distortion noise
+            loss_eps: Small constant for numerical stability in loss weighting
+        """
         self.model = model
         self.p_self_cond = p_self_cond
         self.use_distortion = use_distortion
@@ -421,7 +500,15 @@ class FlowMatcher:
 
     @staticmethod
     def compute_sigma(data: HeteroData) -> float:
-        """Compute sigma as std of protein coordinates."""
+        """
+        Compute noise scale sigma as standard deviation of protein coordinates.
+
+        Args:
+            data: HeteroData with protein node positions
+
+        Returns:
+            Scalar sigma value (standard deviation across all protein coordinates)
+        """
         pos = data["protein"].pos
         return float(pos.std().item())
 
@@ -543,7 +630,15 @@ class FlowMatcher:
 
     @torch.no_grad()
     def validation_step(self, batch: HeteroData) -> dict[str, float]:
-        """Single validation step (no gradient, no optimizer)."""
+        """
+        Run single validation step without gradients.
+
+        Args:
+            batch: HeteroData batch with protein and water nodes
+
+        Returns:
+            Dict with 'loss' and 'rmsd' metrics
+        """
         self.model.eval()
         device = batch["protein"].pos.device
 
