@@ -50,6 +50,15 @@ def parse_args():
     Returns:
         argparse.Namespace with inference parameters and paths
     """
+    # TODO: Add support for loading configuration from YAML/JSON config files.
+    # This would simplify inference invocation and ensure reproducibility.
+    # Example: --config config.yaml would load inference settings.
+
+    # TODO: Remove hardcoded default paths. These should be required arguments
+    # or loaded from environment variables / config files for portability.
+    # Current hardcoded paths:
+    #   - processed_dir: /home/srivasv/flow_cache/
+    #   - base_pdb_dir: /sb/wankowicz_lab/data/srivasv/pdb_redo_data
     p = argparse.ArgumentParser(description="Run WaterFlow inference on PDB files")
 
     p.add_argument(

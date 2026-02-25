@@ -63,6 +63,19 @@ def parse_args():
     Returns:
         argparse.Namespace with all training hyperparameters and paths
     """
+    # TODO: Add support for loading configuration from YAML/JSON config files.
+    # This would allow users to save and share training configurations easily.
+    # Example: --config config.yaml would load all arguments from the file,
+    # with CLI args taking precedence for overrides.
+
+    # TODO: Remove hardcoded default paths. These should be required arguments
+    # or loaded from environment variables / config files for portability.
+    # Current hardcoded paths:
+    #   - processed_dir: /home/srivasv/flow_cache/
+    #   - base_pdb_dir: /sb/wankowicz_lab/data/srivasv/pdb_redo_data
+    #   - edia_dir: /sb/wankowicz_lab/data/srivasv/edia_results
+    #   - save_dir: /home/srivasv/flow_checkpoints
+    #   - wandb_dir: /home/srivasv/wandb_logs
     p = argparse.ArgumentParser()
 
     # data

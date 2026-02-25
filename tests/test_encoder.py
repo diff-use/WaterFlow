@@ -15,8 +15,8 @@ from torch_cluster import radius_graph
 from torch_geometric.data import Data, HeteroData
 
 from src.encoder_base import build_encoder, get_encoder_class
-from src.gvp_encoder import GVPEncoder, ProteinGVPEncoder, make_encoder_data
-from src.slae import SLAEEncoder
+from src.gvp_encoder import GVPEncoder, ProteinGVPEncoder
+from src.slae_encoder import SLAEEncoder
 
 # ============== Fixtures ==============
 
@@ -457,6 +457,35 @@ class TestESMEncoder:
         config = {'esm_dim': 2048}
         encoder = ESMEncoder.from_config(config, device)
         assert encoder.output_dims == (2048, 0)
+
+    def test_esm_encoder_no_nans(self, device, sample_hetero_data):
+        """Output should not contain NaNs or Infs."""
+        from src.esm_encoder import ESMEncoder
+        encoder = ESMEncoder(esm_dim=1536).to(device)
+
+        # Add mock ESM embeddings
+        n_atoms = sample_hetero_data['protein'].num_nodes
+        sample_hetero_data['protein'].esm_embedding = torch.randn(n_atoms, 1536, device=device)
+
+        s, V, _ = encoder(sample_hetero_data)
+
+        assert not torch.isnan(s).any(), "Scalar output contains NaNs"
+        assert not torch.isinf(s).any(), "Scalar output contains Infs"
+
+    def test_esm_encoder_device_placement(self, device, sample_hetero_data):
+        """Verify tensors are on the correct device."""
+        from src.esm_encoder import ESMEncoder
+        encoder = ESMEncoder(esm_dim=1536).to(device)
+
+        # Add mock ESM embeddings on correct device
+        n_atoms = sample_hetero_data['protein'].num_nodes
+        sample_hetero_data['protein'].esm_embedding = torch.randn(n_atoms, 1536, device=device)
+
+        s, V, _ = encoder(sample_hetero_data)
+
+        # Compare device types (handles cuda vs cuda:0)
+        assert s.device.type == device.type, f"Expected device type {device.type}, got {s.device.type}"
+        assert V.device.type == device.type, f"Expected device type {device.type}, got {V.device.type}"
 
 
 # ============== Encoder Interoperability Tests ==============
