@@ -10,6 +10,9 @@ import sys
 import pandas as pd
 from loguru import logger
 
+import pandas as pd
+from loguru import logger
+
 
 def parse_protein_data(file_path):
     """
@@ -82,8 +85,8 @@ def main():
             save_to_csv(df, output_file)
         else:
             # Print summary if no output file specified
-            print(f"Total residues: {len(df)}")
-            print(f"Columns: {list(df.columns)}")
+            logger.info(f"Total residues: {len(df)}")
+            logger.info(f"Columns: {list(df.columns)}")
     else:
         logger.error("Failed to parse the file.")
         sys.exit(1)

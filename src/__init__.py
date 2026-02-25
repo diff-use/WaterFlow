@@ -6,7 +6,7 @@ Exports the encoder registry and build function.
 Importing this module triggers encoder registration.
 """
 
-from src import esm_encoder as esm_encoder, gvp_encoder as gvp_encoder, slae as slae
+from src import esm_encoder, gvp_encoder, slae_encoder
 from src.encoder_base import (
     BaseProteinEncoder as BaseProteinEncoder,
     build_encoder as build_encoder,

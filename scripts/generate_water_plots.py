@@ -446,9 +446,7 @@ def plot_bfactor_waters(df: pd.DataFrame, output_dir: Path):
 
     # Add cutoff lines at +1.5 and -1.5
     cutoff = 1.5
-    ax.axvline(
-        x=cutoff, color="red", linestyle="--", linewidth=2, label=f"cutoff = ±{cutoff}"
-    )
+    ax.axvline(x=cutoff, color="red", linestyle="--", linewidth=2, label=f"cutoff = ±{cutoff}")
     ax.axvline(x=-cutoff, color="red", linestyle="--", linewidth=2)
 
     # Add statistics
@@ -493,10 +491,10 @@ def plot_bfactor_waters(df: pd.DataFrame, output_dir: Path):
 
 
 def plot_bfactor_pdbs(df: pd.DataFrame, output_dir: Path):
-    """Plot histogram of mean normalized B-factor per PDB.
+    """Plot histogram of std dev of normalized B-factor per PDB.
 
     B-factors are normalized per-PDB (z-score using whole-PDB mean/std).
-    Shows cutoff at 2.5 (high B-factor = worse quality).
+    Shows variation in water B-factors within each structure.
     """
     # Filter to rows with B-factor data
     df_with_bfactor = df[df["b_factor_normalized"].notna()]
@@ -505,37 +503,32 @@ def plot_bfactor_pdbs(df: pd.DataFrame, output_dir: Path):
         logger.warning("Skipped: 06_bfactor_pdbs.png (no B-factor data)")
         return
 
-    pdb_means = df_with_bfactor.groupby("pdb_id")["b_factor_normalized"].mean()
+    pdb_stds = df_with_bfactor.groupby("pdb_id")["b_factor_normalized"].std()
 
     fig, ax = plt.subplots(figsize=(10, 6))
 
-    ax.hist(pdb_means, bins=50, edgecolor="black", alpha=0.7, color="coral")
+    ax.hist(pdb_stds, bins=50, edgecolor="black", alpha=0.7, color="coral")
 
-    # Add cutoff lines at +1.5 and -1.5
+    # Add cutoff line for high variability
     cutoff = 1.5
-    ax.axvline(
-        x=cutoff, color="red", linestyle="--", linewidth=2, label=f"cutoff = ±{cutoff}"
-    )
-    ax.axvline(x=-cutoff, color="red", linestyle="--", linewidth=2)
+    ax.axvline(x=cutoff, color="red", linestyle="--", linewidth=2, label=f"cutoff = {cutoff}")
 
     # Add statistics
-    n_pdbs = len(pdb_means)
-    mean_val = pdb_means.mean()
-    median_val = pdb_means.median()
+    n_pdbs = len(pdb_stds)
+    mean_val = pdb_stds.mean()
+    median_val = pdb_stds.median()
 
     # Count PDBs in each region
-    n_below = (pdb_means < -cutoff).sum()
-    n_within = ((pdb_means >= -cutoff) & (pdb_means <= cutoff)).sum()
-    n_above = (pdb_means > cutoff).sum()
+    n_below = (pdb_stds <= cutoff).sum()
+    n_above = (pdb_stds > cutoff).sum()
 
     textstr = (
         f"n = {n_pdbs:,} PDBs\n"
         f"mean = {mean_val:.2f}\n"
         f"median = {median_val:.2f}\n"
         f"─────────────\n"
-        f"< -{cutoff}: {n_below:,} ({100 * n_below / n_pdbs:.1f}%)\n"
-        f"-{cutoff} to {cutoff}: {n_within:,} ({100 * n_within / n_pdbs:.1f}%)\n"
-        f"> {cutoff}: {n_above:,} ({100 * n_above / n_pdbs:.1f}%)"
+        f"≤ {cutoff}: {n_below:,} ({100*n_below/n_pdbs:.1f}%)\n"
+        f"> {cutoff}: {n_above:,} ({100*n_above/n_pdbs:.1f}%)"
     )
     ax.text(
         0.98,
@@ -548,11 +541,9 @@ def plot_bfactor_pdbs(df: pd.DataFrame, output_dir: Path):
         bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
     )
 
-    ax.set_xlabel("Mean Normalized B-factor (z-score)", fontsize=12)
+    ax.set_xlabel("Std Dev of Normalized B-factor (z-score)", fontsize=12)
     ax.set_ylabel("Number of PDBs", fontsize=12)
-    ax.set_title(
-        "Distribution of Mean Normalized Water B-factor (Per PDB)", fontsize=14
-    )
+    ax.set_title("Distribution of Water B-factor Variability (Per PDB)", fontsize=14)
     ax.legend(loc="upper left")
 
     plt.tight_layout()
@@ -723,9 +714,7 @@ def main():
 
     # Extract B-factors if needed
     if need_bfactor:
-        logger.info(
-            f"Extracting B-factors from PDB files (normalization: {args.bfactor_normalization})..."
-        )
+        logger.info(f"\nExtracting B-factors from PDB files (normalization: {args.bfactor_normalization})...")
 
         if args.bfactor_only:
             # Get PDB IDs from text file
@@ -735,19 +724,16 @@ def main():
             pdb_ids = df["pdb_id"].unique().tolist()
 
         bfactor_df = load_all_bfactors(
-            args.pdb_dir,
-            pdb_ids,
-            args.num_workers,
-            normalization=args.bfactor_normalization,
+            args.pdb_dir, pdb_ids, args.num_workers, normalization=args.bfactor_normalization
         )
 
         # Merge with EDIA data if both are available
         if df is not None:
-            logger.info("Merging EDIA and B-factor data...")
+            logger.info("\nMerging EDIA and B-factor data...")
             df = merge_edia_with_bfactors(df, bfactor_df)
 
     # Generate plots
-    logger.info("Generating plots...")
+    logger.info("\nGenerating plots...")
 
     # EDIA/RSCC plots (skip if --bfactor-only)
     if need_edia and df is not None:
@@ -768,7 +754,7 @@ def main():
             plot_bfactor_pdbs(df, args.output_dir)
             plot_ediam_bfactor_correlation(df, args.output_dir)
 
-    logger.info(f"All figures saved to: {args.output_dir}")
+    logger.info(f"\nAll figures saved to: {args.output_dir}")
 
 
 if __name__ == "__main__":

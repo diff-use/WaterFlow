@@ -5,8 +5,8 @@ Utility functions organized by category:
 2. Optimal transport (ot_coupling)
 3. Metrics (recall_precision, compute_rmsd, compute_placement_metrics)
 4. Visualization (plot_3d_frame, create_trajectory_gif, save_protein_plot)
+5. Logging (setup_logging_for_tqdm)
 """
-
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -144,8 +144,6 @@ def ot_coupling(
 
 
 # eval metric functions
-
-
 @torch.no_grad()
 def recall_precision(
     pred: torch.Tensor | np.ndarray,

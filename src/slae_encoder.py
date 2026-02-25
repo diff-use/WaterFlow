@@ -1,4 +1,3 @@
-# slae.py
 """
 SLAE (Strictly Local All-Atom Environment) base encoder implementation.
 
@@ -7,7 +6,6 @@ them directly as scalar features with zero vector channels. Downstream
 GVP message-passing layers (including protein-protein edges) provide all
 geometric processing.
 """
-
 from __future__ import annotations
 
 import torch
@@ -16,7 +14,7 @@ from torch_geometric.data import HeteroData
 from src.encoder_base import BaseProteinEncoder, register_encoder
 
 
-@register_encoder("slae")
+@register_encoder('slae')
 class SLAEEncoder(BaseProteinEncoder):
     """
     SLAE encoder that reads cached embeddings from data.
@@ -33,11 +31,11 @@ class SLAEEncoder(BaseProteinEncoder):
     @property
     def output_dims(self) -> tuple[int, int]:
         """Return (slae_dim, 0) — scalars only."""
-        return (self._slae_dim, 0)
+        return self._slae_dim, 0
 
     @property
     def encoder_type(self) -> str:
-        return "slae"
+        return 'slae'
 
     def forward(self, data: HeteroData) -> tuple[torch.Tensor, torch.Tensor, None]:
         """
@@ -51,14 +49,14 @@ class SLAEEncoder(BaseProteinEncoder):
             V: (N, 0, 3)    — empty vector features
             pp_edge_attr: None — SLAE doesn't process edges
         """
-        if "slae_embedding" not in data["protein"]:
+        if 'slae_embedding' not in data['protein']:
             raise NotImplementedError(
                 "SLAE encoder requires cached embeddings. "
                 "Please provide pre-computed slae_embedding in data['protein']. "
                 "Run scripts/generate_slae_embeddings.py first."
             )
 
-        embeddings = data["protein"].slae_embedding
+        embeddings = data['protein'].slae_embedding
         V = embeddings.new_empty(embeddings.size(0), 0, 3)
         return embeddings, V, None
 
@@ -75,5 +73,5 @@ class SLAEEncoder(BaseProteinEncoder):
         Returns:
             Instantiated SLAEEncoder
         """
-        slae_dim = config.get("slae_dim", 128)
+        slae_dim = config.get('slae_dim', 128)
         return cls(slae_dim=slae_dim).to(device)

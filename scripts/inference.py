@@ -39,6 +39,9 @@ from src.utils import (
     setup_logging_for_tqdm,
 )
 
+# Configure logging to work with tqdm progress bars
+setup_logging_for_tqdm()
+
 
 def parse_args():
     """
@@ -192,7 +195,13 @@ def build_model_from_config(config: dict, device: torch.device) -> nn.Module:
     encoder type (GVP, SLAE, or ESM) based on config.
 
     Args:
-        config: Training configuration dict with model hyperparameters
+        config: Training configuration dict with model hyperparameters.
+            Expected keys include:
+            - encoder_type: "gvp", "slae", or "esm"
+            - hidden_s, hidden_v: Hidden dimensions for scalars/vectors
+            - flow_layers: Number of flow layers
+            - For SLAE: slae_dim (default 128)
+            - For ESM: esm_dim (default 1536)
         device: Device to place model on
 
     Returns:
@@ -524,20 +533,18 @@ def main():
             ),
         }
 
-        print("\n" + "=" * 60)
-        print("SUMMARY METRICS")
-        print("=" * 60)
-        print(f"  Samples processed: {summary['n_samples']}")
-        print(f"  Avg waters (true):  {summary['avg_n_waters_true']:.1f}")
-        print(f"  Avg waters (pred):  {summary['avg_n_waters_pred']:.1f}")
-        print(
-            f"  Avg RMSD:      {summary['avg_rmsd']:.3f} ± {summary['std_rmsd']:.3f} Å"
-        )
-        print(f"  Avg Precision: {summary['avg_precision']:.3%}")
-        print(f"  Avg Recall:    {summary['avg_recall']:.3%}")
-        print(f"  Avg F1:        {summary['avg_f1']:.4f}")
-        print(f"  Avg AUC-PR:    {summary['avg_auc_pr']:.4f}")
-        print("=" * 60)
+        logger.info("\n" + "=" * 60)
+        logger.info("SUMMARY METRICS")
+        logger.info("=" * 60)
+        logger.info(f"  Samples processed: {summary['n_samples']}")
+        logger.info(f"  Avg waters (true):  {summary['avg_n_waters_true']:.1f}")
+        logger.info(f"  Avg waters (pred):  {summary['avg_n_waters_pred']:.1f}")
+        logger.info(f"  Avg RMSD:      {summary['avg_rmsd']:.3f} ± {summary['std_rmsd']:.3f} Å")
+        logger.info(f"  Avg Precision: {summary['avg_precision']:.3%}")
+        logger.info(f"  Avg Recall:    {summary['avg_recall']:.3%}")
+        logger.info(f"  Avg F1:        {summary['avg_f1']:.4f}")
+        logger.info(f"  Avg AUC-PR:    {summary['avg_auc_pr']:.4f}")
+        logger.info("=" * 60)
 
         # Save metrics to JSON
         metrics_path = output_dir / "metrics.json"

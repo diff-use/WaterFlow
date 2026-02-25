@@ -469,7 +469,20 @@ def _resolve_embedding_dim(
 
 
 def resolve_encoder_config(args, sample_data, node_scalar_in: int):
-    """Build a registry-friendly encoder config with inferred dimensions."""
+    """
+    Build a registry-friendly encoder config with inferred dimensions.
+
+    Args:
+        args: Parsed command-line arguments containing encoder settings
+        sample_data: HeteroData sample used to infer embedding dimensions
+        node_scalar_in: Number of input scalar features per node
+
+    Returns:
+        dict: Encoder configuration ready for build_encoder(), e.g.:
+            - GVP: {"encoder_type": "gvp", "hidden_s": 256, "hidden_v": 64, ...}
+            - SLAE: {"encoder_type": "slae", "slae_dim": 128, ...}
+            - ESM: {"encoder_type": "esm", "esm_dim": 1536, ...}
+    """
     encoder_config = {
         "encoder_type": args.encoder_type,
         "hidden_s": args.hidden_s,
@@ -506,7 +519,17 @@ def log_encoder_sample_stats(sample_data: HeteroData, encoder_type: str) -> None
 def build_model(
     args: argparse.Namespace, device: torch.device, encoder_config: dict
 ) -> FlowWaterGVP:
-    """Build encoder and flow model using registry-based encoder construction."""
+    """
+    Build encoder and flow model using registry-based encoder construction.
+
+    Args:
+        args: Parsed command-line arguments with model hyperparameters
+        device: Torch device to place the model on
+        encoder_config: Registry-friendly config from resolve_encoder_config()
+
+    Returns:
+        FlowWaterGVP: Initialized model with the specified encoder
+    """
     logger.info(f"Building model with {args.encoder_type.upper()} encoder")
     logger.info(f"Resolved encoder config: {encoder_config}")
 
@@ -1061,7 +1084,7 @@ def main():
                 epoch,
                 device,
                 global_step,
-                eval_indices,
+                eval_indices, 
                 run_dir,
             )
             if eval_metrics:
