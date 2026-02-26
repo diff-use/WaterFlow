@@ -3,7 +3,7 @@ from __future__ import annotations
 
 """
 Utility functions organized by category:
-1. Feature encoding (rbf, atom37_to_atoms)
+1. Feature encoding (rbf, atom37_to_atoms, normalize_ins_code)
 2. Optimal transport (ot_coupling)
 3. Metrics (recall_precision, compute_rmsd, compute_placement_metrics)
 4. Visualization (plot_3d_frame, create_trajectory_gif, save_protein_plot)
@@ -14,6 +14,7 @@ from collections.abc import Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import scipy.spatial.distance as spdist
 import torch
 from e3nn.math import soft_one_hot_linspace
@@ -39,6 +40,28 @@ def setup_logging_for_tqdm():
         colorize=True,
         format="<level>{level: <8}</level> | <level>{message}</level>",
     )
+
+
+def normalize_ins_code(value) -> str:
+    """
+    Normalize insertion code values from PDB/CSV into a stable key token.
+
+    Handles various representations of "no insertion code" across different
+    data sources (biotite, pandas, PDB files).
+
+    Args:
+        value: Insertion code from PDB or CSV (may be None, NaN, '', '?', '.')
+
+    Returns:
+        Empty string for "no insertion code", otherwise the stripped value
+    """
+    if value is None or pd.isna(value):
+        return ""
+    ins = str(value).strip()
+    if ins in {"", "?", "."}:
+        return ""
+    return ins
+
 
 ATOM37_FILL = 1e-5
 
