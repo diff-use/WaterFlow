@@ -13,7 +13,6 @@ from torch_geometric.data import HeteroData
 
 from src.encoder_base import BaseProteinEncoder, register_encoder
 
-
 @register_encoder('slae')
 class SLAEEncoder(BaseProteinEncoder):
     """
@@ -37,9 +36,9 @@ class SLAEEncoder(BaseProteinEncoder):
     def encoder_type(self) -> str:
         return 'slae'
 
-    def forward(self, data: HeteroData) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, data: HeteroData) -> tuple[torch.Tensor, torch.Tensor, None]:
         """
-        Read cached SLAE embeddings and return (s, V).
+        Read cached SLAE embeddings and return (s, V, None).
 
         Args:
             data: HeteroData with data['protein'].slae_embedding
@@ -47,17 +46,18 @@ class SLAEEncoder(BaseProteinEncoder):
         Returns:
             s: (N, slae_dim) — raw SLAE embeddings
             V: (N, 0, 3)    — empty vector features
+            pp_edge_attr: None — SLAE doesn't process edges
         """
         if 'slae_embedding' not in data['protein']:
             raise NotImplementedError(
                 "SLAE encoder requires cached embeddings. "
                 "Please provide pre-computed slae_embedding in data['protein']. "
-                "Run scripts/precompute_slae_embeddings.py first."
+                "Run scripts/generate_slae_embeddings.py first."
             )
 
         embeddings = data['protein'].slae_embedding
         V = embeddings.new_empty(embeddings.size(0), 0, 3)
-        return embeddings, V
+        return embeddings, V, None
 
     @classmethod
     def from_config(cls, config: dict, device: torch.device) -> SLAEEncoder:

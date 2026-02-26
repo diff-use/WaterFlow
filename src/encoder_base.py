@@ -5,6 +5,7 @@ This module provides:
 - BaseProteinEncoder: Abstract base class that all encoders must implement
 - Registry pattern: Decorator-based registration and build_encoder() function
 """
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -15,7 +16,6 @@ import torch.nn as nn
 
 if TYPE_CHECKING:
     from torch_geometric.data import HeteroData
-
 
 class BaseProteinEncoder(ABC, nn.Module):
     """
@@ -38,7 +38,9 @@ class BaseProteinEncoder(ABC, nn.Module):
         pass
 
     @abstractmethod
-    def forward(self, data: HeteroData) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self, data: HeteroData
+    ) -> tuple[torch.Tensor, torch.Tensor, tuple | None]:
         """
         Encode protein data.
 
@@ -46,9 +48,11 @@ class BaseProteinEncoder(ABC, nn.Module):
             data: HeteroData with protein nodes
 
         Returns:
-            tuple of (s, V) where:
+            tuple of (s, V, pp_edge_attr) where:
                 s: (N, scalar_dim) scalar features
                 V: (N, vector_dim, 3) vector features
+                pp_edge_attr: tuple (s_edge, V_edge) for PP edges, or None if encoder
+                    doesn't process edges (e.g., SLAE, ESM)
         """
         pass
 
@@ -67,10 +71,8 @@ class BaseProteinEncoder(ABC, nn.Module):
         """
         pass
 
-
 # global encoder registry
 _ENCODER_REGISTRY: dict[str, BaseProteinEncoder] = {}
-
 
 def register_encoder(name: str):
     """
@@ -81,13 +83,14 @@ def register_encoder(name: str):
         class MyEncoder(BaseProteinEncoder):
             ...
     """
+
     def decorator(cls: BaseProteinEncoder) -> BaseProteinEncoder:
         if name in _ENCODER_REGISTRY:
             raise ValueError(f"Encoder '{name}' is already registered")
         _ENCODER_REGISTRY[name] = cls
         return cls
-    return decorator
 
+    return decorator
 
 def get_encoder_class(name: str) -> BaseProteinEncoder:
     """
@@ -107,7 +110,6 @@ def get_encoder_class(name: str) -> BaseProteinEncoder:
         raise KeyError(f"Unknown encoder type '{name}'. Available: {available}")
     return _ENCODER_REGISTRY[name]
 
-
 def build_encoder(config: dict, device: torch.device) -> BaseProteinEncoder:
     """
     Build encoder from configuration dict.
@@ -121,8 +123,8 @@ def build_encoder(config: dict, device: torch.device) -> BaseProteinEncoder:
     Returns:
         Instantiated encoder implementing BaseProteinEncoder
     """
-    if 'encoder_type' not in config:
+    if "encoder_type" not in config:
         raise ValueError("'encoder_type' must be specified in config")
-    encoder_type = config['encoder_type']
+    encoder_type = config["encoder_type"]
     encoder_cls = get_encoder_class(encoder_type)
     return encoder_cls.from_config(config, device)
