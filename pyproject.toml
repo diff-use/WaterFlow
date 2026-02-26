@@ -189,17 +189,31 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "black>=23.0.0",
-    "flake8>=6.0.0",
+    "ruff",
+    "prek",
     "hypothesis>=6.70.0",
-    "isort>=5.12.0",
-    "mypy>=1.0.0",
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
     "pytest-mock>=3.10.0",
     "pytest-timeout>=2.1.0",
     "pytest-xdist>=3.0.0",
 ]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # isort (import sorting)
+    "W",    # pycodestyle warnings
+    "UP",   # pyupgrade (modernize syntax)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["src"]
 
 # PyTorch CUDA 12.6 index (so `torch`/`torchvision` come from the right place)
 [[tool.uv.index]]

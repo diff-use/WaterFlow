@@ -19,8 +19,6 @@ Integration tests use real PDB files:
 All test cases created with assistance from Claude Code.
 """
 
-from pathlib import Path
-
 import numpy as np
 import pytest
 import torch
@@ -42,39 +40,6 @@ from src.dataset import (
     match_atoms_to_coords,
     parse_asu_with_biotite,
 )
-
-
-@pytest.fixture
-def pdb_base_dir():
-    """Base directory for PDB files."""
-    return Path("/sb/wankowicz_lab/data/srivasv/pdb_redo_data")
-
-
-@pytest.fixture
-def pdb_6eey(pdb_base_dir):
-    """Path to 6eey PDB file - should pass all quality checks."""
-    path = pdb_base_dir / "6eey" / "6eey_final.pdb"
-    if not path.exists():
-        pytest.skip(f"PDB file not found: {path}")
-    return str(path)
-
-
-@pytest.fixture
-def pdb_2b5w(pdb_base_dir):
-    """Path to 2b5w PDB file - should fail COM distance check."""
-    path = pdb_base_dir / "2b5w" / "2b5w_final.pdb"
-    if not path.exists():
-        pytest.skip(f"PDB file not found: {path}")
-    return str(path)
-
-
-@pytest.fixture
-def pdb_8dzt(pdb_base_dir):
-    """Path to 8dzt PDB file - should fail water clash check at 2% threshold."""
-    path = pdb_base_dir / "8dzt" / "8dzt_final.pdb"
-    if not path.exists():
-        pytest.skip(f"PDB file not found: {path}")
-    return str(path)
 
 
 @pytest.fixture

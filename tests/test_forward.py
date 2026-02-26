@@ -77,11 +77,6 @@ class FiniteHookManager:
         return False  # don't suppress exceptions
 
 
-@pytest.fixture
-def device():
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
 def make_batched_hetero(
     device,
     n_graphs=2,

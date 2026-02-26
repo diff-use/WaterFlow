@@ -1,0 +1,34 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.12]
+
+    # Skip CI if 'skip ci' is contained in the latest commit message
+    if: "!contains(github.event.head_commit.message, 'skip ci')"
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup UV and python version
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.10.6"
+          python: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --group dev
+
+      - name: Run tests
+        env:
+          TEST_DATA_DIR: ${{ github.workspace }}/tests/test_files
+        run: uv run pytest
