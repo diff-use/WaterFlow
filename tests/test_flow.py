@@ -3,7 +3,7 @@
 All test cases created with assistance from Claude Code and refined.
 """
 
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -88,7 +88,9 @@ def mock_encoder(device):
         n = data['protein'].pos.size(0)
         s = torch.randn(n, 256, device=device)
         v = torch.randn(n, 32, 3, device=device)
-        return s, v
+        # Return 3 values: (s, V, pp_edge_attr)
+        # Mock encoder returns None for edge features (like SLAE/ESM)
+        return s, v, None
 
     encoder.side_effect = mock_forward
     encoder.__call__ = mock_forward
@@ -327,14 +329,41 @@ class TestFlowWaterGVP:
             hidden_dims=(64, 8),
             layers=1,
         ).to(device)
-        
+
         n_water = simple_hetero_data['water'].num_nodes
         sc = {'x1_pred': torch.randn(n_water, 3, device=device)}
         t = torch.tensor([0.5], device=device)
-        
+
         v_pred = model(simple_hetero_data, t, sc=sc)
-        
+
         assert v_pred.shape == (n_water, 3)
+
+    def test_forward_with_esm_encoder(self, simple_hetero_data, device):
+        """Test FlowWaterGVP forward pass with ESMEncoder."""
+        from src.esm_encoder import ESMEncoder
+
+        # ESM encoder with smaller dim for test
+        esm_dim = 128
+        encoder = ESMEncoder(esm_dim=esm_dim).to(device)
+
+        # Add mock ESM embeddings to data
+        n_protein = simple_hetero_data['protein'].num_nodes
+        simple_hetero_data['protein'].esm_embedding = torch.randn(
+            n_protein, esm_dim, device=device
+        )
+
+        model = FlowWaterGVP(
+            encoder=encoder,
+            hidden_dims=(64, 8),
+            layers=1,
+        ).to(device)
+
+        t = torch.tensor([0.5], device=device)
+        v_pred = model(simple_hetero_data, t)
+
+        n_water = simple_hetero_data['water'].num_nodes
+        assert v_pred.shape == (n_water, 3)
+        assert not torch.isnan(v_pred).any(), "ESM encoder flow output contains NaNs"
 
 
 # ============== Tests for FlowMatcher ==============
@@ -368,24 +397,28 @@ class TestFlowMatcher:
     
     def test_training_step(self, flow_matcher, simple_hetero_data, device):
         optimizer = torch.optim.Adam(flow_matcher.model.parameters(), lr=1e-4)
-        
+
+        optimizer.zero_grad()
         result = flow_matcher.training_step(
-            simple_hetero_data, optimizer, use_self_conditioning=False
+            simple_hetero_data, use_self_conditioning=False
         )
-        
+        optimizer.step()
+
         assert 'loss' in result
         assert 'rmsd' in result
         assert 'sigma' in result
         assert result['loss'] >= 0
-    
+
     def test_training_step_with_self_cond(self, flow_matcher, simple_hetero_data, device):
         optimizer = torch.optim.Adam(flow_matcher.model.parameters(), lr=1e-4)
-        
+
         # Force self-conditioning
         flow_matcher.p_self_cond = 1.0
+        optimizer.zero_grad()
         result = flow_matcher.training_step(
-            simple_hetero_data, optimizer, use_self_conditioning=True
+            simple_hetero_data, use_self_conditioning=True
         )
+        optimizer.step()
         
         assert 'loss' in result
     
