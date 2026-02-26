@@ -8,9 +8,11 @@ Utility functions organized by category:
 3. Metrics (recall_precision, compute_rmsd, compute_placement_metrics)
 4. Visualization (plot_3d_frame, create_trajectory_gif, save_protein_plot)
 5. Logging (setup_logging_for_tqdm)
+6. File parsing (parse_split_file)
 """
 
 from collections.abc import Sequence
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -61,6 +63,53 @@ def normalize_ins_code(value) -> str:
     if ins in {"", "?", "."}:
         return ""
     return ins
+
+
+def parse_split_file(split_file: Path, base_pdb_dir: Path) -> list[dict]:
+    """
+    Parse split file and construct entries with paths.
+
+    Split file format: one entry per line, e.g., '6eey_final' or '6eey_final_A'.
+    Lines must contain at least one underscore; the first part is the PDB ID.
+
+    Args:
+        split_file: Path to text file with PDB entries
+        base_pdb_dir: Base directory containing PDB subdirectories
+
+    Returns:
+        List of entry dicts with keys: pdb_id, pdb_path, cache_key
+
+    Raises:
+        ValueError: If split_file contains only malformed lines
+    """
+    from loguru import logger
+
+    entries = []
+    with open(split_file, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+
+            parts = line.split("_")
+            if len(parts) < 2:
+                logger.warning(
+                    f"Skipping malformed line (expected format 'pdbid_*'): {line}"
+                )
+                continue
+
+            pdb_id = parts[0]
+            pdb_path = base_pdb_dir / pdb_id / f"{pdb_id}_final.pdb"
+
+            entries.append(
+                {
+                    "pdb_id": pdb_id,
+                    "pdb_path": pdb_path,
+                    "cache_key": line,
+                }
+            )
+
+    return entries
 
 
 ATOM37_FILL = 1e-5
