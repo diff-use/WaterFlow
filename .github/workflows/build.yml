@@ -13,8 +13,10 @@ jobs:
       matrix:
         python-version: [3.12]
 
-    # Skip CI if 'skip ci' is contained in the latest commit message
-    if: "!contains(github.event.head_commit.message, 'skip ci')"
+    # Skip CI if 'skip ci' is in the latest commit message or if PR is a draft
+    if: |
+      !contains(github.event.head_commit.message, 'skip ci') &&
+      (github.event_name != 'pull_request' || !github.event.pull_request.draft)
 
     steps:
       - uses: actions/checkout@v6

@@ -201,6 +201,24 @@ dev = [
     "pytest-xdist>=3.0.0",
 ]
 
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_ignores = true
+ignore_missing_imports = false
+
+[[tool.mypy.overrides]]
+module = [
+    "biotite.*",
+    "e3nn.*",
+    "torch_geometric.*",
+    "torch_cluster.*",
+    "torch_scatter.*",
+    "pymol2.*",
+    "esm.*",
+]
+ignore_missing_imports = true
+
 # PyTorch CUDA 12.6 index (so `torch`/`torchvision` come from the right place)
 [[tool.uv.index]]
 name = "pytorch-cu126"
