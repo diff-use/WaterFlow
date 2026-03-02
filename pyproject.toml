@@ -12,15 +12,15 @@ dependencies = [
   "wandb",
   "e3nn",
   "esm>=3.2.3",
-  "matplotlib>=3.10.8",
-  "pymol-open-source-whl>=3.1.0.4",
-  "loguru>=0.7.3",
-  "numpy>=1.26.4",
-  "pandas>=2.3.3",
-  "pillow>=12.0.0",
-  "scikit-learn>=1.8.0",
-  "scipy>=1.16.3",
-  "tqdm>=4.67.1",
+  "matplotlib",
+  "pymol-open-source",
+  "loguru",
+  "numpy",
+  "pandas",
+  "pillow",
+  "scikit-learn",
+  "scipy",
+  "tqdm",
 ]
 
 [dependency-groups]
@@ -59,7 +59,7 @@ module = [
 ]
 ignore_missing_imports = true
 
-# PyTorch CUDA 12.6 index (so `torch`/`torchvision` come from the right place)
+# PyTorch CUDA 12.6 index
 [[tool.uv.index]]
 name = "pytorch-cu126"
 url = "https://download.pytorch.org/whl/cu126"
