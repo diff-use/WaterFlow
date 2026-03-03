@@ -14,3 +14,7 @@ EDGE_WP = ('water', 'wp', 'protein')    # water -> protein
 
 # All edge types used in the model
 ALL_EDGE_TYPES = [EDGE_PW, EDGE_WW, EDGE_PP, EDGE_WP]
+
+# RBF encoding parameters
+NUM_RBF = 16          # Number of radial basis functions
+RBF_CUTOFF = 8.0      # Cutoff distance in Angstroms

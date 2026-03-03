@@ -18,7 +18,7 @@ from torch_geometric.nn import HeteroConv, MessagePassing
 from torch_scatter import scatter_add
 
 from src.constants import NUM_RBF, RBF_CUTOFF
-from src.utils import rbf
+from src.utils import compute_edge_features, rbf
 
 
 def tuple_sum(*args):
@@ -666,14 +666,13 @@ class GVPMultiEdge(MessagePassing):
             unit: (E, 3) unit vectors from source to destination
             rbf_e: (E, rbf_dim) RBF distance features
         """
-        s, d = edge_index
-        disp = pos_dst[d] - pos_src[s]  # (E, 3)
-        dist = torch.clamp(disp.norm(dim=-1, keepdim=True), min=1e-5)  # (E,1)
-        unit = disp / dist  # (E, 3)
-        rbf_e = rbf(
-            dist.squeeze(-1), num_gaussians=rbf_dim, cutoff=rbf_dmax
-        )  # (E, rbf_dim)
-        return unit, rbf_e
+        return compute_edge_features(
+            pos=pos_src,
+            edge_index=edge_index,
+            pos_dst=pos_dst,
+            num_gaussians=rbf_dim,
+            cutoff=rbf_dmax,
+        )
 
     def forward(self, x, edge_index, pos_pair, cached_edge_attr=None):
         """
