@@ -22,8 +22,11 @@ matplotlib.use('Agg')
 from pathlib import Path
 
 from src.utils import (
+    _normalize_ins_code,
     ATOM37_FILL,
     atom37_to_atoms,
+    compute_edge_features,
+    compute_edge_geometry,
     compute_placement_metrics,
     compute_rmsd,
     create_trajectory_gif,
@@ -87,6 +90,47 @@ class TestRBF:
         for cutoff in [4.0, 8.0, 12.0, 20.0]:
             out = rbf(r, num_gaussians=16, cutoff=cutoff)
             assert torch.isfinite(out).all()
+
+
+@pytest.mark.unit
+class TestEdgeGeometry:
+    """Tests for edge geometry helper functions."""
+
+    def test_compute_edge_geometry(self):
+        pos = torch.tensor([[0.0, 0.0, 0.0], [3.0, 4.0, 0.0]])
+        edge_index = torch.tensor([[0], [1]])
+        dist, unit = compute_edge_geometry(pos, edge_index)
+        assert dist.shape == (1,)
+        assert unit.shape == (1, 3)
+        assert torch.allclose(dist, torch.tensor([5.0]))
+        assert torch.allclose(unit, torch.tensor([[0.6, 0.8, 0.0]]), atol=1e-6)
+
+    def test_compute_edge_features(self):
+        pos = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+        edge_index = torch.tensor([[0], [1]])
+        unit, rbf_feat = compute_edge_features(
+            pos, edge_index, num_gaussians=8, cutoff=8.0
+        )
+        assert unit.shape == (1, 3)
+        assert rbf_feat.shape == (1, 8)
+        assert torch.isfinite(rbf_feat).all()
+
+
+@pytest.mark.unit
+class TestInsertionCodeNormalization:
+    """Tests for insertion code normalization helper."""
+
+    def test_normalize_empty_variants(self):
+        assert _normalize_ins_code(None) == ""
+        assert _normalize_ins_code("") == ""
+        assert _normalize_ins_code(" ") == ""
+        assert _normalize_ins_code("?") == ""
+        assert _normalize_ins_code(".") == ""
+        assert _normalize_ins_code(np.nan) == ""
+
+    def test_normalize_valid_code(self):
+        assert _normalize_ins_code("A") == "A"
+        assert _normalize_ins_code(" B ") == "B"
 
 
 @pytest.mark.unit

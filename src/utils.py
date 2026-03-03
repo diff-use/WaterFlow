@@ -55,6 +55,83 @@ def rbf(r: Tensor, num_gaussians: int = 16, cutoff: float = 8.0) -> Tensor:
     )
 
 
+def compute_edge_geometry(
+    pos: Tensor,
+    edge_index: Tensor,
+    pos_dst: Tensor | None = None,
+    clamp_min: float = 1e-5,
+) -> tuple[Tensor, Tensor]:
+    """
+    Compute edge distances and unit displacement vectors.
+
+    Supports both homogeneous graphs (single pos tensor) and bipartite graphs
+    (separate pos_src and pos_dst tensors).
+
+    Args:
+        pos: (N_src, 3) source node positions
+        edge_index: (2, E) edge indices [src_indices, dst_indices]
+        pos_dst: (N_dst, 3) destination node positions. If None, uses pos for both.
+        clamp_min: Minimum distance to clamp to avoid division by zero
+
+    Returns:
+        distances: (E,) edge distances
+        unit_vectors: (E, 3) unit displacement vectors from source to destination
+    """
+    src_idx, dst_idx = edge_index[0], edge_index[1]
+    pos_src = pos
+    if pos_dst is None:
+        pos_dst = pos
+    displacement = pos_dst[dst_idx] - pos_src[src_idx]
+    distances = torch.linalg.norm(displacement, dim=-1).clamp(min=clamp_min)
+    unit_vectors = displacement / distances.unsqueeze(-1)
+    return distances, unit_vectors
+
+
+def compute_edge_features(
+    pos: Tensor,
+    edge_index: Tensor,
+    pos_dst: Tensor | None = None,
+    num_gaussians: int = 16,
+    cutoff: float = 8.0,
+    clamp_min: float = 1e-5,
+) -> tuple[Tensor, Tensor]:
+    """
+    Compute unit vectors and RBF distance features for edges.
+
+    Convenience wrapper that combines compute_edge_geometry() with rbf().
+
+    Args:
+        pos: (N_src, 3) source node positions
+        edge_index: (2, E) edge indices [src_indices, dst_indices]
+        pos_dst: (N_dst, 3) destination node positions. If None, uses pos for both.
+        num_gaussians: Number of RBF basis functions
+        cutoff: Maximum distance for RBF encoding
+        clamp_min: Minimum distance to clamp to avoid division by zero
+
+    Returns:
+        unit_vectors: (E, 3) unit displacement vectors
+        rbf_features: (E, num_gaussians) RBF distance features
+    """
+    distances, unit_vectors = compute_edge_geometry(pos, edge_index, pos_dst, clamp_min)
+    rbf_features = rbf(distances, num_gaussians=num_gaussians, cutoff=cutoff)
+    return unit_vectors, rbf_features
+
+
+def _normalize_ins_code(value) -> str:
+    """Normalize insertion code values from PDB/CSV into a stable key token."""
+    if value is None:
+        return ""
+    try:
+        if np.isnan(value):
+            return ""
+    except TypeError:
+        pass
+    ins = str(value).strip()
+    if ins in {"", "?", "."}:
+        return ""
+    return ins
+
+
 def atom37_to_atoms(atom_tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Convert atom37 representation to flat atom list.
