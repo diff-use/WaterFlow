@@ -185,6 +185,7 @@ dependencies = [
   "yarl>=1.22.0",
   "zstandard>=0.25.0",
   "zstd>=1.5.7.2",
+  "jaxtyping>=0.3.9",
 ]
 
 [dependency-groups]
@@ -221,4 +222,27 @@ torchvision = { index = "pytorch-cu126" }
 torch-scatter = { index = "pyg-cu126" }
 torch-cluster = { index = "pyg-cu126" }
 pyg-lib = { index = "pyg-cu126" }
+
+[tool.mypy]
+disallow_untyped_defs = false
+ignore_missing_imports = true
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+
+[tool.ruff.lint]
+fixable = ["I001", "F401", "UP"]
+ignore = ["E402", "E721", "E731", "E741", "F722", "F821", "UP015", "UP037"]
+select = ["E", "F", "I001", "UP"]
+
+[tool.ruff.lint.flake8-import-conventions.extend-aliases]
+"collections" = "co"
+"functools" = "ft"
+"itertools" = "it"
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+extra-standard-library = ["typing_extensions"]
+lines-after-imports = 2
+order-by-type = false
 

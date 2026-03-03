@@ -2,10 +2,10 @@
 Generate and cache ESM3 residue-level embeddings for protein structures.
 
 This script:
-1. Reads a split file containing PDB entries (format: 'pdbid_final' or 'pdbid_final_chain')
+1. Reads a split file with PDB entries (format: 'pdbid_final' or 'pdbid_final_chain')
 2. Loads the PDB using Biotite to extract the ground-truth atoms and sequence.
-3. Sanitizes the AtomArray in-memory (removes HETATM flags and standardizes residue names) 
-   so ESM3 is forced to structurally embed non-canonical residues (mapped to 'UNK'/'X').
+3. Sanitizes the AtomArray in-memory (removes HETATM flags, standardizes residue
+   names) so ESM3 structurally embeds non-canonical residues (mapped to 'UNK'/'X').
 4. Runs ESM3 to get per-residue embeddings.
 5. Saves embeddings to separate .pt files in cache_dir/esm/
 
@@ -73,33 +73,33 @@ def compute_esm_embeddings(
         if len(protein_atoms) == 0:
             raise ValueError(f"No protein atoms found in {pdb_path}")
 
-        # Extract ground truth sequence before mutating the array 
-        seen = {}
-        unique_res_keys = []
+        # Extract ground truth sequence before mutating the array
         key_to_resname = {}
-        
+
         chain_id_arr = protein_atoms.chain_id
         res_id_arr = protein_atoms.res_id
         res_name_arr = protein_atoms.res_name
         ins_code_arr = np.array(
             [normalize_ins_code(x) for x in protein_atoms.ins_code], dtype=object
         )
-        
+
         for i in range(len(protein_atoms)):
             key = (chain_id_arr[i], res_id_arr[i], ins_code_arr[i])
-            if key not in seen:
-                seen[key] = True
-                unique_res_keys.append(key)
+            if key not in key_to_resname:
                 key_to_resname[key] = res_name_arr[i]
+
+        unique_res_keys = list(key_to_resname.keys())
         
-        biotite_seq = [THREE_TO_ONE.get(key_to_resname[key], "X") for key in unique_res_keys]
+        biotite_seq = [
+            THREE_TO_ONE.get(key_to_resname[key], "X") for key in unique_res_keys
+        ]
         num_residues = len(biotite_seq)
 
         # Sanitize the AtomArray so ESM accepts all residues
         protein_atoms.hetero[:] = False
         for i in range(len(protein_atoms)):
             orig_res = protein_atoms.res_name[i]
-            # Use your mapping to get the target 1-letter code, then convert back to 3-letter
+            # Map to 1-letter code, then convert back to 3-letter
             aa1 = THREE_TO_ONE.get(orig_res, "X")
             protein_atoms.res_name[i] = ONE_TO_THREE.get(aa1, "UNK")
 
@@ -124,25 +124,22 @@ def compute_esm_embeddings(
                 LogitsConfig(return_embeddings=True),
             )
 
-        if output.embeddings is None:
-            raise RuntimeError("Model returned no embeddings")
-
         emb = output.embeddings
         if emb.dim() == 3:
             emb = emb.squeeze(0)
         emb = emb[1:-1].detach().cpu()  # remove BOS/EOS tokens
 
         # Remove chain breaks and validate length
-        esm_seq_with_breaks = protein.sequence or ""
+        esm_seq_with_breaks = protein.sequence
         is_chainbreak = torch.tensor(
             [aa == "|" for aa in esm_seq_with_breaks], dtype=torch.bool
         )
         esm_emb = emb[~is_chainbreak]
         esm_seq = "".join([aa for aa in esm_seq_with_breaks if aa != "|"])
 
-        # Safety check to guarantee sanitization worked
+        # Validate: length mismatch means embeddings won't align with residues
         if len(esm_seq) != num_residues:
-            logger.warning(
+            raise ValueError(
                 f"Length mismatch after sanitization for {pdb_path}! "
                 f"Biotite: {num_residues}, ESM: {len(esm_seq)}"
             )

@@ -27,15 +27,19 @@ Output format (per cache file):
         'pdb_id': str,
     }
 """
+from __future__ import annotations
+
 import argparse
 import sys
-from collections.abc import Iterable
 from itertools import batched
 from pathlib import Path
+from typing import Any
 
 import biotite.structure as bts
 
-# TODO: Create SLAE as an installable site-package and have the user install it instead of sys path hacks (pending approval from SLAE authors)
+
+# TODO: Create SLAE as an installable site-package instead of sys path hacks
+# (pending approval from SLAE authors)
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 # SLAE paths - derive from home directory for portability
@@ -47,29 +51,32 @@ DEFAULT_SLAE_CONFIG = (
 )
 DEFAULT_SLAE_CKPT = SLAE_ROOT / "checkpoints" / "autoencoder.ckpt"
 
-import numpy as np  # noqa: E402
-import torch  # noqa: E402
-import yaml  # noqa: E402
-from loguru import logger  # noqa: E402
-from SLAE.features.graph_featurizer import ProteinGraphFeaturizer  # noqa: E402
-from SLAE.io.atom_tensor import atom37_to_atoms, atomarray_to_tensors  # noqa: E402
-from SLAE.model.encoder import ProteinEncoder  # noqa: E402
-from SLAE.util.constants import PROTEIN_ATOMS  # noqa: E402
-from torch_geometric.data import Batch, Data  # noqa: E402
-from tqdm import tqdm  # noqa: E402
+import numpy as np
+import torch
+import yaml  # type: ignore[import-untyped]
+from jaxtyping import Float, Int
+from loguru import logger
+from numpy import ndarray
+from SLAE.features.graph_featurizer import ProteinGraphFeaturizer
+from SLAE.io.atom_tensor import atom37_to_atoms, atomarray_to_tensors
+from SLAE.model.encoder import ProteinEncoder
+from SLAE.util.constants import PROTEIN_ATOMS
+from torch import Tensor
+from torch_geometric.data import Batch, Data
+from tqdm import tqdm
 
-from src.dataset import parse_asu_with_biotite  # noqa: E402
-from src.utils import (  # noqa: E402
+from src.dataset import parse_asu_with_biotite
+from src.utils import (
     normalize_ins_code,
     parse_split_file,
     setup_logging_for_tqdm,
 )
 
 
-def load_yaml_dict(config_path: str | Path) -> dict[str, object]:
+def load_yaml_dict(config_path: str | Path) -> dict[str, Any]:
     """Load YAML config and return as dict."""
     with open(config_path, "r") as f:
-        config = yaml.safe_load(f)
+        config: dict[str, Any] = yaml.safe_load(f)
     config.pop("_target_", None)
     return config
 
@@ -78,7 +85,7 @@ def get_geometry_atom_info(
     protein_atoms: bts.AtomArray,
 ) -> list[tuple[str, int, str, str]]:
     """
-    Build list of (chain_id, res_id, ins_code, atom_name) for each atom in geometry order.
+    Build (chain_id, res_id, ins_code, atom_name) list for each atom in geometry order.
 
     Geometry order refers to the atom ordering used in our geometry cache (dataset.py),
     which preserves the order atoms appear in the PDB file. This differs from SLAE's
@@ -100,14 +107,14 @@ def get_geometry_atom_info(
 
 
 def align_slae_to_geometry(
-    slae_emb: torch.Tensor,
-    slae_residue_idx: torch.Tensor,
-    slae_atom_type: torch.Tensor,
-    slae_chains: np.ndarray,
-    slae_residue_ids: torch.Tensor,
-    slae_ins_codes: np.ndarray,
+    slae_emb: Float[Tensor, "num_slae_atoms embedding_dim"],
+    slae_residue_idx: Int[Tensor, "num_slae_atoms"],
+    slae_atom_type: Int[Tensor, "num_slae_atoms"],
+    slae_chains: ndarray,
+    slae_residue_ids: Int[Tensor, "num_residues"],
+    slae_ins_codes: ndarray,
     geometry_atom_info: list[tuple[str, int, str, str]],
-) -> torch.Tensor:
+) -> Float[Tensor, "num_geometry_atoms embedding_dim"]:
     """
     Align SLAE atom embeddings to match geometry's atom order.
 
@@ -126,7 +133,7 @@ def align_slae_to_geometry(
         slae_chains: (N_res,) chain IDs from atomarray_to_tensors
         slae_residue_ids: (N_res,) residue IDs from atomarray_to_tensors
         slae_ins_codes: (N_res,) insertion codes from atomarray_to_tensors
-        geometry_atom_info: List of (chain_id, res_id, ins_code, atom_name) for geometry atoms
+        geometry_atom_info: List of (chain_id, res_id, ins_code, atom_name) tuples
 
     Returns:
         aligned_emb: (N_geometry, 128) embeddings aligned to geometry order
@@ -134,19 +141,26 @@ def align_slae_to_geometry(
     n_geometry = len(geometry_atom_info)
     n_slae = slae_emb.shape[0]
 
-    # Build SLAE atom keys 
-    res_indices = slae_residue_idx.numpy()
-    atom_type_indices = slae_atom_type.numpy()
+    # Build SLAE atom keys
+    res_indices: Int[ndarray, "num_slae_atoms"] = slae_residue_idx.numpy()
+    atom_type_indices: Int[ndarray, "num_slae_atoms"] = slae_atom_type.numpy()
 
     # Gather per-atom info from per-residue arrays
     slae_atom_chains = slae_chains[res_indices]
     slae_atom_res_ids = slae_residue_ids.numpy()[res_indices]
-    slae_atom_ins_codes = np.array([normalize_ins_code(slae_ins_codes[r]) for r in res_indices])
+    slae_atom_ins_codes = np.array(
+        [normalize_ins_code(slae_ins_codes[r]) for r in res_indices]
+    )
     slae_atom_names = np.array([PROTEIN_ATOMS[t] for t in atom_type_indices])
 
     # Build lookup: (chain_id, res_id, ins_code, atom_name) -> slae_atom_index
     slae_lookup = {
-        (slae_atom_chains[i], slae_atom_res_ids[i], slae_atom_ins_codes[i], slae_atom_names[i]): i
+        (
+            slae_atom_chains[i],
+            slae_atom_res_ids[i],
+            slae_atom_ins_codes[i],
+            slae_atom_names[i],
+        ): i
         for i in range(n_slae)
     }
 
@@ -166,39 +180,41 @@ def align_slae_to_geometry(
 
 
 def compute_slae_embeddings_batch(
-    coords_list: Iterable[torch.Tensor],
-    residue_type_list: Iterable[torch.Tensor],
-    residue_id_list: Iterable[torch.Tensor],
-    chains_list: Iterable[np.ndarray],
-    ins_code_list: Iterable[np.ndarray],
-    geometry_atom_info_list: Iterable[list[tuple[str, int, str, str]]],
+    coords_list: list[Float[Tensor, "num_residues 37 3"]],
+    residue_type_list: list[Int[Tensor, "num_residues"]],
+    residue_id_list: list[Int[Tensor, "num_residues"]],
+    chains_list: list[ndarray],
+    ins_code_list: list[ndarray],
+    geometry_atom_info_list: list[list[tuple[str, int, str, str]]],
     encoder: ProteinEncoder,
     featurizer: ProteinGraphFeaturizer,
     device: torch.device,
-) -> list[torch.Tensor]:
+) -> list[Float[Tensor, "num_geometry_atoms embedding_dim"]]:
     """
-    Compute SLAE node embeddings from atom37 coordinates for a batch of structures.
+    Compute and align SLAE node embeddings from atom37 coords for batched structures.
 
-    Embeddings are aligned to match geometry's atom order, with zero vectors for
-    atoms that SLAE doesn't produce embeddings for (non-canonical atoms).
+    Embeddings are aligned to the target geometry's atom order. Non-canonical atoms 
+    lacking SLAE representations are zero-padded. All input lists share the 
+    same length (batch size).
 
     Args:
-        coords_list: List of (N_res, 37, 3) atom37 coordinates tensors
-        residue_type_list: List of (N_res,) residue type indices tensors
-        residue_id_list: List of (N_res,) residue ID tensors
-        chains_list: List of (N_res,) chain ID arrays from atomarray_to_tensors
-        ins_code_list: List of (N_res,) insertion code arrays from atomarray_to_tensors
-        geometry_atom_info_list: List of geometry atom info (from get_geometry_atom_info)
-        encoder: SLAE ProteinEncoder
-        featurizer: ProteinGraphFeaturizer
-        device: torch device
+        coords_list: Atom37 coordinate tensors of shape (N_res, 37, 3).
+        residue_type_list: Residue type index tensors of shape (N_res,).
+        residue_id_list: Residue ID tensors of shape (N_res,).
+        chains_list: Chain ID arrays of shape (N_res,).
+        ins_code_list: Insertion code arrays of shape (N_res,).
+        geometry_atom_info_list: Target geometry metadata for alignment.
+        encoder: Instantiated SLAE ProteinEncoder.
+        featurizer: Graph featurizer to process the batch.
+        device: Target computation device.
 
     Returns:
-        embeddings_list: List of (N_geometry_atoms, 128) aligned node embeddings tensors
+        List of aligned node embedding tensors, each of shape (N_geometry_atoms, 128).
     """
     # create Data objects for all structures
     data_list = []
-    slae_atom_info_list = []  # Store (residue_idx, atom_type, chains, residue_id, ins_code) for alignment
+    # Store (residue_idx, atom_type, chains, residue_id, ins_code) for alignment
+    slae_atom_info_list = []
 
     for coords, residue_type, residue_id, chains, ins_code in zip(
         coords_list, residue_type_list, residue_id_list, chains_list, ins_code_list,
@@ -222,7 +238,7 @@ def compute_slae_embeddings_batch(
     batch = batch.to(device)
     batch = featurizer(batch)
 
-    with torch.no_grad():
+    with torch.inference_mode():
         outputs = encoder(batch)
         embeddings = outputs["node_embedding"]  # (total_atoms, 128)
 
@@ -235,7 +251,9 @@ def compute_slae_embeddings_batch(
         chains,
         residue_id,
         ins_code,
-    ), geometry_atom_info in zip(slae_atom_info_list, geometry_atom_info_list, strict=True):
+    ), geometry_atom_info in zip(
+        slae_atom_info_list, geometry_atom_info_list, strict=True
+    ):
         num_slae_atoms = residue_idx.size(0)
         slae_emb = embeddings[start_idx : start_idx + num_slae_atoms].cpu()
 
@@ -324,10 +342,6 @@ def main() -> None:
 
     ckpt = torch.load(args.slae_ckpt, map_location="cpu", weights_only=False)
     encoder.load_state_dict(ckpt["encoder"], strict=False)
-
-    for p in encoder.parameters():
-        p.requires_grad = False
-
     logger.info(f"Loaded encoder from {args.slae_ckpt}")
 
     # create featurizer
@@ -380,7 +394,13 @@ def main() -> None:
                 continue
 
             try:
+                # protein_atoms: biotite AtomArray with num_atoms atoms
                 protein_atoms, _ = parse_asu_with_biotite(str(pdb_path))
+                # coords: (num_residues, 37, 3) - atom37 coordinates
+                # residue_type: (num_residues,) - residue type indices
+                # chains: (num_residues,) - chain IDs
+                # residue_id: (num_residues,) - residue IDs
+                # ins_code: (num_residues,) - insertion codes
                 coords, residue_type, chains, residue_id, ins_code = (
                     atomarray_to_tensors(protein_atoms)
                 )
@@ -410,21 +430,21 @@ def main() -> None:
         # compute embeddings for batch
         if batch_data:
             try:
-                (coords_list, 
-                 residue_type_list, 
-                 residue_id_list, 
-                 chains_list, 
-                 ins_code_list, 
+                (coords_list,
+                 residue_type_list,
+                 residue_id_list,
+                 chains_list,
+                 ins_code_list,
                  geometry_atom_info_list
                  ) = zip(*batch_data)
 
                 embeddings_list = compute_slae_embeddings_batch(
-                    coords_list,
-                    residue_type_list,
-                    residue_id_list,
-                    chains_list,
-                    ins_code_list,
-                    geometry_atom_info_list,
+                    list(coords_list),
+                    list(residue_type_list),
+                    list(residue_id_list),
+                    list(chains_list),
+                    list(ins_code_list),
+                    list(geometry_atom_info_list),
                     encoder,
                     featurizer,
                     device,
