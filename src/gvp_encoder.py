@@ -18,7 +18,6 @@ from torch_geometric.data import Batch, Data, HeteroData
 from torch_scatter import scatter_add, scatter_max, scatter_mean
 
 from src.constants import EDGE_PP, NODE_FEATURE_DIM, NUM_RBF, RBF_CUTOFF
-from src.constants import EDGE_PP, NODE_FEATURE_DIM, NUM_RBF, RBF_CUTOFF
 from src.encoder_base import BaseProteinEncoder, register_encoder
 from src.gvp import GVP, EdgeUpdate, GVPConvLayer
 from src.utils import rbf
@@ -305,8 +304,8 @@ def load_encoder_from_checkpoint(
     device: str = "cuda",
     default_hidden_dims: tuple[int, int] = (256, 64),
     default_pooled_dim: int = 128,
-    default_num_edge_rbf: int = 16,
-    default_radius: float = 8.0,
+    default_num_edge_rbf: int = NUM_RBF,
+    default_radius: float = RBF_CUTOFF,
 ) -> tuple[ProteinGVPEncoder, dict[str, Any]]:
     """
     Load pretrained ProteinGVPEncoder from checkpoint.
@@ -366,7 +365,7 @@ def load_encoder_from_checkpoint(
         hidden_dims=hidden_dims,
         edge_scalar_in=args.get("num_edge_rbf", default_num_edge_rbf),
         edge_vec_in=1,
-        edge_scalar_out=16,
+        edge_scalar_out=NUM_RBF,
         update_w_distance=True,
         pooled_dim=args.get("pooled_dim", default_pooled_dim),
         radius=args.get("radius", default_radius),
@@ -521,7 +520,7 @@ class GVPEncoder(BaseProteinEncoder):
             encoder = ProteinGVPEncoder(
                 node_scalar_in=node_scalar_in,
                 hidden_dims=(hidden_s, hidden_v),
-                edge_scalar_in=16,
+                edge_scalar_in=NUM_RBF,
                 use_edge_update=use_edge_update,
             ).to(device)
 
@@ -552,13 +551,13 @@ class GVPEncoder(BaseProteinEncoder):
         encoder = ProteinGVPEncoder(
             node_scalar_in=args["node_scalar_in"],
             hidden_dims=tuple(args["hidden_dims"]),
-            edge_scalar_in=args.get("num_edge_rbf", 16),
+            edge_scalar_in=args.get("num_edge_rbf", NUM_RBF),
             edge_vec_in=1,
-            edge_scalar_out=16,
+            edge_scalar_out=NUM_RBF,
             update_w_distance=True,
             pooled_dim=args.get("pooled_dim", 128),
-            radius=args.get("radius", 8.0),
-            num_edge_rbf=args.get("num_edge_rbf", 16),
+            radius=args.get("radius", RBF_CUTOFF),
+            num_edge_rbf=args.get("num_edge_rbf", NUM_RBF),
         ).to(device)
 
         encoder.load_state_dict(state_dict)
