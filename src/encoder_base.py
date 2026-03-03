@@ -120,7 +120,6 @@ class CachedEmbeddingEncoder(BaseProteinEncoder):
         V = embeddings.new_empty(embeddings.size(0), 0, 3)
         return embeddings, V, None
 
-
 # global encoder registry
 _ENCODER_REGISTRY: dict[str, BaseProteinEncoder] = {}
 

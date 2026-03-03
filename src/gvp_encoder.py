@@ -18,6 +18,7 @@ from torch_geometric.data import Batch, Data, HeteroData
 from torch_scatter import scatter_add, scatter_max, scatter_mean
 
 from src.constants import EDGE_PP, NODE_FEATURE_DIM, NUM_RBF, RBF_CUTOFF
+from src.constants import EDGE_PP, NODE_FEATURE_DIM, NUM_RBF, RBF_CUTOFF
 from src.encoder_base import BaseProteinEncoder, register_encoder
 from src.gvp import GVP, EdgeUpdate, GVPConvLayer
 from src.utils import rbf
