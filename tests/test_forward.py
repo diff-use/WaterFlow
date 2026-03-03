@@ -11,7 +11,7 @@ import torch
 from torch_geometric.data import HeteroData
 
 from src.flow import FlowMatcher, FlowWaterGVP
-from src.gvp_encoder import GVPEncoder, ProteinGVPEncoder, make_encoder_data
+from src.gvp_encoder import GVPEncoder, ProteinGVPEncoder
 
 
 def _iter_tensors(obj):
@@ -187,7 +187,7 @@ def test_forward_pass_no_nan_with_module_hooks(device):
     ).to(device)
 
     # Quick pre-check: protein encoder input features created from pp edges
-    enc_data = make_encoder_data(data)
+    enc_data = GVPEncoder.make_encoder_data(data)
     assert_edge_index_in_range(enc_data.edge_index, enc_data.x.size(0), enc_data.x.size(0), "pp edge_index")
 
     # Also validate knn edges are sane (catches orientation / k issues)
@@ -361,7 +361,7 @@ def test_forward_with_duplicate_protein_coords_localizes_nan(device):
     ).to(device)
 
     # ---- Pre-check: encoder input edges ----
-    enc_data = make_encoder_data(data)
+    enc_data = GVPEncoder.make_encoder_data(data)
     for tensor in _iter_tensors(enc_data):
         assert torch.isfinite(tensor).all()
 

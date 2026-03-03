@@ -9,13 +9,12 @@ geometric processing.
 from __future__ import annotations
 
 import torch
-from torch_geometric.data import HeteroData
 
-from src.encoder_base import BaseProteinEncoder, register_encoder
+from src.encoder_base import CachedEmbeddingEncoder, register_encoder
 
 
 @register_encoder('slae')
-class SLAEEncoder(BaseProteinEncoder):
+class SLAEEncoder(CachedEmbeddingEncoder):
     """
     SLAE encoder that reads cached embeddings from data.
 
@@ -25,39 +24,17 @@ class SLAEEncoder(BaseProteinEncoder):
     """
 
     def __init__(self, slae_dim: int = 128):
-        super().__init__()
-        self._slae_dim = slae_dim
+        """
+        Initialize SLAEEncoder.
 
-    @property
-    def output_dims(self) -> tuple[int, int]:
-        """Return (slae_dim, 0) — scalars only."""
-        return self._slae_dim, 0
+        Args:
+            slae_dim: Dimension of SLAE embeddings (default: 128)
+        """
+        super().__init__(embedding_dim=slae_dim, embedding_key='slae_embedding')
 
     @property
     def encoder_type(self) -> str:
         return 'slae'
-
-    def forward(self, data: HeteroData) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Read cached SLAE embeddings and return (s, V).
-
-        Args:
-            data: HeteroData with data['protein'].slae_embedding
-
-        Returns:
-            s: (N, slae_dim) — raw SLAE embeddings
-            V: (N, 0, 3)    — empty vector features
-        """
-        if 'slae_embedding' not in data['protein']:
-            raise NotImplementedError(
-                "SLAE encoder requires cached embeddings. "
-                "Please provide pre-computed slae_embedding in data['protein']. "
-                "Run scripts/precompute_slae_embeddings.py first."
-            )
-
-        embeddings = data['protein'].slae_embedding
-        V = embeddings.new_empty(embeddings.size(0), 0, 3)
-        return embeddings, V
 
     @classmethod
     def from_config(cls, config: dict, device: torch.device) -> SLAEEncoder:

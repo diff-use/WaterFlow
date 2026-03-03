@@ -286,7 +286,7 @@ class FlowWaterGVP(nn.Module):
         device = data['protein'].pos.device
 
         # Single unified encoder call - works for ANY encoder type
-        s_all, v_all = self.encoder(data)
+        s_all, v_all, _edge_attr = self.encoder(data)
 
         # Bridge encoder dims -> flow dims
         # Pass tuple when encoder has vector outputs, tensor when scalar-only

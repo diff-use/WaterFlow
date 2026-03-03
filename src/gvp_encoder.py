@@ -17,57 +17,10 @@ from loguru import logger
 from torch_geometric.data import Batch, Data, HeteroData
 from torch_scatter import scatter_add, scatter_max, scatter_mean
 
-from src.constants import EDGE_PP
+from src.constants import EDGE_PP, NODE_FEATURE_DIM, NUM_RBF, RBF_CUTOFF
 from src.encoder_base import BaseProteinEncoder, register_encoder
 from src.gvp import GVP, EdgeUpdate, GVPConvLayer
-from src.utils import rbf as _rbf
-
-
-def _edge_vectors(pos: torch.Tensor, edge_index: torch.Tensor):
-    """Compute edge vectors and distances."""
-    src, dst = edge_index[0], edge_index[1]
-    vec = pos[dst] - pos[src]
-    rij = torch.linalg.norm(vec, dim=-1).clamp(min=1e-4)
-    r_hat = vec / rij[:, None]
-    return rij, r_hat
-
-
-def make_encoder_data(data: HeteroData) -> Data:
-    """
-    Build a homogeneous Data with protein nodes for GVP encoder.
-
-    Extracts protein subgraph from HeteroData for use with GVP encoder.
-    Edge features are computed by the encoder itself.
-
-    Args:
-        data: HeteroData with protein nodes
-
-    Returns:
-        enc_data: Data with x, pos, edge_index
-    """
-    device = data['protein'].pos.device
-    prot = data['protein']
-
-    x = prot.x
-    pos = prot.pos
-
-    # protein-protein edges (topology only - features computed by encoder)
-    if EDGE_PP in data.edge_types:
-        edge_index = data[EDGE_PP].edge_index
-    else:
-        edge_index = torch.empty(2, 0, dtype=torch.long, device=device)
-
-    enc_data = Data(
-        x=x,
-        pos=pos,
-        edge_index=edge_index,
-    )
-
-    # batch for multi-complex batches
-    if hasattr(prot, "batch"):
-        enc_data.batch = prot.batch
-
-    return enc_data
+from src.utils import rbf
 
 
 class ProteinGVPEncoder(nn.Module):
@@ -80,12 +33,12 @@ class ProteinGVPEncoder(nn.Module):
 
     def __init__(
         self,
-        node_scalar_in: int = 17,
+        node_scalar_in: int = NODE_FEATURE_DIM,
         node_vec_in: int = 1,
         hidden_dims: tuple[int, int] = (256, 32),
-        edge_scalar_in: int = 16,
+        edge_scalar_in: int = NUM_RBF,
         edge_vec_in: int = 1,
-        edge_scalar_out: int = 16,
+        edge_scalar_out: int = NUM_RBF,
         n_layers: int = 3,
         n_message: int = 2,
         n_feedforward: int = 2,
@@ -99,9 +52,37 @@ class ProteinGVPEncoder(nn.Module):
         pool_aggr: Literal["mean", "sum", "max"] = "mean",
         update_w_distance: bool = True,
         distance_dim: int | None = None,
-        radius: float = 8.0,
-        num_edge_rbf: int = 16,
+        radius: float = RBF_CUTOFF,
+        num_edge_rbf: int = NUM_RBF,
+        use_edge_update: bool = True,
     ):
+        """
+        Initialize GVP encoder for protein structure processing.
+
+        Args:
+            node_scalar_in: Input scalar feature dimension (e.g., element one-hot)
+            node_vec_in: Input vector feature channels (typically 1 for orientation)
+            hidden_dims: (scalar_dim, vector_dim) hidden layer dimensions
+            edge_scalar_in: Input edge scalar dimension (RBF features)
+            edge_vec_in: Input edge vector channels (unit vectors)
+            edge_scalar_out: Output edge scalar dimension
+            n_layers: Number of GVP convolution layers
+            n_message: Number of GVPs in message function
+            n_feedforward: Number of GVPs in feedforward function
+            drop_rate: Dropout rate for regularization
+            vector_gate: Whether to use vector gating in GVP layers
+            scalar_activation: Activation function for scalar channels
+            vector_activation: Activation function for vector gating
+            init_vec_zero: If True, initialize input vectors as zeros
+            pooled_dim: Output dimension when pooling by residue
+            pool_residue: If True, pool atom features to residue level
+            pool_aggr: Aggregation method for residue pooling ('mean', 'sum', 'max')
+            update_w_distance: Include distance features in edge updates
+            distance_dim: Dimension for distance conditioning, defaults to edge_scalar_in
+            radius: Distance cutoff in Angstroms for RBF encoding
+            num_edge_rbf: Number of RBF basis functions
+            use_edge_update: Whether to update edge features between layers
+        """
         super().__init__()
         self.node_scalar_in = node_scalar_in
         self.node_vec_in = node_vec_in
@@ -119,6 +100,7 @@ class ProteinGVPEncoder(nn.Module):
         self.radius = radius
         self.num_edge_rbf = num_edge_rbf
         self.pooled_dim = pooled_dim
+        self.use_edge_update = use_edge_update
 
         distance_dim = distance_dim or edge_scalar_in
         self.distance_dim = distance_dim
@@ -161,12 +143,15 @@ class ProteinGVPEncoder(nn.Module):
             for _ in range(n_layers)
         ])
 
-        self.edge_update = EdgeUpdate(
-            n_node_scalars=S_hid,
-            s_edge_width=self.s_edge_width,
-            update_w_distance=update_w_distance,
-            distance_dim=distance_dim,
-        )
+        if use_edge_update:
+            self.edge_update = EdgeUpdate(
+                n_node_scalars=S_hid,
+                s_edge_width=self.s_edge_width,
+                update_w_distance=update_w_distance,
+                distance_dim=distance_dim,
+            )
+        else:
+            self.edge_update = None
 
         self.atom_readout = nn.Sequential(
             nn.Linear(S_hid + V_hid, pooled_dim),
@@ -178,6 +163,15 @@ class ProteinGVPEncoder(nn.Module):
 
     @staticmethod
     def _tuple_to_scalar_dense(x_tuple: tuple) -> torch.Tensor:
+        """
+        Convert GVP tuple to dense scalar representation.
+
+        Args:
+            x_tuple: (s, V) where s is (N, scalar_dim) and V is (N, vector_dim, 3)
+
+        Returns:
+            (N, scalar_dim + vector_dim) concatenation of scalars and vector norms
+        """
         s, V = x_tuple
         vnorm = torch.linalg.norm(V, dim=-1)
         return torch.cat([s, vnorm], dim=-1)
@@ -185,29 +179,92 @@ class ProteinGVPEncoder(nn.Module):
     def _pool_by_residue(
         self, atom_embed: torch.Tensor, residue_index: torch.Tensor, num_residues: int
     ) -> torch.Tensor:
+        """
+        Pool atom-level embeddings to residue level.
+
+        Args:
+            atom_embed: (N_atoms, embed_dim) atom embeddings
+            residue_index: (N_atoms,) residue index per atom
+            num_residues: Total number of residues
+
+        Returns:
+            (num_residues, embed_dim) pooled residue embeddings
+        """
         aggr = self.pool_aggr
         if aggr == "mean":
             return scatter_mean(atom_embed, residue_index, dim=0, dim_size=num_residues)
-        if aggr == "sum":
+        elif aggr == "sum":
             return scatter_add(atom_embed, residue_index, dim=0, dim_size=num_residues)
-        if aggr == "max":
+        elif aggr == "max":
             out, _ = scatter_max(atom_embed, residue_index, dim=0, dim_size=num_residues)
             return out
-        raise ValueError(f"Unknown pool_aggr={aggr!r}")
+        else:
+            raise ValueError(f"Unknown pool_aggr={aggr!r}")
 
     @staticmethod
-    def _initial_node_tuple(x_scalar: torch.Tensor, device=None) -> tuple:
+    def _initial_node_tuple(
+        x_scalar: torch.Tensor, device: torch.device | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         zeros = torch.zeros(x_scalar.size(0), 1, 3, device=x_scalar.device if device is None else device)
         return (x_scalar, zeros)
 
-    def _compute_edge_attr(self, pos: torch.Tensor, edge_index: torch.Tensor):
-        d, u = _edge_vectors(pos, edge_index)
-        s_edge_raw = _rbf(d, num_gaussians=self.num_edge_rbf, cutoff=self.radius)
+    @staticmethod
+    def _edge_vectors(pos: torch.Tensor, edge_index: torch.Tensor):
+        """
+        Compute edge vectors and distances from node positions.
+
+        Args:
+            pos: (N, 3) node position coordinates
+            edge_index: (2, E) edge indices with source in row 0, destination in row 1
+
+        Returns:
+            rij: (E,) edge distances clamped to minimum 1e-4
+            r_hat: (E, 3) unit vectors pointing from source to destination
+        """
+        src, dst = edge_index[0], edge_index[1]
+        vec = pos[dst] - pos[src]
+        rij = torch.linalg.norm(vec, dim=-1).clamp(min=1e-4)
+        r_hat = vec / rij[:, None]
+        return rij, r_hat
+
+    def _compute_edge_attr(self, data: Batch):
+        """
+        Build edge attributes from positions or cached features.
+
+        If cached edge features (edge_rbf, edge_unit) are available in data,
+        use them directly. Otherwise, compute from positions.
+
+        Args:
+            data: Batch with pos, edge_index, and optionally edge_rbf, edge_unit
+
+        Returns:
+            (s_edge, V_edge): Tuple of scalar and vector edge features
+            s_edge_raw: Raw RBF features (for distance conditioning)
+        """
+        # Use cached features if available
+        if hasattr(data, 'edge_rbf') and hasattr(data, 'edge_unit'):
+            s_edge_raw = data.edge_rbf
+            u = data.edge_unit
+        else:
+            # Fallback: compute from positions
+            d, u = self._edge_vectors(data.pos, data.edge_index)
+            s_edge_raw = rbf(d, num_gaussians=self.num_edge_rbf, cutoff=self.radius)
+
         s_edge = self.edge_in_proj(s_edge_raw)
         V_edge = u.unsqueeze(1)
         return (s_edge, V_edge), s_edge_raw
 
-    def forward(self, data: Batch):
+    def forward(self, data: Batch) -> tuple[tuple, tuple | None]:
+        """
+        Forward pass through the GVP encoder.
+
+        Args:
+            data: Batch with node features, positions, and edge indices
+
+        Returns:
+            x: tuple (s, V) of node scalar and vector features
+            edge_attr: tuple (s_edge, V_edge) of edge features, or None if use_edge_update=False
+        """
         x_scalar = self.input_scalar_encoder(data.x)
 
         if self.init_vec_zero or not hasattr(data, "node_v"):
@@ -216,26 +273,29 @@ class ProteinGVPEncoder(nn.Module):
             node_features = (x_scalar, data.node_v.unsqueeze(1))
 
         x = self.input_gvp(node_features)
-        edge_attr, dist_feat = self._compute_edge_attr(data.pos, data.edge_index)
+        edge_attr, dist_feat = self._compute_edge_attr(data)
 
         for layer in self.layers:
             x = layer(x, data.edge_index, edge_attr)
-            edge_attr = self.edge_update(
-                node_tuple=x,
-                edge_index=data.edge_index,
-                edge_attr=edge_attr,
-                distance_feat=(dist_feat if self.update_w_distance else None),
-            )
+            if self.edge_update is not None:
+                edge_attr = self.edge_update(
+                    node_tuple=x,
+                    edge_index=data.edge_index,
+                    edge_attr=edge_attr,
+                    distance_feat=(dist_feat if self.update_w_distance else None),
+                )
 
         if self.pool_residue:
-            assert hasattr(data, "residue_index") and hasattr(data, "num_residues"), \
-                "Pooling requires data.residue_index (N,) and data.num_residues (int)."
+            if not (hasattr(data, "residue_index") and hasattr(data, "num_residues")):
+                raise ValueError("Pooling requires data.residue_index and data.num_residues")
             atom_dense = self._tuple_to_scalar_dense(x)
             atom_embed = self.atom_readout(atom_dense)
             res_embed = self._pool_by_residue(atom_embed, data.residue_index, int(data.num_residues))
-            return res_embed
+            return res_embed, None  # No edge features when pooling
 
-        return x
+        # Return edge_attr only if edge_update was used
+        final_edge_attr = edge_attr if self.edge_update is not None else None
+        return x, final_edge_attr
 
 
 def load_encoder_from_checkpoint(
@@ -360,7 +420,53 @@ class GVPEncoder(BaseProteinEncoder):
         """Return encoder type identifier."""
         return 'gvp'
 
-    def forward(self, data: HeteroData) -> tuple[torch.Tensor, torch.Tensor]:
+    @staticmethod
+    def make_encoder_data(data: HeteroData) -> Data:
+        """
+        Build a homogeneous Data with protein nodes for GVP encoder.
+
+        Extracts protein subgraph from HeteroData for use with GVP encoder.
+        If PP edge features are cached in the HeteroData, they are copied through.
+
+        Args:
+            data: HeteroData with protein nodes
+
+        Returns:
+            enc_data: Data with x, pos, edge_index, and optionally cached edge features
+        """
+        device = data['protein'].pos.device
+        prot = data['protein']
+
+        x = prot.x
+        pos = prot.pos
+
+        # protein-protein edges
+        if EDGE_PP in data.edge_types:
+            edge_index = data[EDGE_PP].edge_index
+        else:
+            edge_index = torch.empty(2, 0, dtype=torch.long, device=device)
+
+        enc_data = Data(
+            x=x,
+            pos=pos,
+            edge_index=edge_index,
+        )
+
+        # Copy cached edge features if available
+        if EDGE_PP in data.edge_types:
+            pp_edge = data[EDGE_PP]
+            if hasattr(pp_edge, 'edge_rbf'):
+                enc_data.edge_rbf = pp_edge.edge_rbf
+            if hasattr(pp_edge, 'edge_unit'):
+                enc_data.edge_unit = pp_edge.edge_unit
+
+        # batch for multi-complex batches
+        if hasattr(prot, "batch"):
+            enc_data.batch = prot.batch
+
+        return enc_data
+
+    def forward(self, data: HeteroData) -> tuple[torch.Tensor, torch.Tensor, tuple | None]:
         """
         Encode protein data.
 
@@ -368,15 +474,17 @@ class GVPEncoder(BaseProteinEncoder):
             data: HeteroData with protein nodes
 
         Returns:
-            Tuple of (s, V) features
+            s: (N, scalar_dim) scalar features
+            V: (N, vector_dim, 3) vector features
+            pp_edge_attr: tuple (s_edge, V_edge) for PP edges, or None if edge updates disabled
         """
         # Convert HeteroData to homogeneous Data for GVP encoder
-        enc_data = make_encoder_data(data)
+        enc_data = self.make_encoder_data(data)
 
         with torch.set_grad_enabled(not self._freeze):
-            s, V = self.encoder(enc_data)
+            (s, V), edge_attr = self.encoder(enc_data)
 
-        return s, V
+        return s, V, edge_attr
 
     @classmethod
     def from_config(cls, config: dict, device: torch.device) -> GVPEncoder:
@@ -389,6 +497,7 @@ class GVPEncoder(BaseProteinEncoder):
                 - node_scalar_in: Input feature dimension (default: 16)
                 - hidden_s, hidden_v: Hidden dimensions
                 - freeze_encoder: Whether to freeze encoder
+                - use_edge_update: Whether to use edge updates (default: True)
             device: Device to place the encoder on
 
         Returns:
@@ -399,6 +508,7 @@ class GVPEncoder(BaseProteinEncoder):
         hidden_s = config.get('hidden_s', 256)
         hidden_v = config.get('hidden_v', 32)
         freeze = config.get('freeze_encoder', False)
+        use_edge_update = config.get('use_edge_update', True)
 
         if encoder_ckpt:
             encoder, _ = load_encoder_from_checkpoint(
@@ -411,6 +521,7 @@ class GVPEncoder(BaseProteinEncoder):
                 node_scalar_in=node_scalar_in,
                 hidden_dims=(hidden_s, hidden_v),
                 edge_scalar_in=16,
+                use_edge_update=use_edge_update,
             ).to(device)
 
         return cls(encoder=encoder, freeze=freeze)

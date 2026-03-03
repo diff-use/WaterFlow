@@ -16,7 +16,7 @@ from src.flow import (
     ProteinWaterUpdate,
     build_knn_edges,
 )
-from src.gvp_encoder import GVPEncoder, ProteinGVPEncoder, make_encoder_data
+from src.gvp_encoder import GVPEncoder, ProteinGVPEncoder
 
 
 @pytest.fixture
@@ -148,7 +148,7 @@ class TestBuildKnnEdges:
 class TestMakeEncoderData:
     
     def test_basic_output(self, simple_hetero_data):
-        enc_data = make_encoder_data(simple_hetero_data)
+        enc_data = GVPEncoder.make_encoder_data(simple_hetero_data)
 
         assert isinstance(enc_data, Data)
         assert hasattr(enc_data, 'x')
@@ -156,7 +156,7 @@ class TestMakeEncoderData:
         assert hasattr(enc_data, 'edge_index')
     
     def test_shapes(self, simple_hetero_data):
-        enc_data = make_encoder_data(simple_hetero_data)
+        enc_data = GVPEncoder.make_encoder_data(simple_hetero_data)
 
         n_nodes = simple_hetero_data['protein'].pos.size(0)
         n_edges = simple_hetero_data['protein', 'pp', 'protein'].edge_index.size(1)
@@ -166,7 +166,7 @@ class TestMakeEncoderData:
         assert enc_data.edge_index.shape == (2, n_edges)
     
     def test_batch_preserved(self, batched_hetero_data):
-        enc_data = make_encoder_data(batched_hetero_data)
+        enc_data = GVPEncoder.make_encoder_data(batched_hetero_data)
 
         assert hasattr(enc_data, 'batch')
         assert enc_data.batch.shape[0] == batched_hetero_data['protein'].pos.size(0)
@@ -177,7 +177,7 @@ class TestMakeEncoderData:
         data['protein'].x = torch.randn(10, 16, device=device)
         # No edges defined
 
-        enc_data = make_encoder_data(data)
+        enc_data = GVPEncoder.make_encoder_data(data)
 
         assert enc_data.edge_index.shape == (2, 0)
 
