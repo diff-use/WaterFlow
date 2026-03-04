@@ -85,7 +85,9 @@ def parse_args():
         "--processed_dir",
         type=str,
         default="/home/srivasv/flow_cache/",
-        help="Directory for cached preprocessed .pt files",
+        help="Parent directory containing all cached preprocessed data. This directory holds "
+        "protein graphs, embeddings, and geometry subdirectories (e.g., processed_dir/geometry/). "
+        "Each PDB's preprocessed data is stored in subdirectories organized by cache type.",
     )
     p.add_argument(
         "--base_pdb_dir",
@@ -102,8 +104,9 @@ def parse_args():
         "--geometry_cache",
         type=str,
         default=None,
-        help="Geometry cache name to use (e.g., 'geometry' or 'geometry_unfiltered'). "
-        "Overrides the model's config if specified. Use this to evaluate against a specific ground truth.",
+        help="Subdirectory name within processed_dir specifying which water coordinate set to use. "
+        "Options include 'geometry' (filtered waters meeting quality criteria) or "
+        "'geometry_unfiltered' (all crystallographic waters). Overrides the model's config if specified.",
     )
 
     # checkpoint arguments
@@ -166,6 +169,14 @@ def parse_args():
         default=None,
         help="Sample num_residues * water_ratio waters instead of using ground truth count. "
         "E.g., --water_ratio 0.5 samples 50 waters for a 100-residue protein.",
+    )
+
+    p.add_argument(
+        "--skip_metrics",
+        action="store_true",
+        help="Skip metrics computation (precision, recall, RMSD) that require ground truth. "
+        "Use when running inference on structures without ground truth waters. "
+        "Automatically enabled when --water_ratio is specified.",
     )
 
     args = p.parse_args()
@@ -316,25 +327,13 @@ def run_inference_batch(
             water_ratio=water_ratio,
         )
     else:  # euler
-        water_preds = flow_matcher.euler_integrate(
+        results = flow_matcher.euler_integrate(
             graphs,
             num_steps=num_steps,
             use_sc=use_sc,
             device=device,
             water_ratio=water_ratio,
         )
-        # build result dicts similar to rk4
-        results = []
-        for graph, water_pred in zip(graphs, water_preds):
-            results.append(
-                {
-                    "protein_pos": graph["protein"].pos.numpy(),
-                    "water_true": graph["water"].pos.numpy(),
-                    "water_pred": water_pred,
-                    "trajectory": None,
-                    "pdb_id": getattr(graph, "pdb_id", None),
-                }
-            )
 
     return results
 
@@ -343,7 +342,7 @@ def save_plot(
     result: dict,
     pdb_id: str,
     output_path: Path,
-    metrics: dict,
+    metrics: dict | None,
 ):
     """
     Save 3D visualization plot of water prediction results.
@@ -352,22 +351,31 @@ def save_plot(
         result: Dict with 'protein_pos', 'water_pred', 'water_true' arrays
         pdb_id: PDB identifier for title
         output_path: Path to save PNG image
-        metrics: Dict with 'rmsd', 'precision', 'recall', 'f1' for title
+        metrics: Dict with 'rmsd', 'precision', 'recall', 'f1' for title, or None if no ground truth
     """
     fig = plt.figure(figsize=(12, 10))
     ax = fig.add_subplot(111, projection="3d")
 
-    title = (
-        f"{pdb_id} | RMSD={metrics['rmsd']:.2f}Å | "
-        f"P={metrics['precision']:.2%} R={metrics['recall']:.2%} F1={metrics['f1']:.3f}"
-    )
+    if metrics is not None:
+        title = (
+            f"{pdb_id} | RMSD={metrics['rmsd']:.2f}Å | "
+            f"P={metrics['precision']:.2%} R={metrics['recall']:.2%} F1={metrics['f1']:.3f}"
+        )
+    else:
+        n_pred = result["water_pred"].shape[0]
+        title = f"{pdb_id} | {n_pred} waters predicted (no ground truth)"
+
+    # water_true may be None or empty when no ground truth is available
+    water_true = result.get("water_true")
+    if water_true is not None and water_true.shape[0] == 0:
+        water_true = None
 
     plot_3d_frame(
         ax,
         result["protein_pos"],
         None,  # no separate mate positions
         result["water_pred"],
-        result["water_true"],
+        water_true,
         title=title,
     )
 
@@ -440,22 +448,32 @@ def main():
     logger.info(f"Self-conditioning: {args.use_sc}")
     logger.info(f"Threshold for metrics: {args.threshold}Å")
     logger.info(f"Batch size: {args.batch_size}")
+
+    # Determine if metrics should be skipped
+    # Skip metrics when explicitly requested or when using water_ratio (no ground truth count)
+    skip_metrics = args.skip_metrics or args.water_ratio is not None
+
     if args.water_ratio is not None:
         logger.info(
             f"Water ratio: {args.water_ratio} (sampling num_residues × {args.water_ratio} waters)"
         )
     else:
         logger.info("Water ratio: None (using ground truth water count)")
+    if skip_metrics:
+        logger.info("Metrics computation: DISABLED (no ground truth comparison)")
+    else:
+        logger.info("Metrics computation: ENABLED")
     logger.info("-" * 60)
 
     all_metrics = []
 
-    # collect valid graphs (those with waters for ground truth comparison)
+    # collect graphs for inference
     valid_graphs = []
     skipped_pdbs = []
     for idx in range(len(dataset)):
         graph = dataset[idx]
-        if graph["water"].num_nodes == 0:
+        # Only skip zero-water PDBs when we need ground truth for metrics
+        if graph["water"].num_nodes == 0 and not skip_metrics:
             skipped_pdbs.append(graph.pdb_id)
         else:
             valid_graphs.append(graph)
@@ -487,19 +505,23 @@ def main():
             pdb_id = result.get("pdb_id", f"unknown_{len(all_metrics)}")
             water_pred = result["water_pred"]
             water_true = result["water_true"]
+            has_ground_truth = water_true is not None and water_true.shape[0] > 0
 
-            # compute metrics
-            metrics = compute_placement_metrics(
-                pred=water_pred,
-                true=water_true,
-                threshold=args.threshold,
-            )
-            metrics["rmsd"] = compute_rmsd(water_pred, water_true)
-            metrics["pdb_id"] = pdb_id
-            metrics["n_waters_true"] = water_true.shape[0]
-            metrics["n_waters_pred"] = water_pred.shape[0]
-
-            all_metrics.append(metrics)
+            # compute metrics only when ground truth is available and metrics are enabled
+            if not skip_metrics and has_ground_truth:
+                metrics = compute_placement_metrics(
+                    pred=water_pred,
+                    true=water_true,
+                    threshold=args.threshold,
+                )
+                metrics["rmsd"] = compute_rmsd(water_pred, water_true)
+                metrics["pdb_id"] = pdb_id
+                metrics["n_waters_true"] = water_true.shape[0]
+                metrics["n_waters_pred"] = water_pred.shape[0]
+                all_metrics.append(metrics)
+            else:
+                # no ground truth comparison - just store prediction info
+                metrics = None
 
             plot_path = output_dir / "plots" / f"{pdb_id}.png"
             save_plot(result, pdb_id, plot_path, metrics)
@@ -507,22 +529,27 @@ def main():
             # save GIF if requested and trajectory available
             if args.save_gifs and result.get("trajectory") is not None:
                 gif_path = output_dir / "gifs" / f"{pdb_id}.gif"
+                # Use water_true only if available
+                gif_water_true = water_true if has_ground_truth else None
                 create_trajectory_gif(
                     trajectory=result["trajectory"],
                     protein_pos=result["protein_pos"],
-                    water_true=water_true,
+                    water_true=gif_water_true,
                     save_path=str(gif_path),
                     title="",
                     fps=10,
                     pdb_id=pdb_id,
                 )
 
-            # print per-sample metrics
-            tqdm.write(
-                f"  {pdb_id}: RMSD={metrics['rmsd']:.2f}Å | "
-                f"P={metrics['precision']:.2%} R={metrics['recall']:.2%} "
-                f"F1={metrics['f1']:.3f} AUC-PR={metrics['auc_pr']:.3f}"
-            )
+            # print per-sample info
+            if metrics is not None:
+                tqdm.write(
+                    f"  {pdb_id}: RMSD={metrics['rmsd']:.2f}Å | "
+                    f"P={metrics['precision']:.2%} R={metrics['recall']:.2%} "
+                    f"F1={metrics['f1']:.3f} AUC-PR={metrics['auc_pr']:.3f}"
+                )
+            else:
+                tqdm.write(f"  {pdb_id}: {water_pred.shape[0]} waters predicted")
 
     # compute and save summary metrics
     if all_metrics:
@@ -580,7 +607,10 @@ def main():
         logger.info(f"Metrics saved to: {metrics_path}")
 
     else:
-        logger.warning("No valid samples processed.")
+        if skip_metrics:
+            logger.info(f"Processed {len(valid_graphs)} samples (metrics disabled)")
+        else:
+            logger.warning("No valid samples processed.")
 
     logger.info(f"Plots saved to: {output_dir / 'plots'}")
     if args.save_gifs:
