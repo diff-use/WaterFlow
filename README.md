@@ -282,30 +282,3 @@ uv run python -m scripts.inference \
 │   └── ...
 └── metrics.json        # Per-sample and summary statistics
 ```
-
-## Testing
-
-Run the test suite with pytest:
-
-```bash
-# run all tests
-uv run pytest tests/
-
-# run with coverage report
-uv run pytest tests/ --cov=src --cov-report=html
-
-# run specific test file
-uv run pytest tests/test_flow.py -v
-
-# run tests matching a pattern
-uv run pytest tests/ -k "test_forward" -v
-```
-
-### Test Categories
-
-- `test_dataset.py`: Data loading, preprocessing, and caching
-- `test_flow.py`: Flow matching training and integration
-- `test_encoder.py`: Encoder architectures and registry
-- `test_forward.py`: End-to-end forward pass validation
-- `test_gvp.py`: GVP layer equivariance and correctness
-- `test_utils.py`: Metrics, plotting, and utility functions
