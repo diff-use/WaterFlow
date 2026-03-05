@@ -33,7 +33,7 @@ jobs:
           commit_username: "Autoformatter"
           commit_email: "Autoformatter <actions@github.com>"
 
-  mypy:
+  ty:
     runs-on: ubuntu-latest
 
     steps:
@@ -48,5 +48,6 @@ jobs:
       - name: Install dependencies
         run: uv sync --group dev
 
-      - name: Run mypy
-        run: uv run mypy src/
+      - name: Run ty
+        # Use uv if replacing mypy with ty in dev dependency group
+        run: uvx ty check src/
