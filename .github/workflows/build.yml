@@ -1,10 +1,10 @@
 name: Build
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  # push:
+  #   branches: [main]
+  # pull_request:
+  #   branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -14,8 +14,8 @@ jobs:
       matrix:
         python-version: [3.12]
 
-    # Skip CI if 'skip ci' is in the latest commit message
-    if: "!contains(github.event.head_commit.message, 'skip ci')"
+    # Skip CI if 'skip ci' is in the latest commit message (only relevant for push/pull_request triggers)
+    # if: "!contains(github.event.head_commit.message, 'skip ci')"
     # Will add back on skipping for draft PRs too.
     # if: |
     #   !contains(github.event.head_commit.message, 'skip ci') &&
