@@ -6,14 +6,12 @@ import itertools
 from pathlib import Path
 
 import biotite.structure as bts
-import e3nn
 import numpy as np
 import pandas as pd
 import pymol2
 import torch
 import torch.nn.functional as F
 from biotite.structure.io.pdb import PDBFile, get_structure
-from e3nn.math import soft_one_hot_linspace
 from loguru import logger
 from scipy.spatial.distance import cdist
 from torch import Tensor
@@ -40,24 +38,34 @@ def element_onehot(symbols: list[str]) -> Tensor:
 
 def parse_asu_with_biotite(
     path: str,
-    chain_filter: list[str] | None = None,
 ) -> tuple[bts.AtomArray, bts.AtomArray]:
-    """Parse PDB and return (protein_atoms, water_atoms)."""
+    """
+    Parse PDB file and extract protein and water atoms.
+
+    Args:
+        path: Path to PDB file
+
+    Returns:
+        Tuple of (protein_atoms, water_atoms) as biotite AtomArrays.
+        Hydrogen atoms are excluded.
+
+    Notes:
+        - model=1: Uses first model in PDB (standard for X-ray structures)
+        - altloc="occupancy": Selects highest-occupancy alternate conformation
+        - Uses filter_amino_acids (not filter_canonical_amino_acids) to include
+          modified residues like MSE, SEC that external encoders may handle
+    """
     pdb_file = PDBFile.read(path)
     atoms = get_structure(pdb_file, model=1, altloc="occupancy")
-    
-    if chain_filter is not None:
-        mask = np.isin(atoms.chain_id, np.array(chain_filter, dtype=atoms.chain_id.dtype))
-        atoms = atoms[mask]
-    
+
     atoms = atoms[atoms.element != "H"]
-    
-    protein_mask = bts.filter_canonical_amino_acids(atoms)
+
+    protein_mask = bts.filter_amino_acids(atoms)
     water_mask = (atoms.res_name == "HOH") | (atoms.res_name == "WAT")
-    
+
     protein_atoms = atoms[protein_mask]
     water_atoms = atoms[water_mask]
-    
+
     return protein_atoms, water_atoms
 
 
