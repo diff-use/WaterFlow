@@ -259,26 +259,12 @@ def parse_args():
     p.add_argument(
         "--pin_memory",
         action="store_true",
-        default=True,
         help="Pin memory for faster CPU-GPU transfer",
-    )
-    p.add_argument(
-        "--no_pin_memory",
-        dest="pin_memory",
-        action="store_false",
-        help="Disable pin_memory",
     )
     p.add_argument(
         "--persistent_workers",
         action="store_true",
-        default=True,
         help="Keep workers alive between epochs",
-    )
-    p.add_argument(
-        "--no_persistent_workers",
-        dest="persistent_workers",
-        action="store_false",
-        help="Disable persistent_workers",
     )
 
     # scheduler
@@ -319,6 +305,12 @@ def parse_args():
     p.add_argument("--rk4_steps", type=int, default=100)
     p.add_argument(
         "--save_gifs", action="store_true", help="Save trajectory GIFs during eval"
+    )
+    p.add_argument(
+        "--threshold",
+        type=float,
+        default=1.0,
+        help="Distance threshold in Angstroms for precision/recall (default: 1.0)",
     )
 
     # logging / wandb
@@ -589,7 +581,7 @@ def run_eval_sampling(
 
         # compute metrics
         final_metrics = compute_placement_metrics(
-            pred=out["water_pred"], true=out["water_true"], threshold=1.0
+            pred=out["water_pred"], true=out["water_true"], threshold=args.threshold
         )
 
         final_rmsd = compute_rmsd(out["water_pred"], out["water_true"])
