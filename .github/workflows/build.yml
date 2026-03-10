@@ -1,0 +1,39 @@
+name: Build
+
+on:
+  # push:
+  #   branches: [main]
+  # pull_request:
+  #   branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.12]
+
+    # Skip CI if 'skip ci' is in the latest commit message (only relevant for push/pull_request triggers)
+    # if: "!contains(github.event.head_commit.message, 'skip ci')"
+    # Will add back on skipping for draft PRs too.
+    # if: |
+    #   !contains(github.event.head_commit.message, 'skip ci') &&
+    #   (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup UV and python version
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.10.6"
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --group dev
+
+      - name: Run tests
+        env:
+          TEST_DATA_DIR: ${{ github.workspace }}/tests/test_files
+        run: uv run pytest tests/ --cov=src --cov-report=html --cov-report=term-missing --cov-fail-under=80

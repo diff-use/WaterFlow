@@ -1,0 +1,45 @@
+name: Lint
+
+on:
+  # pull_request:
+  #   branches: [main]
+  workflow_dispatch:
+
+jobs:
+  ruff:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.head_ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Auto-fix with ruff
+        run: |
+          ruff check --fix .
+          ruff format .
+
+      - name: Commit ruff fixes
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Auto-commit ruff fixes [skip ci]"
+          commit_username: "Autoformatter"
+          commit_email: "actions@github.com"
+
+  ty:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+      
+      - name: Setup UV and python version
+        uses: astral-sh/setup-uv@v7
+
+      - name: Run ty
+        run: uvx ty check src/
