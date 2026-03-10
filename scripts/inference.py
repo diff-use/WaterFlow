@@ -27,6 +27,7 @@ import torch.nn as nn
 from loguru import logger
 from tqdm import tqdm
 
+from src.constants import NUM_RBF
 from src.dataset import ProteinWaterDataset
 from src.encoder_base import build_encoder
 from src.flow import FlowMatcher, FlowWaterGVP
@@ -43,6 +44,21 @@ setup_logging_for_tqdm()
 
 
 def parse_args():
+    """
+    Parse command-line arguments for inference configuration.
+
+    Returns:
+        argparse.Namespace with inference parameters and paths
+    """
+    # TODO: Add support for loading configuration from YAML/JSON config files.
+    # This would simplify inference invocation and ensure reproducibility.
+    # Example: --config config.yaml would load inference settings.
+
+    # TODO: Remove hardcoded default paths. These should be required arguments
+    # or loaded from environment variables / config files for portability.
+    # Current hardcoded paths:
+    #   - processed_dir: /home/srivasv/flow_cache/
+    #   - base_pdb_dir: /sb/wankowicz_lab/data/srivasv/pdb_redo_data
     p = argparse.ArgumentParser(description="Run WaterFlow inference on PDB files")
 
     p.add_argument(
@@ -69,7 +85,9 @@ def parse_args():
         "--processed_dir",
         type=str,
         default="/home/srivasv/flow_cache/",
-        help="Directory for cached preprocessed .pt files",
+        help="Parent directory containing all cached preprocessed data. This directory holds "
+        "protein graphs, embeddings, and geometry subdirectories (e.g., processed_dir/geometry/). "
+        "Each PDB's preprocessed data is stored in subdirectories organized by cache type.",
     )
     p.add_argument(
         "--base_pdb_dir",
@@ -81,6 +99,14 @@ def parse_args():
         "--include_mates",
         action="store_true",
         help="Include symmetry mate atoms as protein nodes",
+    )
+    p.add_argument(
+        "--geometry_cache",
+        type=str,
+        default=None,
+        help="Subdirectory name within processed_dir specifying which water coordinate set to use. "
+        "Options include 'geometry' (filtered waters meeting quality criteria) or "
+        "'geometry_unfiltered' (all crystallographic waters). Overrides the model's config if specified.",
     )
 
     # checkpoint arguments
@@ -142,7 +168,15 @@ def parse_args():
         type=float,
         default=None,
         help="Sample num_residues * water_ratio waters instead of using ground truth count. "
-             "E.g., --water_ratio 0.5 samples 50 waters for a 100-residue protein.",
+        "E.g., --water_ratio 0.5 samples 50 waters for a 100-residue protein.",
+    )
+
+    p.add_argument(
+        "--skip_metrics",
+        action="store_true",
+        help="Skip metrics computation (precision, recall, RMSD) that require ground truth. "
+        "Use when running inference on structures without ground truth waters. "
+        "Automatically enabled when --water_ratio is specified.",
     )
 
     args = p.parse_args()
@@ -151,7 +185,18 @@ def parse_args():
 
 
 def load_config(run_dir: Path) -> dict:
-    """Load training config from run directory."""
+    """
+    Load training configuration from run directory.
+
+    Args:
+        run_dir: Path to training run directory containing config.json
+
+    Returns:
+        Dict with training configuration parameters
+
+    Raises:
+        FileNotFoundError: If config.json doesn't exist in run_dir
+    """
     config_path = run_dir / "config.json"
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
@@ -163,39 +208,78 @@ def load_config(run_dir: Path) -> dict:
 
 
 def build_model_from_config(config: dict, device: torch.device) -> nn.Module:
-    """Build model architecture from config using registry-based encoder construction."""
-    # Build encoder config for registry
-    # Example GVP config:
-    #   {'encoder_type': 'gvp', 'hidden_s': 256, 'hidden_v': 64, 'node_scalar_in': 16}
-    # Example SLAE config:
-    #   {'encoder_type': 'slae', 'hidden_s': 256, 'hidden_v': 64, 'slae_dim': 128,
-    #    'encoder_ckpt': '/path/to/slae_checkpoint.pt'}
-    encoder_config = {
-        'encoder_type': 'slae' if config.get("use_slae", False) else 'gvp',
-        'hidden_s': config.get("hidden_s", 256),
-        'hidden_v': config.get("hidden_v", 64),
-        'node_scalar_in': config.get("node_scalar_in", 16),
-        'freeze_encoder': config.get("freeze_encoder", False),
-        'slae_dim': config.get("slae_dim", 128),
-        'encoder_ckpt': config.get("encoder_ckpt"),
-    }
+    """
+    Build model architecture from training configuration.
+
+    Uses registry-based encoder construction to instantiate the correct
+    encoder type (GVP, SLAE, or ESM) based on config.
+
+    Args:
+        config: Training configuration dict with model hyperparameters.
+            Expected keys include:
+            - encoder_type: "gvp", "slae", or "esm"
+            - hidden_s, hidden_v: Hidden dimensions for scalars/vectors
+            - flow_layers: Number of flow layers
+            - For SLAE: slae_dim (default 128)
+            - For ESM: esm_dim (default 1536)
+        device: Device to place model on
+
+    Returns:
+        FlowWaterGVP model instance
+    """
+    # Use resolved_encoder_config if available (from training), otherwise build from config
+    resolved = config.get("resolved_encoder_config")
+    if resolved:
+        encoder_config = resolved.copy()
+    else:
+        encoder_type = config.get("encoder_type", "gvp")
+        encoder_config = {
+            "encoder_type": encoder_type,
+            "hidden_s": config.get("hidden_s") or 256,
+            "hidden_v": config.get("hidden_v") or 64,
+            "node_scalar_in": config.get("node_scalar_in") or 16,
+            "freeze_encoder": config.get("freeze_encoder", False),
+            "encoder_ckpt": config.get("encoder_ckpt"),
+        }
+
+        # Add encoder-specific dimension (use 'or' to handle None values)
+        if encoder_type == "slae":
+            encoder_config["slae_dim"] = config.get("slae_dim") or 128
+        elif encoder_type == "esm":
+            encoder_config["esm_dim"] = config.get("esm_dim") or 1536
 
     encoder = build_encoder(encoder_config, device)
 
     model = FlowWaterGVP(
         encoder=encoder,
-        hidden_dims=(config.get("hidden_s", 256), config.get("hidden_v", 64)),
-        edge_scalar_dim=32,
-        layers=config.get("flow_layers", 5),
-        k_pw=config.get("k_pw", 24),
-        k_ww=config.get("k_ww", 24),
+        hidden_dims=(config.get("hidden_s") or 256, config.get("hidden_v") or 64),
+        edge_scalar_dim=config.get("edge_scalar_dim") or NUM_RBF,
+        layers=config.get("flow_layers") or 3,
+        drop_rate=config.get("drop_rate", 0.1),
+        n_message_gvps=config.get("n_message_gvps", 2),
+        n_update_gvps=config.get("n_update_gvps", 2),
+        k_pw=config.get("k_pw") or 16,
+        k_ww=config.get("k_ww") or 16,
     ).to(device)
 
     return model
 
 
 def load_checkpoint(model: nn.Module, checkpoint_path: Path, device: torch.device):
-    """Load model weights from checkpoint."""
+    """
+    Load model weights from checkpoint file.
+
+    Args:
+        model: FlowWaterGVP model instance to load weights into
+        checkpoint_path: Path to checkpoint .pt file
+        device: Device to map checkpoint tensors to
+
+    Returns:
+        Epoch number from checkpoint, or None if not stored
+
+    Raises:
+        FileNotFoundError: If checkpoint file doesn't exist
+    """
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
@@ -243,23 +327,13 @@ def run_inference_batch(
             water_ratio=water_ratio,
         )
     else:  # euler
-        water_preds = flow_matcher.euler_integrate(
+        results = flow_matcher.euler_integrate(
             graphs,
             num_steps=num_steps,
             use_sc=use_sc,
             device=device,
             water_ratio=water_ratio,
         )
-        # build result dicts similar to rk4
-        results = []
-        for graph, water_pred in zip(graphs, water_preds):
-            results.append({
-                "protein_pos": graph["protein"].pos.numpy(),
-                "water_true": graph["water"].pos.numpy(),
-                "water_pred": water_pred,
-                "trajectory": None,
-                "pdb_id": getattr(graph, 'pdb_id', None),
-            })
 
     return results
 
@@ -268,23 +342,40 @@ def save_plot(
     result: dict,
     pdb_id: str,
     output_path: Path,
-    metrics: dict,
+    metrics: dict | None,
 ):
-    """Save 3D visualization plot."""
+    """
+    Save 3D visualization plot of water prediction results.
+
+    Args:
+        result: Dict with 'protein_pos', 'water_pred', 'water_true' arrays
+        pdb_id: PDB identifier for title
+        output_path: Path to save PNG image
+        metrics: Dict with 'rmsd', 'precision', 'recall', 'f1' for title, or None if no ground truth
+    """
     fig = plt.figure(figsize=(12, 10))
     ax = fig.add_subplot(111, projection="3d")
 
-    title = (
-        f"{pdb_id} | RMSD={metrics['rmsd']:.2f}Å | "
-        f"P={metrics['precision']:.2%} R={metrics['recall']:.2%} F1={metrics['f1']:.3f}"
-    )
+    if metrics is not None:
+        title = (
+            f"{pdb_id} | RMSD={metrics['rmsd']:.2f}Å | "
+            f"P={metrics['precision']:.2%} R={metrics['recall']:.2%} F1={metrics['f1']:.3f}"
+        )
+    else:
+        n_pred = result["water_pred"].shape[0]
+        title = f"{pdb_id} | {n_pred} waters predicted (no ground truth)"
+
+    # water_true may be None or empty when no ground truth is available
+    water_true = result.get("water_true")
+    if water_true is not None and water_true.shape[0] == 0:
+        water_true = None
 
     plot_3d_frame(
         ax,
         result["protein_pos"],
         None,  # no separate mate positions
         result["water_pred"],
-        result["water_true"],
+        water_true,
         title=title,
     )
 
@@ -294,6 +385,8 @@ def save_plot(
 
 
 def main():
+    """Run inference pipeline on a list of PDB structures."""
+    setup_logging_for_tqdm()
     args = parse_args()
 
     # setup paths
@@ -310,7 +403,7 @@ def main():
     logger.info(f"Using device: {device}")
 
     # load config and build model
-    logger.info(f"\nLoading model from: {run_dir}")
+    logger.info(f"Loading model from: {run_dir}")
     config = load_config(run_dir)
     model = build_model_from_config(config, device)
 
@@ -326,40 +419,61 @@ def main():
     )
 
     # Load dataset
-    logger.info(f"\nLoading PDBs from: {args.pdb_list}")
+    logger.info(f"Loading PDBs from: {args.pdb_list}")
 
     # Determine include_mates from args or config
     include_mates = args.include_mates or config.get("include_mates", False)
+    encoder_type = config.get("encoder_type", "gvp")
+
+    # Use --geometry_cache if provided, otherwise use config's geometry_cache_name
+    geometry_cache_name = args.geometry_cache or config.get(
+        "geometry_cache_name", "geometry"
+    )
 
     dataset = ProteinWaterDataset(
         pdb_list_file=args.pdb_list,
         processed_dir=args.processed_dir,
         base_pdb_dir=args.base_pdb_dir,
+        encoder_type=encoder_type,
         include_mates=include_mates,
+        geometry_cache_name=geometry_cache_name,
         preprocess=True,
     )
 
     logger.info(f"Found {len(dataset)} PDB entries")
+    logger.info(f"Using geometry cache: {geometry_cache_name}")
 
     # run inference
-    logger.info(f"\nRunning inference with method={args.method}, steps={args.num_steps}")
+    logger.info(f"Running inference with method={args.method}, steps={args.num_steps}")
     logger.info(f"Self-conditioning: {args.use_sc}")
     logger.info(f"Threshold for metrics: {args.threshold}Å")
     logger.info(f"Batch size: {args.batch_size}")
+
+    # Determine if metrics should be skipped
+    # Skip metrics when explicitly requested or when using water_ratio (no ground truth count)
+    skip_metrics = args.skip_metrics or args.water_ratio is not None
+
     if args.water_ratio is not None:
-        logger.info(f"Water ratio: {args.water_ratio} (sampling num_residues × {args.water_ratio} waters)")
+        logger.info(
+            f"Water ratio: {args.water_ratio} (sampling num_residues × {args.water_ratio} waters)"
+        )
     else:
         logger.info("Water ratio: None (using ground truth water count)")
+    if skip_metrics:
+        logger.info("Metrics computation: DISABLED (no ground truth comparison)")
+    else:
+        logger.info("Metrics computation: ENABLED")
     logger.info("-" * 60)
 
     all_metrics = []
 
-    # collect valid graphs (those with waters for ground truth comparison)
+    # collect graphs for inference
     valid_graphs = []
     skipped_pdbs = []
     for idx in range(len(dataset)):
         graph = dataset[idx]
-        if graph["water"].num_nodes == 0:
+        # Only skip zero-water PDBs when we need ground truth for metrics
+        if graph["water"].num_nodes == 0 and not skip_metrics:
             skipped_pdbs.append(graph.pdb_id)
         else:
             valid_graphs.append(graph)
@@ -389,21 +503,25 @@ def main():
         # process each result in the batch
         for result in batch_results:
             pdb_id = result.get("pdb_id", f"unknown_{len(all_metrics)}")
-            water_true = result["water_true"]
             water_pred = result["water_pred"]
+            water_true = result["water_true"]
+            has_ground_truth = water_true is not None and water_true.shape[0] > 0
 
-            # compute metrics
-            metrics = compute_placement_metrics(
-                pred=water_pred,
-                true=water_true,
-                threshold=args.threshold,
-            )
-            metrics["rmsd"] = compute_rmsd(water_pred, water_true)
-            metrics["pdb_id"] = pdb_id
-            metrics["n_waters_true"] = water_true.shape[0]
-            metrics["n_waters_pred"] = water_pred.shape[0]
-
-            all_metrics.append(metrics)
+            # compute metrics only when ground truth is available and metrics are enabled
+            if not skip_metrics and has_ground_truth:
+                metrics = compute_placement_metrics(
+                    pred=water_pred,
+                    true=water_true,
+                    threshold=args.threshold,
+                )
+                metrics["rmsd"] = compute_rmsd(water_pred, water_true)
+                metrics["pdb_id"] = pdb_id
+                metrics["n_waters_true"] = water_true.shape[0]
+                metrics["n_waters_pred"] = water_pred.shape[0]
+                all_metrics.append(metrics)
+            else:
+                # no ground truth comparison - just store prediction info
+                metrics = None
 
             plot_path = output_dir / "plots" / f"{pdb_id}.png"
             save_plot(result, pdb_id, plot_path, metrics)
@@ -411,22 +529,27 @@ def main():
             # save GIF if requested and trajectory available
             if args.save_gifs and result.get("trajectory") is not None:
                 gif_path = output_dir / "gifs" / f"{pdb_id}.gif"
+                # Use water_true only if available
+                gif_water_true = water_true if has_ground_truth else None
                 create_trajectory_gif(
                     trajectory=result["trajectory"],
                     protein_pos=result["protein_pos"],
-                    water_true=water_true,
+                    water_true=gif_water_true,
                     save_path=str(gif_path),
                     title="",
                     fps=10,
                     pdb_id=pdb_id,
                 )
 
-            # print per-sample metrics
-            tqdm.write(
-                f"  {pdb_id}: RMSD={metrics['rmsd']:.2f}Å | "
-                f"P={metrics['precision']:.2%} R={metrics['recall']:.2%} "
-                f"F1={metrics['f1']:.3f} AUC-PR={metrics['auc_pr']:.3f}"
-            )
+            # print per-sample info
+            if metrics is not None:
+                tqdm.write(
+                    f"  {pdb_id}: RMSD={metrics['rmsd']:.2f}Å | "
+                    f"P={metrics['precision']:.2%} R={metrics['recall']:.2%} "
+                    f"F1={metrics['f1']:.3f} AUC-PR={metrics['auc_pr']:.3f}"
+                )
+            else:
+                tqdm.write(f"  {pdb_id}: {water_pred.shape[0]} waters predicted")
 
     # compute and save summary metrics
     if all_metrics:
@@ -438,8 +561,12 @@ def main():
             "avg_recall": float(np.mean([m["recall"] for m in all_metrics])),
             "avg_f1": float(np.mean([m["f1"] for m in all_metrics])),
             "avg_auc_pr": float(np.mean([m["auc_pr"] for m in all_metrics])),
-            "avg_n_waters_true": float(np.mean([m["n_waters_true"] for m in all_metrics])),
-            "avg_n_waters_pred": float(np.mean([m["n_waters_pred"] for m in all_metrics])),
+            "avg_n_waters_true": float(
+                np.mean([m["n_waters_true"] for m in all_metrics])
+            ),
+            "avg_n_waters_pred": float(
+                np.mean([m["n_waters_pred"] for m in all_metrics])
+            ),
         }
 
         logger.info("\n" + "=" * 60)
@@ -471,21 +598,25 @@ def main():
                         "threshold": args.threshold,
                         "include_mates": include_mates,
                         "water_ratio": args.water_ratio,
+                        "geometry_cache": geometry_cache_name,
                     },
                 },
                 f,
                 indent=2,
             )
-        logger.info(f"\nMetrics saved to: {metrics_path}")
+        logger.info(f"Metrics saved to: {metrics_path}")
 
     else:
-        logger.info("\nNo valid samples processed.")
+        if skip_metrics:
+            logger.info(f"Processed {len(valid_graphs)} samples (metrics disabled)")
+        else:
+            logger.warning("No valid samples processed.")
 
     logger.info(f"Plots saved to: {output_dir / 'plots'}")
     if args.save_gifs:
         logger.info(f"GIFs saved to: {output_dir / 'gifs'}")
 
-    logger.info("\nInference complete.")
+    logger.info("Inference complete.")
 
 
 if __name__ == "__main__":
