@@ -3,10 +3,12 @@
 Constants for edge types and other shared values.
 """
 
-# feature dimensions
-NUM_RBF = 16  # RBF basis functions for edge features
-NODE_FEATURE_DIM = 16  # Element one-hot encoding dimension (15 elements + 1 "other")
-RBF_CUTOFF = 8.0  # Distance cutoff for RBF encoding (Angstroms)
+# Node feature dimensions
+NODE_FEATURE_DIM = 16  # Default node scalar feature dimension
+
+# RBF (Radial Basis Function) parameters
+NUM_RBF = 16          # Number of RBF basis functions
+RBF_CUTOFF = 8.0      # Distance cutoff in Angstroms for RBF encoding
 
 # Edge type tuples: (src_node_type, edge_name, dst_node_type)
 EDGE_PP = ("protein", "pp", "protein")  # protein -> protein

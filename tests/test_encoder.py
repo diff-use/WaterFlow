@@ -15,8 +15,8 @@ from torch_cluster import radius_graph
 from torch_geometric.data import Data, HeteroData
 
 from src.encoder_base import build_encoder, get_encoder_class
-from src.gvp_encoder import GVPEncoder, ProteinGVPEncoder, make_encoder_data
-from src.slae import SLAEEncoder
+from src.gvp_encoder import GVPEncoder, ProteinGVPEncoder
+from src.slae_encoder import SLAEEncoder
 
 # ============== Fixtures ==============
 
@@ -108,8 +108,8 @@ class TestEncoderRegistry:
         assert cls is SLAEEncoder
 
     def test_unknown_encoder_raises(self):
-        """Unknown encoder type should raise ValueError."""
-        with pytest.raises(ValueError, match="Unknown encoder type"):
+        """Unknown encoder type should raise KeyError."""
+        with pytest.raises(KeyError, match="Unknown encoder type"):
             get_encoder_class('nonexistent_encoder')
 
     def test_build_encoder_gvp(self, device):
@@ -138,12 +138,6 @@ class TestEncoderRegistry:
         assert encoder.encoder_type == 'slae'
         assert encoder.output_dims == (128, 0)
 
-    def test_build_encoder_default_gvp(self, device):
-        """build_encoder should default to GVP if encoder_type not specified."""
-        config = {'node_scalar_in': 16}
-        encoder = build_encoder(config, device)
-        assert isinstance(encoder, GVPEncoder)
-
 
 # ============== Base Interface Tests ==============
 
@@ -167,11 +161,13 @@ class TestBaseEncoderInterface:
         assert len(encoder.output_dims) == 2
         assert isinstance(encoder.encoder_type, str)
 
-        # Check forward returns (s, V) tuple
-        s, V = encoder(sample_hetero_data)
+        # Check forward returns (s, V, pp_edge_attr) tuple
+        s, V, pp_edge_attr = encoder(sample_hetero_data)
         assert s.shape[0] == sample_hetero_data['protein'].num_nodes
         assert V.shape[0] == sample_hetero_data['protein'].num_nodes
         assert V.shape[2] == 3
+        # GVP encoder should return edge features
+        assert pp_edge_attr is not None or encoder.encoder.edge_update is None
 
     def test_slae_implements_interface(self, device, sample_hetero_data_with_slae):
         """SLAEEncoder should implement all required interface methods."""
@@ -183,11 +179,13 @@ class TestBaseEncoderInterface:
         assert encoder.output_dims == (128, 0)
         assert isinstance(encoder.encoder_type, str)
 
-        # Check forward returns (s, V) tuple
-        s, V = encoder(sample_hetero_data_with_slae)
+        # Check forward returns (s, V, pp_edge_attr) tuple
+        s, V, pp_edge_attr = encoder(sample_hetero_data_with_slae)
         assert s.shape[0] == sample_hetero_data_with_slae['protein'].num_nodes
         assert s.shape[1] == 128
         assert V.shape == (sample_hetero_data_with_slae['protein'].num_nodes, 0, 3)
+        # SLAE encoder should return None for edge features
+        assert pp_edge_attr is None
 
     def test_from_config_class_method(self, device):
         """Both encoders should have from_config class method."""
@@ -227,11 +225,13 @@ class TestProteinGVPEncoder:
 
     def test_encoder_forward_with_pooling(self, simple_encoder, sample_homogeneous_data):
         """Test forward pass with residue pooling."""
-        output = simple_encoder(sample_homogeneous_data)
+        output, edge_attr = simple_encoder(sample_homogeneous_data)
         assert output.shape == (sample_homogeneous_data.num_residues, simple_encoder.pooled_dim)
+        # Pooling mode returns None for edge features
+        assert edge_attr is None
 
     def test_encoder_forward_no_pooling(self, sample_homogeneous_data):
-        """Test encoder without residue pooling returns (s, V) tuple."""
+        """Test encoder without residue pooling returns ((s, V), edge_attr) tuple."""
         encoder = ProteinGVPEncoder(
             node_scalar_in=16,
             hidden_dims=(64, 16),
@@ -241,12 +241,15 @@ class TestProteinGVPEncoder:
             num_edge_rbf=16,
         )
 
-        output = encoder(sample_homogeneous_data)
+        (s, v), edge_attr = encoder(sample_homogeneous_data)
 
-        assert isinstance(output, tuple)
-        s, v = output
         assert s.shape == (sample_homogeneous_data.num_nodes, 64)
         assert v.shape == (sample_homogeneous_data.num_nodes, 16, 3)
+        # edge_attr should be a tuple (s_edge, V_edge)
+        assert edge_attr is not None
+        s_edge, V_edge = edge_attr
+        assert s_edge.dim() == 2
+        assert V_edge.dim() == 3
 
     def test_encoder_empty_graph(self, simple_encoder):
         """Test encoder handles empty graphs gracefully."""
@@ -258,8 +261,10 @@ class TestProteinGVPEncoder:
             num_residues=0,
         )
 
-        output = simple_encoder(data)
+        output, edge_attr = simple_encoder(data)
         assert output.shape == (0, simple_encoder.pooled_dim)
+        # Pooling mode returns None for edge features
+        assert edge_attr is None
 
 
 class TestGVPEncoderWrapper:
@@ -292,7 +297,7 @@ class TestGVPEncoderWrapper:
         assert encoder.encoder_type == 'gvp'
 
     def test_wrapper_forward(self, device, sample_hetero_data):
-        """Wrapper forward should return (s, V) from HeteroData."""
+        """Wrapper forward should return (s, V, edge_attr) from HeteroData."""
         base_encoder = ProteinGVPEncoder(
             node_scalar_in=16,
             hidden_dims=(64, 16),
@@ -302,10 +307,15 @@ class TestGVPEncoderWrapper:
 
         encoder = GVPEncoder(encoder=base_encoder, freeze=False)
 
-        s, V = encoder(sample_hetero_data)
+        s, V, edge_attr = encoder(sample_hetero_data)
 
         assert s.shape == (sample_hetero_data['protein'].num_nodes, 64)
         assert V.shape == (sample_hetero_data['protein'].num_nodes, 16, 3)
+        # edge_attr should be a tuple (s_edge, V_edge) when edge_update is enabled
+        assert edge_attr is not None
+        s_edge, V_edge = edge_attr
+        assert s_edge.dim() == 2  # (E, scalar_dim)
+        assert V_edge.dim() == 3  # (E, 1, 3)
 
     def test_wrapper_freeze(self, device):
         """Freeze parameter should disable gradients."""
@@ -320,26 +330,6 @@ class TestGVPEncoderWrapper:
 
         for p in encoder.encoder.parameters():
             assert not p.requires_grad
-
-
-class TestMakeEncoderData:
-    """Tests for make_encoder_data helper function."""
-
-    def test_converts_hetero_to_homo(self, sample_hetero_data):
-        """Should convert HeteroData to homogeneous Data."""
-        enc_data = make_encoder_data(sample_hetero_data)
-
-        assert isinstance(enc_data, Data)
-        assert hasattr(enc_data, 'x')
-        assert hasattr(enc_data, 'pos')
-        assert hasattr(enc_data, 'edge_index')
-
-    def test_preserves_batch(self, sample_hetero_data):
-        """Should preserve batch attribute."""
-        enc_data = make_encoder_data(sample_hetero_data)
-
-        assert hasattr(enc_data, 'batch')
-        assert enc_data.batch.shape[0] == sample_hetero_data['protein'].num_nodes
 
 
 # ============== SLAE Encoder Tests ==============
@@ -358,16 +348,18 @@ class TestSLAEEncoder:
         assert encoder.encoder_type == 'slae'
 
     def test_encoder_forward(self, device, sample_hetero_data_with_slae):
-        """Forward pass should return (s, V) tuple with raw embeddings."""
+        """Forward pass should return (s, V, None) tuple with raw embeddings."""
         encoder = SLAEEncoder(slae_dim=128).to(device)
 
-        s, V = encoder(sample_hetero_data_with_slae)
+        s, V, pp_edge_attr = encoder(sample_hetero_data_with_slae)
 
         n_atoms = sample_hetero_data_with_slae['protein'].num_nodes
         assert s.shape == (n_atoms, 128)
         assert V.shape == (n_atoms, 0, 3)
         # Raw embeddings should be identical to input
         assert torch.allclose(s, sample_hetero_data_with_slae['protein'].slae_embedding)
+        # SLAE encoder doesn't return edge features
+        assert pp_edge_attr is None
 
     def test_encoder_missing_embeddings_error(self, device, sample_hetero_data):
         """Should raise NotImplementedError when embeddings are missing."""
@@ -381,7 +373,7 @@ class TestSLAEEncoder:
         """Output should not contain NaNs or Infs."""
         encoder = SLAEEncoder(slae_dim=128).to(device)
 
-        s, V = encoder(sample_hetero_data_with_slae)
+        s, V, _ = encoder(sample_hetero_data_with_slae)
 
         assert not torch.isnan(s).any(), "Scalar output contains NaNs"
         assert not torch.isinf(s).any(), "Scalar output contains Infs"
@@ -390,6 +382,105 @@ class TestSLAEEncoder:
         """SLAE encoder should have no learnable parameters."""
         encoder = SLAEEncoder(slae_dim=128).to(device)
         assert sum(p.numel() for p in encoder.parameters()) == 0
+
+
+# ============== ESM Encoder Tests ==============
+
+class TestESMEncoder:
+    """Tests for ESMEncoder (BaseProteinEncoder implementation)."""
+
+    def test_esm_registered(self):
+        """ESM encoder should be registered."""
+        from src.esm_encoder import ESMEncoder
+        cls = get_encoder_class('esm')
+        assert cls is ESMEncoder
+
+    def test_build_encoder_esm(self, device):
+        """Should build ESM encoder from config."""
+        from src import build_encoder
+        encoder = build_encoder({'encoder_type': 'esm'}, device)
+        assert encoder.encoder_type == 'esm'
+
+    def test_encoder_output_dims(self, device):
+        """Encoder should expose correct output_dims."""
+        from src.esm_encoder import ESMEncoder
+        encoder = ESMEncoder(esm_dim=1536).to(device)
+        assert encoder.output_dims == (1536, 0)
+
+    def test_encoder_type(self, device):
+        """Encoder should return 'esm' as encoder_type."""
+        from src.esm_encoder import ESMEncoder
+        encoder = ESMEncoder(esm_dim=1536).to(device)
+        assert encoder.encoder_type == 'esm'
+
+    def test_encoder_forward(self, device, sample_hetero_data):
+        """Forward pass should return (s, V, None) tuple with raw embeddings."""
+        from src.esm_encoder import ESMEncoder
+        encoder = ESMEncoder(esm_dim=1536).to(device)
+
+        # Add mock ESM embeddings
+        n_atoms = sample_hetero_data['protein'].num_nodes
+        sample_hetero_data['protein'].esm_embedding = torch.randn(n_atoms, 1536, device=device)
+
+        s, V, pp_edge_attr = encoder(sample_hetero_data)
+
+        assert s.shape == (n_atoms, 1536)
+        assert V.shape == (n_atoms, 0, 3)
+        # Raw embeddings should be identical to input
+        assert torch.allclose(s, sample_hetero_data['protein'].esm_embedding)
+        # ESM encoder doesn't return edge features
+        assert pp_edge_attr is None
+
+    def test_encoder_missing_embeddings_error(self, device, sample_hetero_data):
+        """Should raise NotImplementedError when embeddings are missing."""
+        from src.esm_encoder import ESMEncoder
+        encoder = ESMEncoder(esm_dim=1536).to(device)
+
+        # sample_hetero_data does NOT have esm_embedding
+        with pytest.raises(NotImplementedError, match="requires cached embeddings"):
+            encoder(sample_hetero_data)
+
+    def test_encoder_no_learnable_params(self, device):
+        """ESM encoder should have no learnable parameters."""
+        from src.esm_encoder import ESMEncoder
+        encoder = ESMEncoder(esm_dim=1536).to(device)
+        assert sum(p.numel() for p in encoder.parameters()) == 0
+
+    def test_from_config(self, device):
+        """Should construct from config dict."""
+        from src.esm_encoder import ESMEncoder
+        config = {'esm_dim': 2048}
+        encoder = ESMEncoder.from_config(config, device)
+        assert encoder.output_dims == (2048, 0)
+
+    def test_esm_encoder_no_nans(self, device, sample_hetero_data):
+        """Output should not contain NaNs or Infs."""
+        from src.esm_encoder import ESMEncoder
+        encoder = ESMEncoder(esm_dim=1536).to(device)
+
+        # Add mock ESM embeddings
+        n_atoms = sample_hetero_data['protein'].num_nodes
+        sample_hetero_data['protein'].esm_embedding = torch.randn(n_atoms, 1536, device=device)
+
+        s, V, _ = encoder(sample_hetero_data)
+
+        assert not torch.isnan(s).any(), "Scalar output contains NaNs"
+        assert not torch.isinf(s).any(), "Scalar output contains Infs"
+
+    def test_esm_encoder_device_placement(self, device, sample_hetero_data):
+        """Verify tensors are on the correct device."""
+        from src.esm_encoder import ESMEncoder
+        encoder = ESMEncoder(esm_dim=1536).to(device)
+
+        # Add mock ESM embeddings on correct device
+        n_atoms = sample_hetero_data['protein'].num_nodes
+        sample_hetero_data['protein'].esm_embedding = torch.randn(n_atoms, 1536, device=device)
+
+        s, V, _ = encoder(sample_hetero_data)
+
+        # Compare device types (handles cuda vs cuda:0)
+        assert s.device.type == device.type, f"Expected device type {device.type}, got {s.device.type}"
+        assert V.device.type == device.type, f"Expected device type {device.type}, got {V.device.type}"
 
 
 # ============== Encoder Interoperability Tests ==============
