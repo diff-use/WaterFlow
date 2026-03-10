@@ -20,11 +20,6 @@ from src.gvp_encoder import GVPEncoder, ProteinGVPEncoder
 
 
 @pytest.fixture
-def device():
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-@pytest.fixture
 def simple_hetero_data(device):
     """Minimal HeteroData with protein and water nodes."""
     data = HeteroData()

@@ -21,11 +21,6 @@ from src.slae_encoder import SLAEEncoder
 # ============== Fixtures ==============
 
 @pytest.fixture
-def device():
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-@pytest.fixture
 def sample_homogeneous_data():
     """Sample Data for testing ProteinGVPEncoder directly."""
     num_nodes = 20
