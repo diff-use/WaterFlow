@@ -1,10 +1,9 @@
 name: Lint
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  # pull_request:
+  #   branches: [main]
+  workflow_dispatch:
 
 jobs:
   ruff:
@@ -31,7 +30,7 @@ jobs:
         with:
           commit_message: "Auto-commit ruff fixes [skip ci]"
           commit_username: "Autoformatter"
-          commit_email: "Autoformatter <actions@github.com>"
+          commit_email: "actions@github.com"
 
   ty:
     runs-on: ubuntu-latest
@@ -41,13 +40,6 @@ jobs:
       
       - name: Setup UV and python version
         uses: astral-sh/setup-uv@v7
-        with:
-          version: "0.10.6"
-          python: "3.12"
-
-      - name: Install dependencies
-        run: uv sync --group dev
 
       - name: Run ty
-        # Use uv if replacing mypy with ty in dev dependency group
         run: uvx ty check src/
