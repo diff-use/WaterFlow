@@ -24,6 +24,9 @@ from pathlib import Path
 from src.utils import (
     ATOM37_FILL,
     atom37_to_atoms,
+    # Edge geometry
+    compute_edge_features,
+    compute_edge_geometry,
     compute_placement_metrics,
     compute_rmsd,
     create_trajectory_gif,
@@ -593,3 +596,176 @@ class TestCreateTrajectoryGif:
         )
 
         assert Path(gif_path).exists()
+
+
+@pytest.mark.unit
+class TestComputeEdgeGeometry:
+    """Tests for compute_edge_geometry edge vector computation."""
+
+    def test_homogeneous_graph(self):
+        """Test with homogeneous graph (single pos tensor)."""
+        pos = torch.tensor([
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ])
+        edge_index = torch.tensor([[0, 1], [1, 2]])
+
+        distances, unit_vectors = compute_edge_geometry(pos, edge_index)
+
+        assert distances.shape == (2,)
+        assert unit_vectors.shape == (2, 3)
+        assert torch.isfinite(distances).all()
+        assert torch.isfinite(unit_vectors).all()
+
+    def test_bipartite_graph(self):
+        """Test with bipartite graph (separate pos_src and pos_dst)."""
+        pos_src = torch.tensor([
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+        ])
+        pos_dst = torch.tensor([
+            [2.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [0.0, 0.0, 2.0],
+        ])
+        edge_index = torch.tensor([[0, 0, 1], [0, 1, 2]])
+
+        distances, unit_vectors = compute_edge_geometry(pos_src, edge_index, pos_dst)
+
+        assert distances.shape == (3,)
+        assert unit_vectors.shape == (3, 3)
+
+    def test_known_distances(self):
+        """Test that distances are computed correctly."""
+        pos = torch.tensor([
+            [0.0, 0.0, 0.0],
+            [3.0, 4.0, 0.0],  # Distance 5.0 from origin
+        ])
+        edge_index = torch.tensor([[0], [1]])
+
+        distances, _ = compute_edge_geometry(pos, edge_index)
+
+        assert distances[0] == pytest.approx(5.0)
+
+    def test_unit_vectors_normalized(self):
+        """Test that unit vectors have magnitude 1 for non-zero displacements."""
+        pos = torch.randn(10, 3)
+        # Create edges without self-loops to ensure non-zero displacements
+        src = torch.arange(10).repeat(2)
+        dst = torch.cat([torch.arange(1, 10), torch.tensor([0]),
+                         torch.arange(1, 10), torch.tensor([0])])
+        edge_index = torch.stack([src[:15], dst[:15]])
+
+        _, unit_vectors = compute_edge_geometry(pos, edge_index)
+
+        norms = torch.linalg.norm(unit_vectors, dim=-1)
+        assert torch.allclose(norms, torch.ones_like(norms), atol=1e-5)
+
+    def test_zero_distance_clamped(self):
+        """Test that zero distances are clamped to avoid NaN."""
+        pos = torch.tensor([
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],  # Same position
+        ])
+        edge_index = torch.tensor([[0], [1]])
+
+        distances, unit_vectors = compute_edge_geometry(pos, edge_index)
+
+        assert torch.isfinite(distances).all()
+        assert torch.isfinite(unit_vectors).all()
+        assert distances[0] >= 1e-5
+
+    def test_custom_clamp_min(self):
+        """Test custom clamp_min parameter."""
+        pos = torch.tensor([
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+        ])
+        edge_index = torch.tensor([[0], [1]])
+
+        distances, _ = compute_edge_geometry(pos, edge_index, clamp_min=1e-3)
+
+        assert distances[0] >= 1e-3
+
+    def test_direction_correct(self):
+        """Test that unit vectors point in correct direction (dst - src)."""
+        pos = torch.tensor([
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+        ])
+        edge_index = torch.tensor([[0], [1]])  # 0 -> 1
+
+        _, unit_vectors = compute_edge_geometry(pos, edge_index)
+
+        # Should point in +x direction
+        assert torch.allclose(unit_vectors[0], torch.tensor([1.0, 0.0, 0.0]))
+
+
+@pytest.mark.unit
+class TestComputeEdgeFeatures:
+    """Tests for compute_edge_features (unit vectors + RBF)."""
+
+    def test_output_shapes(self):
+        """Test output shapes are correct."""
+        pos = torch.randn(10, 3)
+        edge_index = torch.randint(0, 10, (2, 15))
+        num_gaussians = 16
+
+        unit_vectors, rbf_features = compute_edge_features(
+            pos, edge_index, num_gaussians=num_gaussians
+        )
+
+        assert unit_vectors.shape == (15, 3)
+        assert rbf_features.shape == (15, num_gaussians)
+
+    def test_different_num_gaussians(self):
+        """Test different num_gaussians values."""
+        pos = torch.randn(5, 3)
+        edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]])
+
+        for num_gaussians in [8, 16, 32]:
+            _, rbf_features = compute_edge_features(
+                pos, edge_index, num_gaussians=num_gaussians
+            )
+            assert rbf_features.shape == (3, num_gaussians)
+
+    def test_bipartite_case(self):
+        """Test bipartite graph case."""
+        pos_src = torch.randn(5, 3)
+        pos_dst = torch.randn(8, 3)
+        edge_index = torch.tensor([[0, 1, 2], [3, 4, 5]])
+
+        unit_vectors, rbf_features = compute_edge_features(
+            pos_src, edge_index, pos_dst=pos_dst
+        )
+
+        assert unit_vectors.shape == (3, 3)
+        assert rbf_features.shape == (3, 16)  # default num_gaussians
+
+    def test_finite_outputs(self):
+        """Test all outputs are finite."""
+        pos = torch.randn(20, 3)
+        edge_index = torch.randint(0, 20, (2, 50))
+
+        unit_vectors, rbf_features = compute_edge_features(pos, edge_index)
+
+        assert torch.isfinite(unit_vectors).all()
+        assert torch.isfinite(rbf_features).all()
+
+    def test_consistent_with_separate_calls(self):
+        """Test that results match calling geometry + rbf separately."""
+        pos = torch.randn(10, 3)
+        edge_index = torch.randint(0, 10, (2, 20))
+
+        # Using compute_edge_features
+        unit_vectors, rbf_features = compute_edge_features(
+            pos, edge_index, num_gaussians=16, cutoff=8.0
+        )
+
+        # Using separate calls
+        distances, unit_vectors_sep = compute_edge_geometry(pos, edge_index)
+        rbf_sep = rbf(distances, num_gaussians=16, cutoff=8.0)
+
+        assert torch.allclose(unit_vectors, unit_vectors_sep)
+        assert torch.allclose(rbf_features, rbf_sep)

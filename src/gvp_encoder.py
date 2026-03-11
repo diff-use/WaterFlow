@@ -20,16 +20,7 @@ from torch_scatter import scatter_add, scatter_max, scatter_mean
 from src.constants import EDGE_PP
 from src.encoder_base import BaseProteinEncoder, register_encoder
 from src.gvp import GVP, EdgeUpdate, GVPConvLayer
-from src.utils import rbf as _rbf
-
-
-def _edge_vectors(pos: torch.Tensor, edge_index: torch.Tensor):
-    """Compute edge vectors and distances."""
-    src, dst = edge_index[0], edge_index[1]
-    vec = pos[dst] - pos[src]
-    rij = torch.linalg.norm(vec, dim=-1).clamp(min=1e-4)
-    r_hat = vec / rij[:, None]
-    return rij, r_hat
+from src.utils import compute_edge_geometry, rbf as _rbf
 
 
 def make_encoder_data(data: HeteroData) -> Data:
@@ -201,7 +192,7 @@ class ProteinGVPEncoder(nn.Module):
         return (x_scalar, zeros)
 
     def _compute_edge_attr(self, pos: torch.Tensor, edge_index: torch.Tensor):
-        d, u = _edge_vectors(pos, edge_index)
+        d, u = compute_edge_geometry(pos, edge_index)
         s_edge_raw = _rbf(d, num_gaussians=self.num_edge_rbf, cutoff=self.radius)
         s_edge = self.edge_in_proj(s_edge_raw)
         V_edge = u.unsqueeze(1)
