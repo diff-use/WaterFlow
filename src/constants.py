@@ -16,3 +16,45 @@ EDGE_WP = ("water", "wp", "protein")  # water -> protein
 
 # all edge types used in the model (future support: het atoms)
 ALL_EDGE_TYPES = [EDGE_PW, EDGE_WW, EDGE_PP, EDGE_WP]
+
+# Standard 3-letter to 1-letter amino acid mapping
+# Includes 20 canonical amino acids plus common non-standard residues
+# Non-canonical residues not in this dict should be mapped to 'X'
+THREE_TO_ONE = {
+    # 20 canonical amino acids
+    "ALA": "A",
+    "CYS": "C",
+    "ASP": "D",
+    "GLU": "E",
+    "PHE": "F",
+    "GLY": "G",
+    "HIS": "H",
+    "ILE": "I",
+    "LYS": "K",
+    "LEU": "L",
+    "MET": "M",
+    "ASN": "N",
+    "PRO": "P",
+    "GLN": "Q",
+    "ARG": "R",
+    "SER": "S",
+    "THR": "T",
+    "VAL": "V",
+    "TRP": "W",
+    "TYR": "Y",
+    # common non-standard amino acids
+    "MSE": "M",  # Selenomethionine -> Methionine
+    "SEC": "U",  # Selenocysteine
+    "PYL": "O",  # Pyrrolysine
+}
+
+# Standard 1-to-3 letter mapping to feed sanitized residues back to ESM3.
+# This acts as the inverse of THREE_TO_ONE, ensuring ESM3 recognizes 
+# the atoms and safely maps true unknowns to 'UNK'. (probably a more efficient way to do this I know)
+ONE_TO_THREE = {
+    "A": "ALA", "C": "CYS", "D": "ASP", "E": "GLU", "F": "PHE",
+    "G": "GLY", "H": "HIS", "I": "ILE", "K": "LYS", "L": "LEU",
+    "M": "MET", "N": "ASN", "P": "PRO", "Q": "GLN", "R": "ARG",
+    "S": "SER", "T": "THR", "V": "VAL", "W": "TRP", "Y": "TYR",
+    "X": "UNK", "U": "SEC", "O": "PYL"
+}

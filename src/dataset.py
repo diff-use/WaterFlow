@@ -76,6 +76,12 @@ def parse_asu_with_biotite(
     Returns:
         Tuple of (protein_atoms, water_atoms) as biotite AtomArrays.
         Hydrogen atoms are excluded.
+
+    Notes:
+        - model=1: Uses first model in PDB (standard for X-ray structures)
+        - altloc="occupancy": Selects highest-occupancy alternate conformation
+        - Uses filter_amino_acids (not filter_canonical_amino_acids) to include
+          modified residues like MSE, SEC that external encoders may handle
     """
     pdb_file = PDBFile.read(path)
     atoms = get_structure(pdb_file, model=1, altloc="occupancy")
