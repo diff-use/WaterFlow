@@ -49,12 +49,50 @@ THREE_TO_ONE = {
 }
 
 # Standard 1-to-3 letter mapping to feed sanitized residues back to ESM3.
-# This acts as the inverse of THREE_TO_ONE, ensuring ESM3 recognizes 
+# This acts as the inverse of THREE_TO_ONE, ensuring ESM3 recognizes
 # the atoms and safely maps true unknowns to 'UNK'. (probably a more efficient way to do this I know)
 ONE_TO_THREE = {
-    "A": "ALA", "C": "CYS", "D": "ASP", "E": "GLU", "F": "PHE",
-    "G": "GLY", "H": "HIS", "I": "ILE", "K": "LYS", "L": "LEU",
-    "M": "MET", "N": "ASN", "P": "PRO", "Q": "GLN", "R": "ARG",
-    "S": "SER", "T": "THR", "V": "VAL", "W": "TRP", "Y": "TYR",
-    "X": "UNK", "U": "SEC", "O": "PYL"
+    "A": "ALA",
+    "C": "CYS",
+    "D": "ASP",
+    "E": "GLU",
+    "F": "PHE",
+    "G": "GLY",
+    "H": "HIS",
+    "I": "ILE",
+    "K": "LYS",
+    "L": "LEU",
+    "M": "MET",
+    "N": "ASN",
+    "P": "PRO",
+    "Q": "GLN",
+    "R": "ARG",
+    "S": "SER",
+    "T": "THR",
+    "V": "VAL",
+    "W": "TRP",
+    "Y": "TYR",
+    "X": "UNK",
+    "U": "SEC",
+    "O": "PYL",
 }
+
+# Element vocabulary for atom types in protein structures
+ELEMENT_VOCAB = [
+    "C",
+    "N",
+    "O",
+    "S",
+    "P",
+    "SE",
+    "MG",
+    "ZN",
+    "CA",
+    "FE",
+    "NA",
+    "K",
+    "CL",
+    "F",
+    "BR",
+]
+ELEM_IDX = {e: i for i, e in enumerate(ELEMENT_VOCAB)}

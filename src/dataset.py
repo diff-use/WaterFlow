@@ -20,7 +20,7 @@ import pandas as pd
 import pymol2
 import torch
 import torch.nn.functional as F
-from biotite.structure.io.pdb import PDBFile, get_structure
+from biotite.structure.io.pdb import get_structure, PDBFile
 from loguru import logger
 from scipy.spatial.distance import cdist
 from torch import Tensor
@@ -29,30 +29,11 @@ from torch_cluster import radius_graph
 from torch_geometric.data import Batch, HeteroData
 from tqdm import tqdm
 
-from src.constants import EDGE_PP, NUM_RBF
+from src.constants import EDGE_PP, ELEM_IDX, ELEMENT_VOCAB, NUM_RBF
 from src.utils import (
     _normalize_ins_code,
     compute_edge_features,
 )
-
-ELEMENT_VOCAB = [
-    "C",
-    "N",
-    "O",
-    "S",
-    "P",
-    "SE",
-    "MG",
-    "ZN",
-    "CA",
-    "FE",
-    "NA",
-    "K",
-    "CL",
-    "F",
-    "BR",
-]
-ELEM_IDX = {e: i for i, e in enumerate(ELEMENT_VOCAB)}
 
 
 def element_onehot(symbols: list[str]) -> Tensor:
@@ -975,12 +956,18 @@ class ProteinWaterDataset(Dataset):
             pp_edge_index = radius_graph(final_protein_pos, r=self.cutoff, loop=False)
             pp_edge_index = _make_undirected(pp_edge_index)
             pp_edge_unit, pp_edge_rbf = compute_edge_features(
-                final_protein_pos, pp_edge_index, num_gaussians=NUM_RBF, cutoff=self.cutoff
+                final_protein_pos,
+                pp_edge_index,
+                num_gaussians=NUM_RBF,
+                cutoff=self.cutoff,
             )
         else:
             pp_edge_index = torch.empty((2, 0), dtype=torch.long)
             pp_edge_unit, pp_edge_rbf = compute_edge_features(
-                final_protein_pos, pp_edge_index, num_gaussians=NUM_RBF, cutoff=self.cutoff
+                final_protein_pos,
+                pp_edge_index,
+                num_gaussians=NUM_RBF,
+                cutoff=self.cutoff,
             )
 
         # Cache all data including PP edges and features

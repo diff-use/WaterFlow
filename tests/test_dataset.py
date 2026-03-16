@@ -19,17 +19,14 @@ Integration tests use real PDB files:
 All test cases created with assistance from Claude Code.
 """
 
-import numpy as np
 from pathlib import Path
 
 import numpy as np
 import pytest
 import torch
 
+from src.constants import ELEM_IDX, ELEMENT_VOCAB
 from src.dataset import (
-    ELEM_IDX,
-    ELEMENT_VOCAB,
-    ProteinWaterDataset,
     _make_undirected,
     check_chain_interactions,
     check_com_distance,
@@ -42,6 +39,7 @@ from src.dataset import (
     load_edia_for_pdb,
     match_atoms_to_coords,
     parse_asu_with_biotite,
+    ProteinWaterDataset,
 )
 
 
@@ -224,9 +222,9 @@ class TestMatchAtomsToCoords:
 
         # Create atom array with known coords
         atoms = bts.AtomArray(3)
-        atoms.coord = np.array([[0., 0., 0.], [1., 0., 0.], [2., 0., 0.]])
+        atoms.coord = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
 
-        target_coords = np.array([[0., 0., 0.], [2., 0., 0.]])
+        target_coords = np.array([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
 
         matched = match_atoms_to_coords(atoms, target_coords, tolerance=0.01)
 
@@ -239,9 +237,9 @@ class TestMatchAtomsToCoords:
         import biotite.structure as bts
 
         atoms = bts.AtomArray(2)
-        atoms.coord = np.array([[0., 0., 0.], [1., 0., 0.]])
+        atoms.coord = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
 
-        target_coords = np.array([[0.5, 0., 0.]])  # Not close to any atom
+        target_coords = np.array([[0.5, 0.0, 0.0]])  # Not close to any atom
 
         matched = match_atoms_to_coords(atoms, target_coords, tolerance=0.01)
 
@@ -252,7 +250,7 @@ class TestMatchAtomsToCoords:
         import biotite.structure as bts
 
         atoms = bts.AtomArray(3)
-        atoms.coord = np.array([[0., 0., 0.], [1., 0., 0.], [2., 0., 0.]])
+        atoms.coord = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
 
         target_coords = np.zeros((0, 3))
 
@@ -265,9 +263,9 @@ class TestMatchAtomsToCoords:
         import biotite.structure as bts
 
         atoms = bts.AtomArray(1)
-        atoms.coord = np.array([[0., 0., 0.]])
+        atoms.coord = np.array([[0.0, 0.0, 0.0]])
 
-        target_coords = np.array([[0.05, 0., 0.]])
+        target_coords = np.array([[0.05, 0.0, 0.0]])
 
         # Should not match with tight tolerance
         matched_tight = match_atoms_to_coords(atoms, target_coords, tolerance=0.01)
@@ -287,7 +285,9 @@ class TestCheckComDistance:
         protein_coords = torch.randn(100, 3)
         water_coords = protein_coords[:10].clone()  # Same center region
 
-        is_valid, reason = check_com_distance(protein_coords, water_coords, max_com_dist=25.0)
+        is_valid, reason = check_com_distance(
+            protein_coords, water_coords, max_com_dist=25.0
+        )
 
         assert is_valid is True
         assert reason == ""
@@ -297,7 +297,9 @@ class TestCheckComDistance:
         protein_coords = torch.zeros(100, 3)
         water_coords = torch.zeros(10, 3) + 5.0  # 5A offset in all dims ~8.7A distance
 
-        is_valid, reason = check_com_distance(protein_coords, water_coords, max_com_dist=25.0)
+        is_valid, reason = check_com_distance(
+            protein_coords, water_coords, max_com_dist=25.0
+        )
 
         assert is_valid is True
 
@@ -306,7 +308,9 @@ class TestCheckComDistance:
         protein_coords = torch.zeros(100, 3)
         water_coords = torch.zeros(10, 3) + 100.0  # 100A offset
 
-        is_valid, reason = check_com_distance(protein_coords, water_coords, max_com_dist=25.0)
+        is_valid, reason = check_com_distance(
+            protein_coords, water_coords, max_com_dist=25.0
+        )
 
         assert is_valid is False
         assert "CoM distance" in reason
@@ -317,7 +321,9 @@ class TestCheckComDistance:
         protein_coords = torch.randn(100, 3)
         water_coords = torch.zeros(0, 3)
 
-        is_valid, reason = check_com_distance(protein_coords, water_coords, max_com_dist=25.0)
+        is_valid, reason = check_com_distance(
+            protein_coords, water_coords, max_com_dist=25.0
+        )
 
         assert is_valid is True
 
@@ -327,11 +333,15 @@ class TestCheckComDistance:
         water_coords = torch.zeros(10, 3) + 10.0  # ~17.3A distance
 
         # Tight threshold should fail
-        is_valid_tight, _ = check_com_distance(protein_coords, water_coords, max_com_dist=10.0)
+        is_valid_tight, _ = check_com_distance(
+            protein_coords, water_coords, max_com_dist=10.0
+        )
         assert is_valid_tight is False
 
         # Loose threshold should pass
-        is_valid_loose, _ = check_com_distance(protein_coords, water_coords, max_com_dist=50.0)
+        is_valid_loose, _ = check_com_distance(
+            protein_coords, water_coords, max_com_dist=50.0
+        )
         assert is_valid_loose is True
 
 
@@ -404,7 +414,7 @@ class TestCheckWaterClashes:
     def test_custom_clash_distance(self):
         """Custom clash distance should be respected."""
         protein_coords = torch.zeros(10, 3)
-        water_coords = torch.tensor([[1.5, 0., 0.]])  # 1.5A from origin
+        water_coords = torch.tensor([[1.5, 0.0, 0.0]])  # 1.5A from origin
 
         # 1A clash distance - not clashing
         is_valid_1a, _ = check_water_clashes(
@@ -418,6 +428,7 @@ class TestCheckWaterClashes:
         )
         assert is_valid_2a is False
 
+
 @pytest.mark.unit
 class TestCheckChainInteractions:
     """Tests for chain interaction quality filter."""
@@ -430,7 +441,9 @@ class TestCheckChainInteractions:
         atoms.chain_id = np.array(["A"] * 10)
         atoms.coord = np.random.randn(10, 3)
 
-        is_valid, reason, status = check_chain_interactions(atoms, interface_dist_threshold=4.0)
+        is_valid, reason, status = check_chain_interactions(
+            atoms, interface_dist_threshold=4.0
+        )
 
         assert is_valid is True
         assert status == "Single Chain"
@@ -444,9 +457,13 @@ class TestCheckChainInteractions:
         # Place chains close together
         atoms.coord = np.zeros((20, 3))
         atoms.coord[:10] = np.random.randn(10, 3)
-        atoms.coord[10:] = np.random.randn(10, 3) + np.array([2., 0., 0.])  # 2A offset
+        atoms.coord[10:] = np.random.randn(10, 3) + np.array(
+            [2.0, 0.0, 0.0]
+        )  # 2A offset
 
-        is_valid, reason, status = check_chain_interactions(atoms, interface_dist_threshold=4.0)
+        is_valid, reason, status = check_chain_interactions(
+            atoms, interface_dist_threshold=4.0
+        )
 
         assert is_valid is True
         assert status == "Interacting"
@@ -460,9 +477,13 @@ class TestCheckChainInteractions:
         # Place chains far apart
         atoms.coord = np.zeros((20, 3))
         atoms.coord[:10] = np.zeros((10, 3))
-        atoms.coord[10:] = np.zeros((10, 3)) + np.array([100., 0., 0.])  # 100A offset
+        atoms.coord[10:] = np.zeros((10, 3)) + np.array(
+            [100.0, 0.0, 0.0]
+        )  # 100A offset
 
-        is_valid, reason, status = check_chain_interactions(atoms, interface_dist_threshold=4.0)
+        is_valid, reason, status = check_chain_interactions(
+            atoms, interface_dist_threshold=4.0
+        )
 
         assert is_valid is False
         assert "ASU copies" in reason or "not PPI" in reason
@@ -476,10 +497,16 @@ class TestCheckChainInteractions:
         atoms.chain_id = np.array(["A"] * 10 + ["B"] * 10 + ["C"] * 10)
         atoms.coord = np.zeros((30, 3))
         atoms.coord[:10] = np.zeros((10, 3))
-        atoms.coord[10:20] = np.zeros((10, 3)) + np.array([2., 0., 0.])  # B close to A
-        atoms.coord[20:] = np.zeros((10, 3)) + np.array([100., 0., 0.])  # C far from all
+        atoms.coord[10:20] = np.zeros((10, 3)) + np.array(
+            [2.0, 0.0, 0.0]
+        )  # B close to A
+        atoms.coord[20:] = np.zeros((10, 3)) + np.array(
+            [100.0, 0.0, 0.0]
+        )  # C far from all
 
-        is_valid, reason, status = check_chain_interactions(atoms, interface_dist_threshold=4.0)
+        is_valid, reason, status = check_chain_interactions(
+            atoms, interface_dist_threshold=4.0
+        )
 
         # Should pass because A and B interact
         assert is_valid is True
@@ -542,14 +569,18 @@ class TestGetCrystalContactsPymol:
         result_large = get_crystal_contacts_pymol(pdb_6eey, cutoff=8.0)
 
         # Larger cutoff should generally find more interface atoms
-        assert result_large["mate_coords"].shape[0] >= result_small["mate_coords"].shape[0]
+        assert (
+            result_large["mate_coords"].shape[0] >= result_small["mate_coords"].shape[0]
+        )
 
 
 @pytest.mark.integration
 class TestProteinWaterDataset:
     """Tests for the main dataset class."""
 
-    def test_dataset_creation(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
+    def test_dataset_creation(
+        self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir
+    ):
         """Dataset should be created successfully."""
         dataset = ProteinWaterDataset(
             pdb_list_file=single_pdb_list_file,
@@ -560,7 +591,9 @@ class TestProteinWaterDataset:
 
         assert len(dataset) >= 1
 
-    def test_getitem_returns_heterodata(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
+    def test_getitem_returns_heterodata(
+        self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir
+    ):
         """__getitem__ should return HeteroData."""
         from torch_geometric.data import HeteroData
 
@@ -574,7 +607,9 @@ class TestProteinWaterDataset:
         data = dataset[0]
         assert isinstance(data, HeteroData)
 
-    def test_heterodata_has_required_fields(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
+    def test_heterodata_has_required_fields(
+        self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir
+    ):
         """HeteroData should have required node types and fields."""
         dataset = ProteinWaterDataset(
             pdb_list_file=single_pdb_list_file,
@@ -586,18 +621,20 @@ class TestProteinWaterDataset:
         data = dataset[0]
 
         # Check protein nodes
-        assert hasattr(data['protein'], 'pos')
-        assert hasattr(data['protein'], 'x')
-        assert hasattr(data['protein'], 'residue_index')
+        assert hasattr(data["protein"], "pos")
+        assert hasattr(data["protein"], "x")
+        assert hasattr(data["protein"], "residue_index")
 
         # Check water nodes
-        assert hasattr(data['water'], 'pos')
-        assert hasattr(data['water'], 'x')
+        assert hasattr(data["water"], "pos")
+        assert hasattr(data["water"], "x")
 
         # Check edges
-        assert ('protein', 'pp', 'protein') in data.edge_types
+        assert ("protein", "pp", "protein") in data.edge_types
 
-    def test_protein_positions_centered(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
+    def test_protein_positions_centered(
+        self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir
+    ):
         """ASU protein positions should be centered (mean ~ 0)."""
         dataset = ProteinWaterDataset(
             pdb_list_file=single_pdb_list_file,
@@ -608,11 +645,13 @@ class TestProteinWaterDataset:
         )
 
         data = dataset[0]
-        protein_center = data['protein'].pos.mean(dim=0)
+        protein_center = data["protein"].pos.mean(dim=0)
 
         assert torch.allclose(protein_center, torch.zeros(3), atol=1e-3)
 
-    def test_duplicate_single_sample(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
+    def test_duplicate_single_sample(
+        self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir
+    ):
         """duplicate_single_sample should multiply dataset length."""
         dataset = ProteinWaterDataset(
             pdb_list_file=single_pdb_list_file,
@@ -627,9 +666,11 @@ class TestProteinWaterDataset:
         # All items should be the same
         data_0 = dataset[0]
         data_5 = dataset[5]
-        assert torch.allclose(data_0['protein'].pos, data_5['protein'].pos)
+        assert torch.allclose(data_0["protein"].pos, data_5["protein"].pos)
 
-    def test_cached_file_created(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
+    def test_cached_file_created(
+        self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir
+    ):
         """Preprocessing should create cached .pt file in correct directory."""
         dataset = ProteinWaterDataset(
             pdb_list_file=single_pdb_list_file,
@@ -643,7 +684,9 @@ class TestProteinWaterDataset:
         cache_file = tmp_processed_dir / "geometry_mates" / "6eey_final.pt"
         assert cache_file.exists()
 
-    def test_no_reprocess_if_cached(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
+    def test_no_reprocess_if_cached(
+        self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir
+    ):
         """Should not reprocess if cache exists."""
         # First creation
         ProteinWaterDataset(
@@ -744,7 +787,9 @@ class TestQualityFiltersWithRealPDBs:
 class TestGetDataloader:
     """Tests for dataloader creation."""
 
-    def test_dataloader_creation(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
+    def test_dataloader_creation(
+        self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir
+    ):
         """Dataloader should be created successfully."""
         loader = get_dataloader(
             pdb_list_file=single_pdb_list_file,
@@ -758,7 +803,9 @@ class TestGetDataloader:
         assert loader is not None
         assert len(loader) >= 1
 
-    def test_dataloader_iteration(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
+    def test_dataloader_iteration(
+        self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir
+    ):
         """Should be able to iterate over dataloader."""
         loader = get_dataloader(
             pdb_list_file=single_pdb_list_file,
@@ -771,9 +818,11 @@ class TestGetDataloader:
 
         batch = next(iter(loader))
         assert batch is not None
-        assert hasattr(batch['protein'], 'pos')
+        assert hasattr(batch["protein"], "pos")
 
-    def test_dataloader_batching(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
+    def test_dataloader_batching(
+        self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir
+    ):
         """Dataloader should support batching with duplicate_single_sample."""
         loader = get_dataloader(
             pdb_list_file=single_pdb_list_file,
@@ -790,10 +839,11 @@ class TestGetDataloader:
 
         batch = next(iter(loader))
         # Batch should have batch indices
-        assert hasattr(batch['protein'], 'batch')
+        assert hasattr(batch["protein"], "batch")
 
 
 # ============== Tests for PDB list parsing ==============
+
 
 @pytest.mark.unit
 class TestPdbListParsing:
@@ -826,7 +876,7 @@ class TestPdbListParsing:
         )
 
         assert len(dataset.entries) == 1
-        assert dataset.entries[0]['pdb_id'] == '6eey'
+        assert dataset.entries[0]["pdb_id"] == "6eey"
 
     def test_multiple_entries(self, tmp_path, pdb_base_dir):
         """Should parse multiple entries."""
@@ -861,7 +911,9 @@ class TestPdbListParsing:
 class TestDatasetEdgeCases:
     """Tests for edge cases in dataset handling."""
 
-    def test_include_mates_flag(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
+    def test_include_mates_flag(
+        self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir
+    ):
         """include_mates flag should affect protein node count."""
         # Create dataset with mates
         dataset_with_mates = ProteinWaterDataset(
@@ -885,7 +937,7 @@ class TestDatasetEdgeCases:
         data_without = dataset_no_mates[0]
 
         # With mates should have >= atoms
-        assert data_with['protein'].num_nodes >= data_without['protein'].num_nodes
+        assert data_with["protein"].num_nodes >= data_without["protein"].num_nodes
 
     def test_custom_cutoff(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
         """Custom cutoff should affect edge connectivity."""
@@ -909,12 +961,14 @@ class TestDatasetEdgeCases:
         data_large = dataset_large[0]
 
         # Larger cutoff should have more edges
-        n_edges_small = data_small['protein', 'pp', 'protein'].edge_index.shape[1]
-        n_edges_large = data_large['protein', 'pp', 'protein'].edge_index.shape[1]
+        n_edges_small = data_small["protein", "pp", "protein"].edge_index.shape[1]
+        n_edges_large = data_large["protein", "pp", "protein"].edge_index.shape[1]
 
         assert n_edges_large >= n_edges_small
 
-    def test_pp_edge_features_cached(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
+    def test_pp_edge_features_cached(
+        self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir
+    ):
         """PP edge features should be cached and loaded properly."""
         dataset = ProteinWaterDataset(
             pdb_list_file=single_pdb_list_file,
@@ -925,12 +979,12 @@ class TestDatasetEdgeCases:
         )
 
         data = dataset[0]
-        pp_edge = data['protein', 'pp', 'protein']
+        pp_edge = data["protein", "pp", "protein"]
 
         # Check that all edge features are present
-        assert hasattr(pp_edge, 'edge_index')
-        assert hasattr(pp_edge, 'edge_unit')
-        assert hasattr(pp_edge, 'edge_rbf')
+        assert hasattr(pp_edge, "edge_index")
+        assert hasattr(pp_edge, "edge_unit")
+        assert hasattr(pp_edge, "edge_rbf")
 
         n_edges = pp_edge.edge_index.shape[1]
 
@@ -946,7 +1000,9 @@ class TestDatasetEdgeCases:
         unit_norms = torch.linalg.norm(pp_edge.edge_unit, dim=-1)
         assert torch.allclose(unit_norms, torch.ones_like(unit_norms), atol=1e-4)
 
-    def test_directory_based_cache_separation(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
+    def test_directory_based_cache_separation(
+        self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir
+    ):
         """Different include_mates settings should use different directories."""
         # Create dataset without mates
         ProteinWaterDataset(
@@ -973,9 +1029,11 @@ class TestDatasetEdgeCases:
         assert cache_no_mates.exists(), "geometry/ cache should exist"
         assert cache_with_mates.exists(), "geometry_mates/ cache should exist"
 
-    def test_custom_geometry_cache_name(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
+    def test_custom_geometry_cache_name(
+        self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir
+    ):
         """Custom geometry_cache_name should be used for cache directory."""
-        dataset = ProteinWaterDataset(
+        _ = ProteinWaterDataset(
             pdb_list_file=single_pdb_list_file,
             processed_dir=str(tmp_processed_dir),
             base_pdb_dir=str(pdb_base_dir),
@@ -990,6 +1048,7 @@ class TestDatasetEdgeCases:
 
 
 # ============== Tests for water quality filtering ==============
+
 
 @pytest.mark.unit
 class TestLoadEdiaForPdb:
@@ -1078,13 +1137,15 @@ class TestFilterWatersByQuality:
     @pytest.fixture
     def mock_water_coords(self):
         """Create mock water coordinates for testing."""
-        return np.array([
-            [0., 0., 0.],    # Water 0 - close to protein
-            [5., 0., 0.],    # Water 1 - medium distance
-            [15., 0., 0.],   # Water 2 - far from protein
-            [3., 0., 0.],    # Water 3 - close
-            [20., 0., 0.],   # Water 4 - very far
-        ])
+        return np.array(
+            [
+                [0.0, 0.0, 0.0],  # Water 0 - close to protein
+                [5.0, 0.0, 0.0],  # Water 1 - medium distance
+                [15.0, 0.0, 0.0],  # Water 2 - far from protein
+                [3.0, 0.0, 0.0],  # Water 3 - close
+                [20.0, 0.0, 0.0],  # Water 4 - very far
+            ]
+        )
 
     @pytest.fixture
     def mock_water_keys(self):
@@ -1096,7 +1157,9 @@ class TestFilterWatersByQuality:
         """Create mock protein coordinates for testing."""
         return np.zeros((10, 3))  # Protein centered at origin
 
-    def test_distance_filtering(self, mock_water_coords, mock_water_keys, mock_protein_coords):
+    def test_distance_filtering(
+        self, mock_water_coords, mock_water_keys, mock_protein_coords
+    ):
         """Waters far from protein should be removed."""
         keep_mask = filter_waters_by_quality(
             mock_water_coords,
@@ -1134,11 +1197,11 @@ class TestFilterWatersByQuality:
     def test_bfactor_filtering(self, mock_water_coords, mock_water_keys):
         """Waters with high B-factor z-score should be removed."""
         bfactor_lookup = {
-            ("A", 101): 1.0,   # Pass
-            ("A", 102): 6.0,   # Fail (> 5.0)
-            ("A", 103): 2.5,   # Pass
-            ("B", 201): 7.0,   # Fail
-            ("B", 202): 0.5,   # Pass
+            ("A", 101): 1.0,  # Pass
+            ("A", 102): 6.0,  # Fail (> 5.0)
+            ("A", 103): 2.5,  # Pass
+            ("B", 201): 7.0,  # Fail
+            ("B", 202): 0.5,  # Pass
         }
 
         keep_mask = filter_waters_by_quality(
@@ -1152,7 +1215,9 @@ class TestFilterWatersByQuality:
 
         assert keep_mask.sum() == 3
 
-    def test_combined_filters(self, mock_water_coords, mock_water_keys, mock_protein_coords):
+    def test_combined_filters(
+        self, mock_water_coords, mock_water_keys, mock_protein_coords
+    ):
         """Waters failing ANY criterion should be removed."""
         edia_lookup = {
             ("A", 101): 0.85,  # Pass EDIA
@@ -1162,11 +1227,11 @@ class TestFilterWatersByQuality:
             ("B", 202): 0.85,  # Pass EDIA, but will fail distance
         }
         bfactor_lookup = {
-            ("A", 101): 1.0,   # Pass B-factor
-            ("A", 102): 6.0,   # Fail B-factor
-            ("A", 103): 1.0,   # Pass B-factor
-            ("B", 201): 1.0,   # Pass B-factor
-            ("B", 202): 1.0,   # Pass B-factor
+            ("A", 101): 1.0,  # Pass B-factor
+            ("A", 102): 6.0,  # Fail B-factor
+            ("A", 103): 1.0,  # Pass B-factor
+            ("B", 201): 1.0,  # Pass B-factor
+            ("B", 202): 1.0,  # Pass B-factor
         }
 
         keep_mask = filter_waters_by_quality(
@@ -1229,7 +1294,6 @@ class TestFilterWatersByQuality:
         assert keep_mask.sum() == 5
 
 
-
 @pytest.mark.integration
 class TestWaterFilteringIntegration:
     """Integration tests for water filtering with real PDB files."""
@@ -1253,10 +1317,9 @@ class TestWaterFilteringIntegration:
         bfactor_lookup, _ = compute_normalized_bfactors(pdb_6eey)
 
         # Build water keys
-        water_keys = list(zip(
-            water_atoms.chain_id.astype(str),
-            water_atoms.res_id.astype(int)
-        ))
+        water_keys = list(
+            zip(water_atoms.chain_id.astype(str), water_atoms.res_id.astype(int))
+        )
 
         # Apply filtering with distance and bfactor
         keep_mask = filter_waters_by_quality(
@@ -1272,7 +1335,9 @@ class TestWaterFilteringIntegration:
         assert len(keep_mask) == len(water_keys)
         assert keep_mask.dtype == bool
 
-    def test_dataset_with_filtering_disabled(self, single_pdb_list_file, tmp_path, pdb_base_dir):
+    def test_dataset_with_filtering_disabled(
+        self, single_pdb_list_file, tmp_path, pdb_base_dir
+    ):
         """Dataset with filtering disabled should have same waters."""
         # Create dataset with filtering disabled
         dataset = ProteinWaterDataset(
@@ -1287,7 +1352,7 @@ class TestWaterFilteringIntegration:
 
         data = dataset[0]
         # Should have water nodes
-        assert data['water'].num_nodes >= 0
+        assert data["water"].num_nodes >= 0
 
 
 @pytest.mark.integration
@@ -1324,9 +1389,9 @@ class TestEmbeddingLoading:
 
         mock_slae_emb = torch.randn(num_asu_atoms, 128)
         slae_data = {
-            'node_embeddings': mock_slae_emb,
-            'atom37_coords': torch.zeros(10, 37, 3),  # Not used in loading
-            'pdb_id': '6eey',
+            "node_embeddings": mock_slae_emb,
+            "atom37_coords": torch.zeros(10, 37, 3),  # Not used in loading
+            "pdb_id": "6eey",
         }
         torch.save(slae_data, slae_dir / "6eey_final.pt")
 
@@ -1339,8 +1404,8 @@ class TestEmbeddingLoading:
             preprocess=False,
         )
         data = dataset[0]
-        assert hasattr(data['protein'], 'slae_embedding')
-        assert data['protein'].slae_embedding.shape[0] == data['protein'].num_nodes
+        assert hasattr(data["protein"], "slae_embedding")
+        assert data["protein"].slae_embedding.shape[0] == data["protein"].num_nodes
 
     def test_esm_embedding_loaded_from_subdirectory(
         self, single_pdb_list_file, tmp_path, pdb_base_dir
@@ -1360,7 +1425,7 @@ class TestEmbeddingLoading:
 
         # Get the number of residues
         data = dataset[0]
-        num_residues = data['protein'].num_protein_residues
+        num_residues = data["protein"].num_protein_residues
 
         # Create mock ESM embeddings in the subdirectory
         esm_dir = processed_dir / "esm"
@@ -1368,9 +1433,9 @@ class TestEmbeddingLoading:
 
         mock_esm_emb = torch.randn(num_residues, 1536)
         esm_data = {
-            'residue_embeddings': mock_esm_emb,
-            'sequence': 'A' * num_residues,
-            'pdb_id': '6eey',
+            "residue_embeddings": mock_esm_emb,
+            "sequence": "A" * num_residues,
+            "pdb_id": "6eey",
         }
         torch.save(esm_data, esm_dir / "6eey_final.pt")
 
@@ -1384,10 +1449,10 @@ class TestEmbeddingLoading:
             include_mates=False,
         )
         data = dataset[0]
-        assert hasattr(data['protein'], 'esm_embedding')
+        assert hasattr(data["protein"], "esm_embedding")
         # ESM embeddings are broadcasted to atom level
-        assert data['protein'].esm_embedding.shape[0] == data['protein'].num_nodes
-        assert data['protein'].esm_embedding.shape[1] == 1536
+        assert data["protein"].esm_embedding.shape[0] == data["protein"].num_nodes
+        assert data["protein"].esm_embedding.shape[1] == 1536
 
     def test_embeddings_not_present_without_subdirectory(
         self, single_pdb_list_file, tmp_path, pdb_base_dir
@@ -1406,8 +1471,8 @@ class TestEmbeddingLoading:
         data = dataset[0]
 
         # Neither embedding should be present
-        assert not hasattr(data['protein'], 'slae_embedding')
-        assert not hasattr(data['protein'], 'esm_embedding')
+        assert not hasattr(data["protein"], "slae_embedding")
+        assert not hasattr(data["protein"], "esm_embedding")
 
     def test_slae_embedding_with_mates_padded(
         self, single_pdb_list_file, tmp_path, pdb_base_dir
@@ -1428,7 +1493,7 @@ class TestEmbeddingLoading:
         # Get ASU and total node counts
         data = dataset[0]
         num_asu_atoms = data.num_asu_protein_atoms
-        total_protein_atoms = data['protein'].num_nodes
+        total_protein_atoms = data["protein"].num_nodes
 
         # Skip if no mates
         if total_protein_atoms == num_asu_atoms:
@@ -1440,9 +1505,9 @@ class TestEmbeddingLoading:
 
         mock_slae_emb = torch.randn(num_asu_atoms, 128)
         slae_data = {
-            'node_embeddings': mock_slae_emb,
-            'atom37_coords': torch.zeros(10, 37, 3),
-            'pdb_id': '6eey',
+            "node_embeddings": mock_slae_emb,
+            "atom37_coords": torch.zeros(10, 37, 3),
+            "pdb_id": "6eey",
         }
         torch.save(slae_data, slae_dir / "6eey_final.pt")
 
@@ -1456,13 +1521,13 @@ class TestEmbeddingLoading:
             preprocess=False,
         )
         data = dataset[0]
-        assert hasattr(data['protein'], 'slae_embedding')
+        assert hasattr(data["protein"], "slae_embedding")
 
         # Total size should match all protein atoms
-        assert data['protein'].slae_embedding.shape[0] == total_protein_atoms
+        assert data["protein"].slae_embedding.shape[0] == total_protein_atoms
 
         # Mate embeddings (after ASU atoms) should be zeros
-        mate_emb = data['protein'].slae_embedding[num_asu_atoms:]
+        mate_emb = data["protein"].slae_embedding[num_asu_atoms:]
         assert torch.allclose(mate_emb, torch.zeros_like(mate_emb))
 
 
@@ -1481,7 +1546,7 @@ class TestInsertionCodeHandling:
     def test_insertion_codes_not_merged(self, pdb_1deu):
         """Residues with insertion codes should not be merged with base residue."""
         import biotite.structure as bts
-        from biotite.structure.io.pdb import PDBFile, get_structure
+        from biotite.structure.io.pdb import get_structure, PDBFile
 
         pdb_file = PDBFile.read(pdb_1deu)
         atoms = get_structure(pdb_file, model=1, altloc="occupancy")
@@ -1506,7 +1571,7 @@ class TestInsertionCodeHandling:
     def test_residue_count_matches_esm(self, pdb_1deu):
         """Residue count should match ESM's parsing (which handles insertion codes)."""
         import biotite.structure as bts
-        from biotite.structure.io.pdb import PDBFile, get_structure
+        from biotite.structure.io.pdb import get_structure, PDBFile
         from esm.sdk.api import ESMProtein
         from esm.utils.structure.protein_complex import ProteinComplex
 
@@ -1515,17 +1580,15 @@ class TestInsertionCodeHandling:
         atoms = get_structure(pdb_file, model=1, altloc="occupancy")
         protein_atoms = atoms[bts.filter_canonical_amino_acids(atoms)]
 
-        residue_keys = list(zip(
-            protein_atoms.chain_id,
-            protein_atoms.res_id,
-            protein_atoms.ins_code
-        ))
+        residue_keys = list(
+            zip(protein_atoms.chain_id, protein_atoms.res_id, protein_atoms.ins_code)
+        )
         our_residue_count = len(dict.fromkeys(residue_keys))
 
         # Get ESM's residue count
         complex_obj = ProteinComplex.from_pdb(pdb_1deu)
         protein = ESMProtein.from_protein_complex(complex_obj)
-        esm_residue_count = len(protein.sequence.replace('|', ''))
+        esm_residue_count = len(protein.sequence.replace("|", ""))
 
         assert our_residue_count == esm_residue_count
 
@@ -1548,4 +1611,4 @@ class TestInsertionCodeHandling:
 
         # Should have the correct number of residues (536, not 484)
         # This is stored in num_residues (which includes mates, but 1deu has no mates at default cutoff)
-        assert data['protein'].num_residues >= 536
+        assert data["protein"].num_residues >= 536
