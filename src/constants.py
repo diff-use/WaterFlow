@@ -7,8 +7,8 @@ Constants for edge types and other shared values.
 NODE_FEATURE_DIM = 16  # Default node scalar feature dimension
 
 # RBF (Radial Basis Function) parameters
-NUM_RBF = 16          # Number of RBF basis functions
-RBF_CUTOFF = 8.0      # Distance cutoff in Angstroms for RBF encoding
+NUM_RBF = 16  # Number of RBF basis functions
+RBF_CUTOFF = 8.0  # Distance cutoff in Angstroms for RBF encoding
 
 # Edge type tuples: (src_node_type, edge_name, dst_node_type)
 EDGE_PP = ("protein", "pp", "protein")  # protein -> protein
@@ -51,12 +51,30 @@ THREE_TO_ONE = {
 }
 
 # Standard 1-to-3 letter mapping to feed sanitized residues back to ESM3.
-# This acts as the inverse of THREE_TO_ONE, ensuring ESM3 recognizes 
+# This acts as the inverse of THREE_TO_ONE, ensuring ESM3 recognizes
 # the atoms and safely maps true unknowns to 'UNK'. (probably a more efficient way to do this I know)
 ONE_TO_THREE = {
-    "A": "ALA", "C": "CYS", "D": "ASP", "E": "GLU", "F": "PHE",
-    "G": "GLY", "H": "HIS", "I": "ILE", "K": "LYS", "L": "LEU",
-    "M": "MET", "N": "ASN", "P": "PRO", "Q": "GLN", "R": "ARG",
-    "S": "SER", "T": "THR", "V": "VAL", "W": "TRP", "Y": "TYR",
-    "X": "UNK", "U": "SEC", "O": "PYL"
+    "A": "ALA",
+    "C": "CYS",
+    "D": "ASP",
+    "E": "GLU",
+    "F": "PHE",
+    "G": "GLY",
+    "H": "HIS",
+    "I": "ILE",
+    "K": "LYS",
+    "L": "LEU",
+    "M": "MET",
+    "N": "ASN",
+    "P": "PRO",
+    "Q": "GLN",
+    "R": "ARG",
+    "S": "SER",
+    "T": "THR",
+    "V": "VAL",
+    "W": "TRP",
+    "Y": "TYR",
+    "X": "UNK",
+    "U": "SEC",
+    "O": "PYL",
 }

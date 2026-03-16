@@ -131,6 +131,7 @@ def parse_split_file(split_file: Path, base_pdb_dir: Path) -> list[dict]:
 
 ATOM37_FILL = 1e-5
 
+
 def rbf(r: Tensor, num_gaussians: int = NUM_RBF, cutoff: float = RBF_CUTOFF) -> Tensor:
     """
     Compute radial basis function encoding of distances.
@@ -215,6 +216,7 @@ def ot_coupling(
 
     return x0_star, x1_star
 
+
 # eval metric functions
 @torch.no_grad()
 def recall_precision(
@@ -257,6 +259,7 @@ def recall_precision(
 
     return recall, precision
 
+
 @torch.no_grad()
 def compute_rmsd(
     pred: torch.Tensor | np.ndarray,
@@ -295,6 +298,7 @@ def compute_rmsd(
     row_ind, col_ind = linear_sum_assignment(dist_matrix)
     diff = pred[row_ind] - target[col_ind]
     return float(np.sqrt(np.mean(np.sum(diff**2, axis=1))))
+
 
 def compute_placement_metrics(
     pred: torch.Tensor | np.ndarray,
@@ -343,6 +347,7 @@ def compute_placement_metrics(
     auc_pr = auc(np.array(recalls)[sorted_idx], np.array(precisions)[sorted_idx])
 
     return {"precision": precision, "recall": recall, "f1": f1, "auc_pr": auc_pr}
+
 
 # viz functions
 def plot_3d_frame(
@@ -428,6 +433,7 @@ def plot_3d_frame(
     if zlim is not None:
         ax.set_zlim(zlim)
 
+
 def create_trajectory_gif(
     trajectory: Sequence[np.ndarray],
     protein_pos: np.ndarray,
@@ -506,6 +512,7 @@ def create_trajectory_gif(
             duration=1000 // fps,
             loop=0,
         )
+
 
 def save_protein_plot(
     pred_ca: torch.Tensor,

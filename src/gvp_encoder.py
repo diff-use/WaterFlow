@@ -4,6 +4,7 @@ GVP (Geometric Vector Perceptron) encoder implementation.
 This encoder processes protein structure directly using GVP layers
 to produce geometric features for the flow model.
 """
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -23,7 +24,9 @@ from src.gvp import EdgeUpdate, GVP, GVPConvLayer
 from src.utils import rbf
 
 
-def edge_vectors(pos: torch.Tensor, edge_index: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def edge_vectors(
+    pos: torch.Tensor, edge_index: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Compute edge distances and unit vectors from node positions.
 
@@ -55,8 +58,8 @@ def make_gvp_encoder_data(data: HeteroData) -> Data:
     Returns:
         enc_data: Data with x, pos, edge_index, and optionally cached edge features
     """
-    device = data['protein'].pos.device
-    prot = data['protein']
+    device = data["protein"].pos.device
+    prot = data["protein"]
 
     x = prot.x
     pos = prot.pos
@@ -72,9 +75,9 @@ def make_gvp_encoder_data(data: HeteroData) -> Data:
     # Copy cached edge features if available
     if EDGE_PP in data.edge_types:
         pp_edge = data[EDGE_PP]
-        if hasattr(pp_edge, 'edge_rbf'):
+        if hasattr(pp_edge, "edge_rbf"):
             enc_data.edge_rbf = pp_edge.edge_rbf
-        if hasattr(pp_edge, 'edge_unit'):
+        if hasattr(pp_edge, "edge_unit"):
             enc_data.edge_unit = pp_edge.edge_unit
 
     # batch for multi-complex batches
@@ -186,23 +189,27 @@ class ProteinGVPEncoder(nn.Module):
 
         self.s_edge_width = n_edge_scalar_out
         if n_edge_scalar_in != n_edge_scalar_out:
-            self.edge_in_proj = nn.Linear(n_edge_scalar_in, n_edge_scalar_out, bias=False)
+            self.edge_in_proj = nn.Linear(
+                n_edge_scalar_in, n_edge_scalar_out, bias=False
+            )
         else:
             self.edge_in_proj = nn.Identity()
 
         edge_dims = (self.s_edge_width, n_edge_vec_in)
-        self.layers = nn.ModuleList([
-            GVPConvLayer(
-                node_dims=hidden_dims,
-                edge_dims=edge_dims,
-                n_message=n_message,
-                n_feedforward=n_feedforward,
-                drop_rate=drop_rate,
-                activations=activations,
-                vector_gate=vector_gate,
-            )
-            for _ in range(n_layers)
-        ])
+        self.layers = nn.ModuleList(
+            [
+                GVPConvLayer(
+                    node_dims=hidden_dims,
+                    edge_dims=edge_dims,
+                    n_message=n_message,
+                    n_feedforward=n_feedforward,
+                    drop_rate=drop_rate,
+                    activations=activations,
+                    vector_gate=vector_gate,
+                )
+                for _ in range(n_layers)
+            ]
+        )
 
         if use_edge_update:
             self.edge_update = EdgeUpdate(
@@ -259,7 +266,9 @@ class ProteinGVPEncoder(nn.Module):
         elif aggr == "sum":
             return scatter_add(atom_embed, residue_index, dim=0, dim_size=num_residues)
         elif aggr == "max":
-            out, _ = scatter_max(atom_embed, residue_index, dim=0, dim_size=num_residues)
+            out, _ = scatter_max(
+                atom_embed, residue_index, dim=0, dim_size=num_residues
+            )
             return out
         else:
             raise ValueError(f"Unknown pool_aggr={aggr!r}")
@@ -268,7 +277,9 @@ class ProteinGVPEncoder(nn.Module):
     def _initial_node_tuple(
         x_scalar: torch.Tensor, device: torch.device | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        zeros = torch.zeros(x_scalar.size(0), 1, 3, device=x_scalar.device if device is None else device)
+        zeros = torch.zeros(
+            x_scalar.size(0), 1, 3, device=x_scalar.device if device is None else device
+        )
         return (x_scalar, zeros)
 
     def _compute_edge_attr(self, data: Batch):
@@ -286,7 +297,7 @@ class ProteinGVPEncoder(nn.Module):
             s_edge_raw: Raw RBF features (for distance conditioning)
         """
         # Use cached features if available
-        if hasattr(data, 'edge_rbf') and hasattr(data, 'edge_unit'):
+        if hasattr(data, "edge_rbf") and hasattr(data, "edge_unit"):
             s_edge_raw = data.edge_rbf
             u = data.edge_unit
         else:
@@ -332,15 +343,21 @@ class ProteinGVPEncoder(nn.Module):
                     node_tuple=x,
                     edge_index=data.edge_index,
                     edge_attr=edge_attr,
-                    distance_feat=(dist_feat if self.update_w_distance_features else None),
+                    distance_feat=(
+                        dist_feat if self.update_w_distance_features else None
+                    ),
                 )
 
         if self.pool_residue:
             if not (hasattr(data, "residue_index") and hasattr(data, "num_residues")):
-                raise ValueError("Pooling requires data.residue_index and data.num_residues")
+                raise ValueError(
+                    "Pooling requires data.residue_index and data.num_residues"
+                )
             atom_dense = self._tuple_to_scalar_dense(x)
             atom_embed = self.atom_readout(atom_dense)
-            res_embed = self._pool_by_residue(atom_embed, data.residue_index, int(data.num_residues))
+            res_embed = self._pool_by_residue(
+                atom_embed, data.residue_index, int(data.num_residues)
+            )
             return res_embed, None  # No edge features when pooling
 
         # Return edge_attr only if edge_update was used
@@ -390,7 +407,9 @@ def load_encoder_from_checkpoint(
             # use node_scalar_in from checkpoint if not specified
             if node_scalar_in is None:
                 if "node_scalar_in" not in args:
-                    raise ValueError("node_scalar_in not in checkpoint and not provided")
+                    raise ValueError(
+                        "node_scalar_in not in checkpoint and not provided"
+                    )
                 node_scalar_in = args["node_scalar_in"]
             elif "node_scalar_in" in args and args["node_scalar_in"] != node_scalar_in:
                 raise ValueError(
@@ -403,7 +422,9 @@ def load_encoder_from_checkpoint(
             logger.warning(f"Failed to load checkpoint {checkpoint_path}: {e}")
             logger.info("Initializing blank encoder instead.")
     else:
-        logger.warning(f"Checkpoint not found at {checkpoint_path}, initializing blank encoder.")
+        logger.warning(
+            f"Checkpoint not found at {checkpoint_path}, initializing blank encoder."
+        )
 
     if node_scalar_in is None:
         raise ValueError("node_scalar_in required when checkpoint doesn't exist")
@@ -432,7 +453,7 @@ def load_encoder_from_checkpoint(
     return encoder, args
 
 
-@register_encoder('gvp')
+@register_encoder("gvp")
 class GVPEncoder(BaseProteinEncoder):
     """
     GVP encoder implementing the BaseProteinEncoder interface.
@@ -468,9 +489,11 @@ class GVPEncoder(BaseProteinEncoder):
     @property
     def encoder_type(self) -> str:
         """Return encoder type identifier."""
-        return 'gvp'
+        return "gvp"
 
-    def forward(self, data: HeteroData) -> tuple[torch.Tensor, torch.Tensor, tuple | None]:
+    def forward(
+        self, data: HeteroData
+    ) -> tuple[torch.Tensor, torch.Tensor, tuple | None]:
         """
         Encode protein data.
 
@@ -507,12 +530,12 @@ class GVPEncoder(BaseProteinEncoder):
         Returns:
             Instantiated GVPEncoder
         """
-        encoder_ckpt = config.get('encoder_ckpt')
-        node_scalar_in = config.get('node_scalar_in', 16)
-        hidden_s = config.get('hidden_s', 256)
-        hidden_v = config.get('hidden_v', 32)
-        freeze = config.get('freeze_encoder', False)
-        use_edge_update = config.get('use_edge_update', True)
+        encoder_ckpt = config.get("encoder_ckpt")
+        node_scalar_in = config.get("node_scalar_in", 16)
+        hidden_s = config.get("hidden_s", 256)
+        hidden_v = config.get("hidden_v", 32)
+        freeze = config.get("freeze_encoder", False)
+        use_edge_update = config.get("use_edge_update", True)
 
         if encoder_ckpt:
             encoder, _ = load_encoder_from_checkpoint(

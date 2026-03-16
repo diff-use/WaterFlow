@@ -1,4 +1,4 @@
-# gvp.py 
+# gvp.py
 # generic GVP and GVPConv layers adapted from Jing et al. (2021)
 
 import functools
@@ -430,24 +430,30 @@ class GVPConvLayer(nn.Module):
             x = x_
         return x
 
+
 class EdgeUpdate(nn.Module):
     """
     Residual edge update that keeps a fixed scalar edge width across layers.
     Input to the MLP is [s_src, s_dst, s_edge( fixed width ), (optional) distance/RBF].
     Output shape == input edge width. No width drift.
     """
+
     def __init__(
         self,
-        n_node_scalars: int,          # S_node (e.g., 256)
-        s_edge_width: int,            # fixed model edge width used everywhere
+        n_node_scalars: int,  # S_node (e.g., 256)
+        s_edge_width: int,  # fixed model edge width used everywhere
         update_w_distance_features: bool = False,
-        distance_dim: int = 0,        # e.g., RBF size
+        distance_dim: int = 0,  # e.g., RBF size
     ):
         super().__init__()
         self.update_w_distance_features = update_w_distance_features
         self.s_edge_width = s_edge_width
 
-        in_dim = (2 * n_node_scalars) + s_edge_width + (distance_dim if update_w_distance_features else 0)
+        in_dim = (
+            (2 * n_node_scalars)
+            + s_edge_width
+            + (distance_dim if update_w_distance_features else 0)
+        )
 
         self.edge_mlp = nn.Sequential(
             nn.Linear(in_dim, s_edge_width),
@@ -459,47 +465,53 @@ class EdgeUpdate(nn.Module):
 
     def forward(
         self,
-        node_tuple: tuple,               # (s_node, V_node) with s_node: (N, S_node)
-        edge_index: torch.Tensor,        # (2, E)
-        edge_attr: tuple,                # (s_edge, V_edge) with s_edge: (E, s_edge_width)
+        node_tuple: tuple,  # (s_node, V_node) with s_node: (N, S_node)
+        edge_index: torch.Tensor,  # (2, E)
+        edge_attr: tuple,  # (s_edge, V_edge) with s_edge: (E, s_edge_width)
         distance_feat: torch.Tensor | None = None,  # (E, D) if enabled
     ) -> tuple:
 
         s_node, _ = node_tuple
         s_edge, V_edge = edge_attr
 
-        assert s_edge.shape[-1] == self.s_edge_width, \
+        assert s_edge.shape[-1] == self.s_edge_width, (
             f"EdgeUpdate expected width {self.s_edge_width}, got {s_edge.shape[-1]}"
+        )
 
         src, dst = edge_index[0], edge_index[1]
         parts = [s_node[src], s_node[dst], s_edge]
-        
+
         if self.update_w_distance_features:
             parts.append(distance_feat)
 
-        h = torch.cat(parts, dim=-1)                     # (E, 2*S_node + s_edge_width (+D))
-        upd = self.edge_mlp(h)                           # (E, s_edge_width)
-        s_edge = self.edge_norm(s_edge + upd)            # residual, fixed width
-        return (s_edge, V_edge)                          # vectors unchanged
-    
+        h = torch.cat(parts, dim=-1)  # (E, 2*S_node + s_edge_width (+D))
+        upd = self.edge_mlp(h)  # (E, s_edge_width)
+        s_edge = self.edge_norm(s_edge + upd)  # residual, fixed width
+        return (s_edge, V_edge)  # vectors unchanged
+
+
 # multi edge gvp
+
 
 class GVPMultiEdge(MessagePassing):
     """
     Per-edge-type GVP message function (messages only, no residual/update).
     Outputs a merged tensor for PyG aggregation: _merge(s_msg, v_msg).
     """
+
     def __init__(
         self,
-        src_type: str, dst_type: str,
-        s_dim: int, v_dim: int,
-        rbf_dim: int = 16, 
+        src_type: str,
+        dst_type: str,
+        s_dim: int,
+        v_dim: int,
+        rbf_dim: int = 16,
         use_dst_feats: bool = False,
         n_message_gvps: int = 1,
         activations=(F.relu, torch.sigmoid),
         vector_gate=True,
-        aggr="sum",        
-        rbf_dmax: float = 20.0
+        aggr="sum",
+        rbf_dmax: float = 20.0,
     ):
         super().__init__(aggr=aggr)
         self.src_type, self.dst_type = src_type, dst_type
@@ -512,24 +524,36 @@ class GVPMultiEdge(MessagePassing):
         # message GVP stack; first layer takes [unit_vec] and [rbf] extras
         msg_layers = []
         for i in range(n_message_gvps):
-            vin = v_dim + (1 if i == 0 else 0) + (v_dim if (i == 0 and use_dst_feats) else 0)
-            sin = s_dim + (rbf_dim if i == 0 else 0) + (s_dim if (i == 0 and use_dst_feats) else 0)
-            msg_layers.append(GVP_(
-                in_dims=(sin, vin),
-                out_dims=(s_dim, v_dim),
-                vector_gate=True,
-                activations=activations
-            ))
+            vin = (
+                v_dim
+                + (1 if i == 0 else 0)
+                + (v_dim if (i == 0 and use_dst_feats) else 0)
+            )
+            sin = (
+                s_dim
+                + (rbf_dim if i == 0 else 0)
+                + (s_dim if (i == 0 and use_dst_feats) else 0)
+            )
+            msg_layers.append(
+                GVP_(
+                    in_dims=(sin, vin),
+                    out_dims=(s_dim, v_dim),
+                    vector_gate=True,
+                    activations=activations,
+                )
+            )
         self.edge_message = nn.Sequential(*msg_layers)
 
     @staticmethod
     def _unit_and_rbf(pos_src, pos_dst, edge_index, rbf_dim, rbf_dmax):
         # displacement from src->dst (dst - src) to match your original convention
         s, d = edge_index
-        disp = pos_dst[d] - pos_src[s]              # (E, 3)
+        disp = pos_dst[d] - pos_src[s]  # (E, 3)
         dist = torch.clamp(disp.norm(dim=-1, keepdim=True), min=1e-5)  # (E,1)
-        unit = disp / dist                          # (E, 3)
-        rbf_e = rbf(dist.squeeze(-1), num_gaussians=rbf_dim, cutoff=rbf_dmax)  # (E, rbf_dim)
+        unit = disp / dist  # (E, 3)
+        rbf_e = rbf(
+            dist.squeeze(-1), num_gaussians=rbf_dim, cutoff=rbf_dmax
+        )  # (E, rbf_dim)
         return unit, rbf_e
 
     def forward(self, x, edge_index, pos_pair):
@@ -546,7 +570,7 @@ class GVPMultiEdge(MessagePassing):
             s_src = s_dst = x[0]
             v_src = v_dst = x[1]
 
-        #edge case for no edges being made for weird reason (debugs in flow)
+        # edge case for no edges being made for weird reason (debugs in flow)
         if edge_index.numel() == 0:
             N_dst = s_dst.size(0)
             return s_dst.new_zeros(N_dst, self.s_dim + 3 * self.v_dim)
@@ -558,7 +582,9 @@ class GVPMultiEdge(MessagePassing):
         v_dst_f = v_dst.reshape(v_dst.size(0), -1)  # (N_dst, 3*v)
 
         # compute geometric edge attributes on the fly
-        unit, rbf_e = self._unit_and_rbf(pos_src, pos_dst, edge_index, self.rbf_dim, self.rbf_dmax)
+        unit, rbf_e = self._unit_and_rbf(
+            pos_src, pos_dst, edge_index, self.rbf_dim, self.rbf_dmax
+        )
 
         # pack as simple tensors for message()
         # edge_attr = (rbf_e, unit)  -- pass separately to keep shapes explicit
@@ -568,18 +594,18 @@ class GVPMultiEdge(MessagePassing):
             s=(s_src, s_dst),
             vf=(v_src_f, v_dst_f),
             rbf_e=rbf_e,
-            unit=unit
+            unit=unit,
         )
         return out  # merged messages (s_msg + flattened v_msg)
 
     def message(self, s_i, s_j, vf_i, vf_j, rbf_e, unit):
         # Unflatten vectors
-        v_j = vf_j.view(vf_j.size(0), -1, 3)       # (E, v, 3)
-        v_i = vf_i.view(vf_i.size(0), -1, 3)       # (E, v, 3)
+        v_j = vf_j.view(vf_j.size(0), -1, 3)  # (E, v, 3)
+        v_i = vf_i.view(vf_i.size(0), -1, 3)  # (E, v, 3)
 
         # Build vector features: [unit_vec] (+ src v) (+ dst v if use_dst_feats)
-        v_list = [unit.unsqueeze(1), v_j]          # (E, 1,3) + (E, v,3)
-        s_list = [s_j, rbf_e]                      # (E, s_dim) + (E, rbf_dim)
+        v_list = [unit.unsqueeze(1), v_j]  # (E, 1,3) + (E, v,3)
+        s_list = [s_j, rbf_e]  # (E, s_dim) + (E, rbf_dim)
         if self.use_dst_feats:
             v_list.append(v_i)
             s_list.append(s_i)
@@ -588,23 +614,26 @@ class GVPMultiEdge(MessagePassing):
         s_in = torch.cat(s_list, dim=1)
 
         s_msg, v_msg = self.edge_message((s_in, v_in))  # (E, s_dim), (E, v, 3)
-        return _merge(s_msg, v_msg)                     # (E, s_dim + 3*v)
+        return _merge(s_msg, v_msg)  # (E, s_dim + 3*v)
+
 
 class GVPMultiEdgeConv(nn.Module):
     """
     Hetero multi-edge message passing – messages only per relation,
     then single residual+FFN+layernorm per destination node type.
     """
+
     def __init__(
         self,
-        etypes,                 # List[EdgeType]
-        s_dim: int, v_dim: int,
+        etypes,  # List[EdgeType]
+        s_dim: int,
+        v_dim: int,
         rbf_dim: int = 16,
         n_message_gvps: int = 1,
         n_update_gvps: int = 1,
         use_dst_feats: bool = False,
         drop_rate: float = 0.1,
-        aggr_edges: str = "sum",     # 'mean' or 'add' per edge aggregation
+        aggr_edges: str = "sum",  # 'mean' or 'add' per edge aggregation
         activations=(F.relu, torch.sigmoid),
         vector_gate=True,
     ):
@@ -614,8 +643,12 @@ class GVPMultiEdgeConv(nn.Module):
 
         # per-dst-type norms and update stacks
         dst_ntypes = sorted({dst for (_, _, dst) in etypes})
-        self.msg_norms = nn.ModuleDict({nt: LayerNorm((s_dim, v_dim)) for nt in dst_ntypes})
-        self.upd_norms = nn.ModuleDict({nt: LayerNorm((s_dim, v_dim)) for nt in dst_ntypes})
+        self.msg_norms = nn.ModuleDict(
+            {nt: LayerNorm((s_dim, v_dim)) for nt in dst_ntypes}
+        )
+        self.upd_norms = nn.ModuleDict(
+            {nt: LayerNorm((s_dim, v_dim)) for nt in dst_ntypes}
+        )
 
         GVP_ = functools.partial(GVP, activations=activations, vector_gate=vector_gate)
         self.node_updates = nn.ModuleDict()
@@ -627,13 +660,18 @@ class GVPMultiEdgeConv(nn.Module):
 
         # per-edge-type message convs feeding a HeteroConv(aggr='sum' across relations)
         rel_convs = {}
-        for (src, rel, dst) in etypes:
+        for src, rel, dst in etypes:
             rel_convs[(src, rel, dst)] = GVPMultiEdge(
-                src, dst, s_dim, v_dim,
-                rbf_dim=rbf_dim, use_dst_feats=use_dst_feats,
+                src,
+                dst,
+                s_dim,
+                v_dim,
+                rbf_dim=rbf_dim,
+                use_dst_feats=use_dst_feats,
                 n_message_gvps=n_message_gvps,
-                activations=activations, vector_gate=vector_gate,
-                aggr=("mean" if aggr_edges == "mean" else "sum")
+                activations=activations,
+                vector_gate=vector_gate,
+                aggr=("mean" if aggr_edges == "mean" else "sum"),
             )
         self.hconv = HeteroConv(rel_convs, aggr="sum")  # sum messages across edge types
 
@@ -642,25 +680,28 @@ class GVPMultiEdgeConv(nn.Module):
         x_dict: {ntype: (s, v)}
         returns updated x_dict
         """
-        #build per-edge-type (pos_src, pos_dst) tuples
+        # build per-edge-type (pos_src, pos_dst) tuples
         pos_pair_dict = {
-            et: (pos_dict[et[0]], pos_dict[et[2]])
-            for et in edge_index_dict.keys()
+            et: (pos_dict[et[0]], pos_dict[et[2]]) for et in edge_index_dict.keys()
         }
-        #heteroConv will forward kwarg name without '_dict' into each conv
+        # heteroConv will forward kwarg name without '_dict' into each conv
         merged_msgs = self.hconv(x_dict, edge_index_dict, pos_pair_dict=pos_pair_dict)
-        #merged_msgs[ntype] is a merged tensor of total messages: [N, s_dim + 3*v_dim]
+        # merged_msgs[ntype] is a merged tensor of total messages: [N, s_dim + 3*v_dim]
         for ntype, merged in merged_msgs.items():
             s_msg, v_msg = _split(merged, self.v_dim)
 
-            #apply dropout, residual add, layernorm (message stage)
+            # apply dropout, residual add, layernorm (message stage)
             s_old, v_old = x_dict[ntype]
             s_msg, v_msg = self.drop((s_msg, v_msg))
-            s_mid, v_mid = self.msg_norms[ntype](tuple_sum((s_old, v_old), (s_msg, v_msg)))
+            s_mid, v_mid = self.msg_norms[ntype](
+                tuple_sum((s_old, v_old), (s_msg, v_msg))
+            )
 
-            #per-node update stack (GVP x N), then dropout + residual + layernorm
+            # per-node update stack (GVP x N), then dropout + residual + layernorm
             s_res, v_res = self.node_updates[ntype]((s_mid, v_mid))
             s_res, v_res = self.drop((s_res, v_res))
-            x_dict[ntype] = self.upd_norms[ntype](tuple_sum((s_mid, v_mid), (s_res, v_res)))
+            x_dict[ntype] = self.upd_norms[ntype](
+                tuple_sum((s_mid, v_mid), (s_res, v_res))
+            )
 
         return x_dict
