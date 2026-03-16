@@ -576,7 +576,9 @@ def main():
         logger.info(f"  Samples processed: {summary['n_samples']}")
         logger.info(f"  Avg waters (true):  {summary['avg_n_waters_true']:.1f}")
         logger.info(f"  Avg waters (pred):  {summary['avg_n_waters_pred']:.1f}")
-        logger.info(f"  Avg RMSD:      {summary['avg_rmsd']:.3f} ± {summary['std_rmsd']:.3f} Å")
+        logger.info(
+            f"  Avg RMSD:      {summary['avg_rmsd']:.3f} ± {summary['std_rmsd']:.3f} Å"
+        )
         logger.info(f"  Avg Precision: {summary['avg_precision']:.3%}")
         logger.info(f"  Avg Recall:    {summary['avg_recall']:.3%}")
         logger.info(f"  Avg F1:        {summary['avg_f1']:.4f}")

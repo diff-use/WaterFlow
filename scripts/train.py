@@ -1088,7 +1088,7 @@ def main():
                 epoch,
                 device,
                 global_step,
-                eval_indices, 
+                eval_indices,
                 run_dir,
             )
             if eval_metrics:

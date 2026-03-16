@@ -14,10 +14,10 @@ PDB_BASE_DIR = Path(ENV_PDB_DIR) if ENV_PDB_DIR else TEST_DIR / "test_files"
 def device():
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+
 @pytest.fixture(scope="session")
 def pdb_base_dir():
-    """Wrapper of constant PDB_BASE_DIR.
-    """
+    """Wrapper of constant PDB_BASE_DIR."""
     return PDB_BASE_DIR
 
 

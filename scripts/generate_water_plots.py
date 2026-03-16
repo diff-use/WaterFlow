@@ -75,7 +75,9 @@ def extract_water_bfactors_from_pdb(
     """
     try:
         pdb_file = PDBFile.read(pdb_path)
-        atoms = pdb_file.get_structure(model=1, altloc="occupancy", extra_fields=["b_factor"])
+        atoms = pdb_file.get_structure(
+            model=1, altloc="occupancy", extra_fields=["b_factor"]
+        )
 
         # Filter for water molecules (HOH or WAT)
         water_mask = (atoms.res_name == "HOH") | (atoms.res_name == "WAT")
@@ -85,8 +87,26 @@ def extract_water_bfactors_from_pdb(
         if normalization == "protein":
             # Standard amino acid residue names
             protein_residues = {
-                "ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS", "ILE",
-                "LEU", "LYS", "MET", "PHE", "PRO", "SER", "THR", "TRP", "TYR", "VAL",
+                "ALA",
+                "ARG",
+                "ASN",
+                "ASP",
+                "CYS",
+                "GLN",
+                "GLU",
+                "GLY",
+                "HIS",
+                "ILE",
+                "LEU",
+                "LYS",
+                "MET",
+                "PHE",
+                "PRO",
+                "SER",
+                "THR",
+                "TRP",
+                "TYR",
+                "VAL",
             }
             protein_mask = np.isin(atoms.res_name, list(protein_residues))
             norm_bfactors = atoms.b_factor[protein_mask]
@@ -104,11 +124,11 @@ def extract_water_bfactors_from_pdb(
         if len(water_atoms) == 0:
             return None
 
-        #extract PDB ID from filename (e.g., "3ilf_final.pdb" -> "3ilf")
+        # extract PDB ID from filename (e.g., "3ilf_final.pdb" -> "3ilf")
         pdb_id = pdb_path.stem.replace("_final", "")
 
-        #build DataFrame with one row per unique water residue
-        #water molecules have one oxygen atom, so we take unique (chain, res_id) pairs
+        # build DataFrame with one row per unique water residue
+        # water molecules have one oxygen atom, so we take unique (chain, res_id) pairs
         records = []
         seen = set()
         for i in range(len(water_atoms)):
@@ -118,15 +138,17 @@ def extract_water_bfactors_from_pdb(
             if key not in seen:
                 seen.add(key)
                 raw_bfactor = water_atoms.b_factor[i]
-                #z-score using whole-PDB statistics
+                # z-score using whole-PDB statistics
                 normalized = (raw_bfactor - pdb_mean) / pdb_std if pdb_std > 0 else 0.0
-                records.append({
-                    "pdb_id": pdb_id,
-                    "chain_id": chain_id,
-                    "res_id": res_id,
-                    "b_factor": raw_bfactor,
-                    "b_factor_normalized": normalized,
-                })
+                records.append(
+                    {
+                        "pdb_id": pdb_id,
+                        "chain_id": chain_id,
+                        "res_id": res_id,
+                        "b_factor": raw_bfactor,
+                        "b_factor_normalized": normalized,
+                    }
+                )
 
         return pd.DataFrame(records)
 
@@ -170,9 +192,13 @@ def load_all_bfactors(
     all_bfactors = []
 
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        futures = {executor.submit(_extract_bfactors_worker, task): task[1] for task in tasks}
+        futures = {
+            executor.submit(_extract_bfactors_worker, task): task[1] for task in tasks
+        }
 
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Extracting B-factors"):
+        for future in tqdm(
+            as_completed(futures), total=len(futures), desc="Extracting B-factors"
+        ):
             result = future.result()
             if result is not None:
                 all_bfactors.append(result)
@@ -181,11 +207,15 @@ def load_all_bfactors(
         raise ValueError("No B-factor data extracted from any PDB files")
 
     combined = pd.concat(all_bfactors, ignore_index=True)
-    logger.info(f"Extracted B-factors for {len(combined)} water molecules from {len(all_bfactors)} PDBs")
+    logger.info(
+        f"Extracted B-factors for {len(combined)} water molecules from {len(all_bfactors)} PDBs"
+    )
     return combined
 
 
-def merge_edia_with_bfactors(edia_df: pd.DataFrame, bfactor_df: pd.DataFrame) -> pd.DataFrame:
+def merge_edia_with_bfactors(
+    edia_df: pd.DataFrame, bfactor_df: pd.DataFrame
+) -> pd.DataFrame:
     """Merge EDIA data with B-factor data.
 
     Matching is done on (pdb_id, chain, residue_number):
@@ -200,20 +230,24 @@ def merge_edia_with_bfactors(edia_df: pd.DataFrame, bfactor_df: pd.DataFrame) ->
     Returns:
         Merged DataFrame with b_factor and b_factor_normalized columns added
     """
-    #rename B-factor columns to match EDIA column names
-    bfactor_renamed = bfactor_df.rename(columns={
-        "chain_id": "pdb_strandID",
-        "res_id": "pdb_seqNum",
-    })
+    # rename B-factor columns to match EDIA column names
+    bfactor_renamed = bfactor_df.rename(
+        columns={
+            "chain_id": "pdb_strandID",
+            "res_id": "pdb_seqNum",
+        }
+    )
 
-    #merge on the matching key
+    # merge on the matching key
     merged = edia_df.merge(
-        bfactor_renamed[["pdb_id", "pdb_strandID", "pdb_seqNum", "b_factor", "b_factor_normalized"]],
+        bfactor_renamed[
+            ["pdb_id", "pdb_strandID", "pdb_seqNum", "b_factor", "b_factor_normalized"]
+        ],
         on=["pdb_id", "pdb_strandID", "pdb_seqNum"],
         how="left",
     )
 
-    #report match statistics
+    # report match statistics
     n_total = len(merged)
     n_matched = merged["b_factor"].notna().sum()
     match_rate = 100 * n_matched / n_total if n_total > 0 else 0
@@ -226,7 +260,9 @@ def plot_ediam_waters(df: pd.DataFrame, output_dir: Path):
     """Plot histogram of EDIAm for all water molecules."""
     fig, ax = plt.subplots(figsize=(10, 6))
 
-    ax.hist(df["EDIAm"].dropna(), bins=50, edgecolor="black", alpha=0.7, color="steelblue")
+    ax.hist(
+        df["EDIAm"].dropna(), bins=50, edgecolor="black", alpha=0.7, color="steelblue"
+    )
 
     # Add threshold lines
     ax.axvline(x=0.4, color="red", linestyle="--", linewidth=2, label="EDIAm = 0.4")
@@ -247,12 +283,19 @@ def plot_ediam_waters(df: pd.DataFrame, output_dir: Path):
         f"mean = {mean_val:.3f}\n"
         f"median = {median_val:.3f}\n"
         f"─────────────\n"
-        f"< 0.4: {n_low:,} ({100*n_low/n_total:.1f}%)\n"
-        f"0.4–0.8: {n_mid:,} ({100*n_mid/n_total:.1f}%)\n"
-        f"≥ 0.8: {n_high:,} ({100*n_high/n_total:.1f}%)"
+        f"< 0.4: {n_low:,} ({100 * n_low / n_total:.1f}%)\n"
+        f"0.4–0.8: {n_mid:,} ({100 * n_mid / n_total:.1f}%)\n"
+        f"≥ 0.8: {n_high:,} ({100 * n_high / n_total:.1f}%)"
     )
-    ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=10,
-            verticalalignment="top", bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5))
+    ax.text(
+        0.02,
+        0.98,
+        textstr,
+        transform=ax.transAxes,
+        fontsize=10,
+        verticalalignment="top",
+        bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
+    )
 
     ax.set_xlabel("EDIAm Score", fontsize=12)
     ax.set_ylabel("Count", fontsize=12)
@@ -271,7 +314,9 @@ def plot_ediam_pdbs(df: pd.DataFrame, output_dir: Path):
 
     fig, ax = plt.subplots(figsize=(10, 6))
 
-    ax.hist(pdb_means.dropna(), bins=50, edgecolor="black", alpha=0.7, color="steelblue")
+    ax.hist(
+        pdb_means.dropna(), bins=50, edgecolor="black", alpha=0.7, color="steelblue"
+    )
 
     # Add threshold lines
     ax.axvline(x=0.4, color="red", linestyle="--", linewidth=2, label="EDIAm = 0.4")
@@ -292,12 +337,19 @@ def plot_ediam_pdbs(df: pd.DataFrame, output_dir: Path):
         f"mean = {mean_val:.3f}\n"
         f"median = {median_val:.3f}\n"
         f"─────────────\n"
-        f"< 0.4: {n_low:,} ({100*n_low/n_pdbs:.1f}%)\n"
-        f"0.4–0.8: {n_mid:,} ({100*n_mid/n_pdbs:.1f}%)\n"
-        f"≥ 0.8: {n_high:,} ({100*n_high/n_pdbs:.1f}%)"
+        f"< 0.4: {n_low:,} ({100 * n_low / n_pdbs:.1f}%)\n"
+        f"0.4–0.8: {n_mid:,} ({100 * n_mid / n_pdbs:.1f}%)\n"
+        f"≥ 0.8: {n_high:,} ({100 * n_high / n_pdbs:.1f}%)"
     )
-    ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=10,
-            verticalalignment="top", bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5))
+    ax.text(
+        0.02,
+        0.98,
+        textstr,
+        transform=ax.transAxes,
+        fontsize=10,
+        verticalalignment="top",
+        bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
+    )
 
     ax.set_xlabel("Mean EDIAm Score", fontsize=12)
     ax.set_ylabel("Number of PDBs", fontsize=12)
@@ -321,8 +373,15 @@ def plot_rsccs_waters(df: pd.DataFrame, output_dir: Path):
     mean_val = df["RSCCS"].mean()
     median_val = df["RSCCS"].median()
     textstr = f"n = {n_total:,}\nmean = {mean_val:.3f}\nmedian = {median_val:.3f}"
-    ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=10,
-            verticalalignment="top", bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5))
+    ax.text(
+        0.02,
+        0.98,
+        textstr,
+        transform=ax.transAxes,
+        fontsize=10,
+        verticalalignment="top",
+        bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
+    )
 
     ax.set_xlabel("RSCCS Score", fontsize=12)
     ax.set_ylabel("Count", fontsize=12)
@@ -347,8 +406,15 @@ def plot_rsccs_pdbs(df: pd.DataFrame, output_dir: Path):
     mean_val = pdb_means.mean()
     median_val = pdb_means.median()
     textstr = f"n = {n_pdbs:,} PDBs\nmean = {mean_val:.3f}\nmedian = {median_val:.3f}"
-    ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=10,
-            verticalalignment="top", bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5))
+    ax.text(
+        0.02,
+        0.98,
+        textstr,
+        transform=ax.transAxes,
+        fontsize=10,
+        verticalalignment="top",
+        bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
+    )
 
     ax.set_xlabel("Mean RSCCS Score", fontsize=12)
     ax.set_ylabel("Number of PDBs", fontsize=12)
@@ -378,7 +444,9 @@ def plot_bfactor_waters(df: pd.DataFrame, output_dir: Path):
 
     # Add cutoff lines at +1.5 and -1.5
     cutoff = 1.5
-    ax.axvline(x=cutoff, color="red", linestyle="--", linewidth=2, label=f"cutoff = ±{cutoff}")
+    ax.axvline(
+        x=cutoff, color="red", linestyle="--", linewidth=2, label=f"cutoff = ±{cutoff}"
+    )
     ax.axvline(x=-cutoff, color="red", linestyle="--", linewidth=2)
 
     # Add statistics
@@ -396,13 +464,20 @@ def plot_bfactor_waters(df: pd.DataFrame, output_dir: Path):
         f"mean = {mean_val:.2f}\n"
         f"median = {median_val:.2f}\n"
         f"─────────────\n"
-        f"< -{cutoff}: {n_below:,} ({100*n_below/n_total:.1f}%)\n"
-        f"-{cutoff} to {cutoff}: {n_within:,} ({100*n_within/n_total:.1f}%)\n"
-        f"> {cutoff}: {n_above:,} ({100*n_above/n_total:.1f}%)"
+        f"< -{cutoff}: {n_below:,} ({100 * n_below / n_total:.1f}%)\n"
+        f"-{cutoff} to {cutoff}: {n_within:,} ({100 * n_within / n_total:.1f}%)\n"
+        f"> {cutoff}: {n_above:,} ({100 * n_above / n_total:.1f}%)"
     )
-    ax.text(0.98, 0.98, textstr, transform=ax.transAxes, fontsize=10,
-            verticalalignment="top", horizontalalignment="right",
-            bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5))
+    ax.text(
+        0.98,
+        0.98,
+        textstr,
+        transform=ax.transAxes,
+        fontsize=10,
+        verticalalignment="top",
+        horizontalalignment="right",
+        bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
+    )
 
     ax.set_xlabel("Normalized B-factor (z-score)", fontsize=12)
     ax.set_ylabel("Count", fontsize=12)
@@ -436,7 +511,9 @@ def plot_bfactor_pdbs(df: pd.DataFrame, output_dir: Path):
 
     # Add cutoff line for high variability
     cutoff = 1.5
-    ax.axvline(x=cutoff, color="red", linestyle="--", linewidth=2, label=f"cutoff = {cutoff}")
+    ax.axvline(
+        x=cutoff, color="red", linestyle="--", linewidth=2, label=f"cutoff = {cutoff}"
+    )
 
     # Add statistics
     n_pdbs = len(pdb_stds)
@@ -452,12 +529,19 @@ def plot_bfactor_pdbs(df: pd.DataFrame, output_dir: Path):
         f"mean = {mean_val:.2f}\n"
         f"median = {median_val:.2f}\n"
         f"─────────────\n"
-        f"≤ {cutoff}: {n_below:,} ({100*n_below/n_pdbs:.1f}%)\n"
-        f"> {cutoff}: {n_above:,} ({100*n_above/n_pdbs:.1f}%)"
+        f"≤ {cutoff}: {n_below:,} ({100 * n_below / n_pdbs:.1f}%)\n"
+        f"> {cutoff}: {n_above:,} ({100 * n_above / n_pdbs:.1f}%)"
     )
-    ax.text(0.98, 0.98, textstr, transform=ax.transAxes, fontsize=10,
-            verticalalignment="top", horizontalalignment="right",
-            bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5))
+    ax.text(
+        0.98,
+        0.98,
+        textstr,
+        transform=ax.transAxes,
+        fontsize=10,
+        verticalalignment="top",
+        horizontalalignment="right",
+        bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
+    )
 
     ax.set_xlabel("Std Dev of Normalized B-factor (z-score)", fontsize=12)
     ax.set_ylabel("Number of PDBs", fontsize=12)
@@ -483,13 +567,25 @@ def plot_ediam_bfactor_correlation(df: pd.DataFrame, output_dir: Path):
 
     # Left: Scatter plot
     ax1 = axes[0]
-    ax1.scatter(df_valid["b_factor_normalized"], df_valid["EDIAm"], alpha=0.1, s=5, c="steelblue")
+    ax1.scatter(
+        df_valid["b_factor_normalized"],
+        df_valid["EDIAm"],
+        alpha=0.1,
+        s=5,
+        c="steelblue",
+    )
 
     # Add correlation coefficient
     corr = df_valid["EDIAm"].corr(df_valid["b_factor_normalized"])
-    ax1.text(0.02, 0.98, f"r = {corr:.3f}\nn = {len(df_valid):,}",
-             transform=ax1.transAxes, fontsize=12,
-             verticalalignment="top", bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5))
+    ax1.text(
+        0.02,
+        0.98,
+        f"r = {corr:.3f}\nn = {len(df_valid):,}",
+        transform=ax1.transAxes,
+        fontsize=12,
+        verticalalignment="top",
+        bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
+    )
 
     ax1.set_xlabel("Normalized B-factor (z-score)", fontsize=12)
     ax1.set_ylabel("EDIAm Score", fontsize=12)
@@ -497,7 +593,13 @@ def plot_ediam_bfactor_correlation(df: pd.DataFrame, output_dir: Path):
 
     # Right: Hexbin density plot
     ax2 = axes[1]
-    hb = ax2.hexbin(df_valid["b_factor_normalized"], df_valid["EDIAm"], gridsize=50, cmap="YlOrRd", mincnt=1)
+    hb = ax2.hexbin(
+        df_valid["b_factor_normalized"],
+        df_valid["EDIAm"],
+        gridsize=50,
+        cmap="YlOrRd",
+        mincnt=1,
+    )
     fig.colorbar(hb, ax=ax2, label="Count")
 
     ax2.set_xlabel("Normalized B-factor (z-score)", fontsize=12)
@@ -613,7 +715,9 @@ def main():
 
     # Extract B-factors if needed
     if need_bfactor:
-        logger.info(f"\nExtracting B-factors from PDB files (normalization: {args.bfactor_normalization})...")
+        logger.info(
+            f"\nExtracting B-factors from PDB files (normalization: {args.bfactor_normalization})..."
+        )
 
         if args.bfactor_only:
             # Get PDB IDs from text file
@@ -623,7 +727,10 @@ def main():
             pdb_ids = df["pdb_id"].unique().tolist()
 
         bfactor_df = load_all_bfactors(
-            args.pdb_dir, pdb_ids, args.num_workers, normalization=args.bfactor_normalization
+            args.pdb_dir,
+            pdb_ids,
+            args.num_workers,
+            normalization=args.bfactor_normalization,
         )
 
         # Merge with EDIA data if both are available

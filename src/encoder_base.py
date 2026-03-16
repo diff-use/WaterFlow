@@ -80,6 +80,7 @@ def build_encoder(config: dict, device: torch.device) -> BaseProteinEncoder:
     encoder_cls = get_encoder_class(encoder_type)
     return encoder_cls.from_config(config, device)
 
+
 class BaseProteinEncoder(ABC, nn.Module):
     """
     Abstract base class for protein encoders.
@@ -134,6 +135,7 @@ class BaseProteinEncoder(ABC, nn.Module):
         """
         raise NotImplementedError("Subclasses must implement from_config")
 
+
 @register_encoder("esm")
 @register_encoder("slae")
 class CachedEmbeddingEncoder(BaseProteinEncoder):
@@ -159,7 +161,9 @@ class CachedEmbeddingEncoder(BaseProteinEncoder):
     are scalar-only.
     """
 
-    def __init__(self, embedding_key: str, encoder_type: str, embedding_dim: int | None = None):
+    def __init__(
+        self, embedding_key: str, encoder_type: str, embedding_dim: int | None = None
+    ):
         """
         Initialize CachedEmbeddingEncoder.
 
@@ -193,7 +197,9 @@ class CachedEmbeddingEncoder(BaseProteinEncoder):
         """Return encoder type identifier."""
         return self._encoder_type
 
-    def forward(self, data: HeteroData) -> tuple[torch.Tensor, torch.Tensor, tuple | None]:
+    def forward(
+        self, data: HeteroData
+    ) -> tuple[torch.Tensor, torch.Tensor, tuple | None]:
         """
         Read cached embeddings and return (s, V, None).
 
@@ -207,13 +213,13 @@ class CachedEmbeddingEncoder(BaseProteinEncoder):
             V: (N, 0, 3)         — empty vector features
             pp_edge_attr: None   — cached embedding encoders don't process edges
         """
-        if self._embedding_key not in data['protein']:
+        if self._embedding_key not in data["protein"]:
             raise KeyError(
                 f"{self._encoder_type.upper()} encoder requires cached embeddings. "
                 f"Please provide pre-computed '{self._embedding_key}' in data['protein']."
             )
 
-        embeddings = data['protein'][self._embedding_key]
+        embeddings = data["protein"][self._embedding_key]
 
         # Infer dimension on first forward
         if self._embedding_dim is None:
