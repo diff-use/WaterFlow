@@ -440,14 +440,14 @@ class EdgeUpdate(nn.Module):
         self,
         n_node_scalars: int,          # S_node (e.g., 256)
         s_edge_width: int,            # fixed model edge width used everywhere
-        update_w_distance: bool = False,
+        update_w_distance_features: bool = False,
         distance_dim: int = 0,        # e.g., RBF size
     ):
         super().__init__()
-        self.update_w_distance = update_w_distance
+        self.update_w_distance_features = update_w_distance_features
         self.s_edge_width = s_edge_width
 
-        in_dim = (2 * n_node_scalars) + s_edge_width + (distance_dim if update_w_distance else 0)
+        in_dim = (2 * n_node_scalars) + s_edge_width + (distance_dim if update_w_distance_features else 0)
 
         self.edge_mlp = nn.Sequential(
             nn.Linear(in_dim, s_edge_width),
@@ -474,7 +474,7 @@ class EdgeUpdate(nn.Module):
         src, dst = edge_index[0], edge_index[1]
         parts = [s_node[src], s_node[dst], s_edge]
         
-        if self.update_w_distance:
+        if self.update_w_distance_features:
             parts.append(distance_feat)
 
         h = torch.cat(parts, dim=-1)                     # (E, 2*S_node + s_edge_width (+D))
