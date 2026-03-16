@@ -202,6 +202,8 @@ class TestAlignSlaeToGeometry:
         """Same atoms in same order align exactly."""
         from unittest.mock import patch
 
+        from scripts import generate_slae_embeddings
+
         atom_specs = [
             ("A", 1, "", "N"),
             ("A", 1, "", "CA"),
@@ -217,8 +219,8 @@ class TestAlignSlaeToGeometry:
             ("A", 1, "", "O"),
         ]
 
-        with patch(
-            "scripts.generate_slae_embeddings.PROTEIN_ATOMS", self.MOCK_PROTEIN_ATOMS
+        with patch.object(
+            generate_slae_embeddings, "PROTEIN_ATOMS", self.MOCK_PROTEIN_ATOMS
         ):
             from scripts.generate_slae_embeddings import align_slae_to_geometry
 
@@ -241,6 +243,8 @@ class TestAlignSlaeToGeometry:
         """Atoms reordered correctly when geometry order differs."""
         from unittest.mock import patch
 
+        from scripts import generate_slae_embeddings
+
         atom_specs = [
             ("A", 1, "", "N"),
             ("A", 1, "", "CA"),
@@ -257,8 +261,8 @@ class TestAlignSlaeToGeometry:
             ("A", 1, "", "N"),
         ]
 
-        with patch(
-            "scripts.generate_slae_embeddings.PROTEIN_ATOMS", self.MOCK_PROTEIN_ATOMS
+        with patch.object(
+            generate_slae_embeddings, "PROTEIN_ATOMS", self.MOCK_PROTEIN_ATOMS
         ):
             from scripts.generate_slae_embeddings import align_slae_to_geometry
 
@@ -281,6 +285,8 @@ class TestAlignSlaeToGeometry:
         """Non-SLAE atoms (e.g., 'XX1') get zero embeddings."""
         from unittest.mock import patch
 
+        from scripts import generate_slae_embeddings
+
         atom_specs = [
             ("A", 1, "", "N"),
             ("A", 1, "", "CA"),
@@ -294,8 +300,8 @@ class TestAlignSlaeToGeometry:
             ("A", 1, "", "CA"),
         ]
 
-        with patch(
-            "scripts.generate_slae_embeddings.PROTEIN_ATOMS", self.MOCK_PROTEIN_ATOMS
+        with patch.object(
+            generate_slae_embeddings, "PROTEIN_ATOMS", self.MOCK_PROTEIN_ATOMS
         ):
             from scripts.generate_slae_embeddings import align_slae_to_geometry
 
@@ -319,6 +325,8 @@ class TestAlignSlaeToGeometry:
         """Same res_id in different chains distinguished correctly."""
         from unittest.mock import patch
 
+        from scripts import generate_slae_embeddings
+
         atom_specs = [
             ("A", 1, "", "N"),
             ("A", 1, "", "CA"),
@@ -335,8 +343,8 @@ class TestAlignSlaeToGeometry:
             ("A", 1, "", "CA"),
         ]
 
-        with patch(
-            "scripts.generate_slae_embeddings.PROTEIN_ATOMS", self.MOCK_PROTEIN_ATOMS
+        with patch.object(
+            generate_slae_embeddings, "PROTEIN_ATOMS", self.MOCK_PROTEIN_ATOMS
         ):
             from scripts.generate_slae_embeddings import align_slae_to_geometry
 
@@ -359,6 +367,8 @@ class TestAlignSlaeToGeometry:
         """Insertion codes differentiate atoms properly."""
         from unittest.mock import patch
 
+        from scripts import generate_slae_embeddings
+
         atom_specs = [
             ("A", 1, "", "N"),
             ("A", 1, "", "CA"),
@@ -374,8 +384,8 @@ class TestAlignSlaeToGeometry:
             ("A", 1, "", "CA"),
         ]
 
-        with patch(
-            "scripts.generate_slae_embeddings.PROTEIN_ATOMS", self.MOCK_PROTEIN_ATOMS
+        with patch.object(
+            generate_slae_embeddings, "PROTEIN_ATOMS", self.MOCK_PROTEIN_ATOMS
         ):
             from scripts.generate_slae_embeddings import align_slae_to_geometry
 
@@ -398,6 +408,8 @@ class TestAlignSlaeToGeometry:
         """Returns shape (0, embedding_dim) for empty geometry."""
         from unittest.mock import patch
 
+        from scripts import generate_slae_embeddings
+
         atom_specs = [
             ("A", 1, "", "N"),
             ("A", 1, "", "CA"),
@@ -406,8 +418,8 @@ class TestAlignSlaeToGeometry:
 
         geometry_atom_info = []
 
-        with patch(
-            "scripts.generate_slae_embeddings.PROTEIN_ATOMS", self.MOCK_PROTEIN_ATOMS
+        with patch.object(
+            generate_slae_embeddings, "PROTEIN_ATOMS", self.MOCK_PROTEIN_ATOMS
         ):
             from scripts.generate_slae_embeddings import align_slae_to_geometry
 
@@ -430,6 +442,8 @@ class TestAlignSlaeToGeometry:
 
         import numpy as np
 
+        from scripts import generate_slae_embeddings
+
         # Empty SLAE data
         slae_emb = torch.zeros(0, 128)
         slae_residue_idx = torch.zeros(0, dtype=torch.long)
@@ -443,8 +457,8 @@ class TestAlignSlaeToGeometry:
             ("A", 1, "", "CA"),
         ]
 
-        with patch(
-            "scripts.generate_slae_embeddings.PROTEIN_ATOMS", self.MOCK_PROTEIN_ATOMS
+        with patch.object(
+            generate_slae_embeddings, "PROTEIN_ATOMS", self.MOCK_PROTEIN_ATOMS
         ):
             from scripts.generate_slae_embeddings import align_slae_to_geometry
 
@@ -466,6 +480,8 @@ class TestAlignSlaeToGeometry:
         """Handles negative res_ids (like HIS A -1 in 6eey)."""
         from unittest.mock import patch
 
+        from scripts import generate_slae_embeddings
+
         atom_specs = [
             ("A", -1, "", "N"),
             ("A", -1, "", "CA"),
@@ -481,8 +497,8 @@ class TestAlignSlaeToGeometry:
             ("A", -1, "", "N"),
         ]
 
-        with patch(
-            "scripts.generate_slae_embeddings.PROTEIN_ATOMS", self.MOCK_PROTEIN_ATOMS
+        with patch.object(
+            generate_slae_embeddings, "PROTEIN_ATOMS", self.MOCK_PROTEIN_ATOMS
         ):
             from scripts.generate_slae_embeddings import align_slae_to_geometry
 
@@ -504,6 +520,8 @@ class TestAlignSlaeToGeometry:
     def test_with_6eey_pdb_subset(self, make_slae_test_data):
         """Integration test with real PDB atom patterns (6eey style)."""
         from unittest.mock import patch
+
+        from scripts import generate_slae_embeddings
 
         # Simulate 6eey-like structure: multiple chains, insertion codes, gaps
         atom_specs = [
@@ -536,8 +554,8 @@ class TestAlignSlaeToGeometry:
             ("A", 1, "", "OXT"),  # Non-canonical - not in SLAE
         ]
 
-        with patch(
-            "scripts.generate_slae_embeddings.PROTEIN_ATOMS", self.MOCK_PROTEIN_ATOMS
+        with patch.object(
+            generate_slae_embeddings, "PROTEIN_ATOMS", self.MOCK_PROTEIN_ATOMS
         ):
             from scripts.generate_slae_embeddings import align_slae_to_geometry
 
