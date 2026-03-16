@@ -198,15 +198,30 @@ def compute_edge_geometry(
     Supports both homogeneous graphs (single pos tensor) and bipartite graphs
     (separate pos_src and pos_dst tensors).
 
+    The function computes displacement vectors (pos_dst - pos_src) for each edge,
+    then computes distances as the L2 norm. Distances are clamped to a minimum value
+    to prevent division by zero during normalization. Unit vectors are computed by
+    dividing displacement vectors by the clamped distances.
+
+    Note:
+        For edges with very small displacements (below clamp_min), the returned
+        distance will be clamp_min and the unit vector will have a norm less than 1.
+        This is a numerical stability tradeoff to avoid NaN values from division
+        by near-zero distances.
+
     Args:
         pos: (N_src, 3) source node positions
         edge_index: (2, E) edge indices [src_indices, dst_indices]
         pos_dst: (N_dst, 3) destination node positions. If None, uses pos for both.
-        clamp_min: Minimum distance to clamp to avoid division by zero
+        clamp_min: Minimum distance value after computing L2 norm. Distances below
+            this threshold are set to clamp_min before normalizing displacement
+            vectors. Default is 1e-5.
 
     Returns:
-        distances: (E,) edge distances
-        unit_vectors: (E, 3) unit displacement vectors from source to destination
+        distances: (E,) clamped edge distances (minimum value is clamp_min)
+        unit_vectors: (E, 3) displacement vectors normalized by clamped distances.
+            For typical edges these are unit vectors; for edges with true distance
+            below clamp_min, these will have norm < 1.
     """
     src_idx, dst_idx = edge_index[0], edge_index[1]
     pos_src = pos
