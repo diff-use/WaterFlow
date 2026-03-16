@@ -27,6 +27,42 @@ from torch import Tensor
 from tqdm import tqdm
 
 from src.constants import NUM_RBF, RBF_CUTOFF
+from torch_geometric.nn import knn
+
+
+def build_knn_edges(
+    src_pos: torch.Tensor,
+    dst_pos: torch.Tensor,
+    k: int,
+    batch_src: torch.Tensor | None = None,
+    batch_dst: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """
+    Build KNN edges from source to destination nodes.
+
+    Args:
+        src_pos: (N_src, 3) source node positions
+        dst_pos: (N_dst, 3) destination node positions
+        k: Number of nearest neighbors per source node
+        batch_src: (N_src,) batch indices for source nodes, or None if single graph
+        batch_dst: (N_dst,) batch indices for destination nodes, or None if single graph
+
+    Returns:
+        (2, E) edge index tensor with source indices in row 0, destination in row 1.
+        Self-edges are removed for homogeneous graphs (src_pos is dst_pos).
+    """
+    if src_pos.numel() == 0 or dst_pos.numel() == 0:
+        return torch.empty(2, 0, dtype=torch.long, device=src_pos.device)
+
+    idx = knn(x=dst_pos, y=src_pos, k=k, batch_x=batch_dst, batch_y=batch_src)
+
+    # remove self-edges if homogeneous
+    if src_pos.data_ptr() == dst_pos.data_ptr():
+        mask = idx[0] != idx[1]
+        idx = idx[:, mask]
+
+    return idx.unique(dim=1)
+
 
 def setup_logging_for_tqdm(
     level: str = "INFO",

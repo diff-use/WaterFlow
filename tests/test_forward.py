@@ -263,7 +263,11 @@ def test_training_step_no_nan_tripwire(device):
         hm.watch(model.vfield_head, "vfield_head")
 
         for step in range(5):
-            out = fm.training_step(data, opt, grad_clip=1.0, use_self_conditioning=False)
+            opt.zero_grad()
+            out = fm.training_step(data, use_self_conditioning=False)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            opt.step()
+
             loss = out["loss"]
             assert isinstance(loss, float)
             assert loss == loss, "loss is NaN"
@@ -570,7 +574,7 @@ class TestVelocityFieldProperties:
         # Test at multiple t values
         for t_val in [0.0, 0.25, 0.5, 0.75, 1.0]:
             t = torch.tensor([t_val], device=device)
-            v_pred = model(data, t, sc=None)
+            v_pred = model(data, t, self_cond=None)
 
             assert torch.isfinite(v_pred).all(), \
                 f"Velocity has NaN/Inf at t={t_val}"
@@ -600,8 +604,8 @@ class TestVelocityFieldProperties:
         t0 = torch.tensor([0.1], device=device)
         t1 = torch.tensor([0.9], device=device)
 
-        v0 = model(data, t0, sc=None)
-        v1 = model(data, t1, sc=None)
+        v0 = model(data, t0, self_cond=None)
+        v1 = model(data, t1, self_cond=None)
 
         # Velocities should be different
         diff = torch.norm(v0 - v1, dim=-1).mean().item()

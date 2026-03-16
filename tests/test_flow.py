@@ -329,7 +329,7 @@ class TestFlowWaterGVP:
         sc = {'x1_pred': torch.randn(n_water, 3, device=device)}
         t = torch.tensor([0.5], device=device)
 
-        v_pred = model(simple_hetero_data, t, sc=sc)
+        v_pred = model(simple_hetero_data, t, self_cond=sc)
 
         assert v_pred.shape == (n_water, 3)
 

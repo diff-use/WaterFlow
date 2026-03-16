@@ -351,7 +351,9 @@ class GVPEncoder(BaseProteinEncoder):
         """Return encoder type identifier."""
         return 'gvp'
 
-    def forward(self, data: HeteroData) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self, data: HeteroData
+    ) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
         """
         Encode protein data.
 
@@ -359,7 +361,8 @@ class GVPEncoder(BaseProteinEncoder):
             data: HeteroData with protein nodes
 
         Returns:
-            Tuple of (s, V) features
+            Tuple of (s, V, pp_edge_attr) where pp_edge_attr is None
+            (GVP uses cached geometric edge features)
         """
         # Convert HeteroData to homogeneous Data for GVP encoder
         enc_data = make_encoder_data(data)
@@ -367,7 +370,7 @@ class GVPEncoder(BaseProteinEncoder):
         with torch.set_grad_enabled(not self._freeze):
             s, V = self.encoder(enc_data)
 
-        return s, V
+        return s, V, None
 
     @classmethod
     def from_config(cls, config: dict, device: torch.device) -> GVPEncoder:

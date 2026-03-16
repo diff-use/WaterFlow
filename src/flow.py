@@ -2,7 +2,6 @@
 Flow matching model components for water placement prediction.
 
 This module provides:
-- build_knn_edges: KNN edge construction for graph building
 - ProteinWaterUpdate: Heterogeneous GVP message passing across 4 edge types
 - FlowWaterGVP: End-to-end flow model combining encoder + GVP updates + vector field head
 - FlowMatcher: High-level training, validation, and numerical integration interface
@@ -17,48 +16,13 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 from torch_geometric.data import Batch, HeteroData
-from torch_geometric.nn import knn
 from torch_scatter import scatter_mean
 from tqdm.auto import tqdm
 
 from src.constants import ALL_EDGE_TYPES, EDGE_PP, EDGE_PW, EDGE_WP, EDGE_WW, NUM_RBF
 from src.encoder_base import BaseProteinEncoder
 from src.gvp import GVP, GVPMultiEdgeConv
-from src.utils import ot_coupling
-
-
-def build_knn_edges(
-    src_pos: torch.Tensor,
-    dst_pos: torch.Tensor,
-    k: int,
-    batch_src: torch.Tensor | None = None,
-    batch_dst: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """
-    Build KNN edges from source to destination nodes.
-
-    Args:
-        src_pos: (N_src, 3) source node positions
-        dst_pos: (N_dst, 3) destination node positions
-        k: Number of nearest neighbors per source node
-        batch_src: (N_src,) batch indices for source nodes, or None if single graph
-        batch_dst: (N_dst,) batch indices for destination nodes, or None if single graph
-
-    Returns:
-        (2, E) edge index tensor with source indices in row 0, destination in row 1.
-        Self-edges are removed for homogeneous graphs (src_pos is dst_pos).
-    """
-    if src_pos.numel() == 0 or dst_pos.numel() == 0:
-        return torch.empty(2, 0, dtype=torch.long, device=src_pos.device)
-
-    idx = knn(x=dst_pos, y=src_pos, k=k, batch_x=batch_dst, batch_y=batch_src)
-
-    # remove self-edges if homogeneous
-    if src_pos.data_ptr() == dst_pos.data_ptr():
-        mask = idx[0] != idx[1]
-        idx = idx[:, mask]
-
-    return idx.unique(dim=1)
+from src.utils import build_knn_edges, ot_coupling
 
 
 class ProteinWaterUpdate(nn.Module):
@@ -90,13 +54,16 @@ class ProteinWaterUpdate(nn.Module):
             rbf_dim: Number of radial basis functions for distance encoding
             layers: Number of GVP message passing layers
             drop_rate: Dropout rate for regularization
-            n_message_gvps: Number of GVPs in message function per edge type
-            n_update_gvps: Number of GVPs in node update function
+            n_message_gvps: Number of GVP modules in each edge-type's message function
+                (distinct from `layers` which controls message-passing iterations)
+            n_update_gvps: Number of GVP modules in the node update function
+                (applied after aggregating messages from all edge types)
             vector_gate: Whether to use vector gating in GVP layers
             aggr_edges: Edge aggregation method ('sum' or 'mean')
             use_dst_feats: Whether to include destination features in messages
         """
         super().__init__()
+        # Unpack hidden dimensions: s_h = scalar hidden dim, v_h = vector hidden dim
         s_h, v_h = hidden_dims
 
         etypes = ALL_EDGE_TYPES
@@ -226,8 +193,9 @@ class ProteinWaterUpdate(nn.Module):
             k_ww: Number of nearest neighbors for water-water edges
             k_wp: Number of nearest neighbors for water-protein edges
             pp_edge_attr: Optional encoder-learned edge features (s_edge, V_edge) for PP edges.
-                If provided, uses learned scalar features with original cached unit vectors.
-                If None, uses cached geometric edge features from the dataset.
+                If provided, uses encoder-learned scalar features (s_edge) combined with
+                cached edge direction unit vectors (edge_unit, pre-normalized at preprocessing).
+                If None, uses cached geometric edge features (edge_rbf, edge_unit) from the dataset.
 
         Returns:
             Updated x_dict with same structure as input
@@ -241,7 +209,7 @@ class ProteinWaterUpdate(nn.Module):
             k_wp=k_wp,
         )
 
-        # PP edge features: encoder-provided > cached
+        # PP edge features: encoder-provided take priority over cached geometric features
         cached_edge_attr_dict = {}
         if EDGE_PP in data.edge_types:
             pp_edge = data[EDGE_PP]
@@ -299,8 +267,10 @@ class FlowWaterGVP(nn.Module):
             edge_scalar_dim: Dimension of edge scalar features (typically NUM_RBF)
             layers: Number of heterogeneous GVP message passing layers
             drop_rate: Dropout rate for regularization
-            n_message_gvps: Number of GVPs in message function per edge type
-            n_update_gvps: Number of GVPs in node update function
+            n_message_gvps: Number of GVP modules in each edge-type's message function
+                (distinct from `layers` which controls message-passing iterations)
+            n_update_gvps: Number of GVP modules in the node update function
+                (applied after aggregating messages from all edge types)
             vector_gate: Whether to use vector gating in GVP layers
             k_pw: K nearest neighbors for protein-water edges
             k_ww: K nearest neighbors for water-water edges
@@ -370,7 +340,7 @@ class FlowWaterGVP(nn.Module):
             nn.LayerNorm(s_h),
         )
 
-        # water vector field head: (s,v) -> (s_h//4, 1) -> single vector channel
+        # Water vector field head: project (s_h, v_h) -> (s_h // 4, 1) -> single vector channel
         self.vfield_head = GVP(
             in_dims=hidden_dims,
             out_dims=(s_h // 4, 1),
@@ -381,17 +351,21 @@ class FlowWaterGVP(nn.Module):
         self,
         data: HeteroData,
         t: torch.Tensor,
-        sc: dict[str, torch.Tensor] | None = None,
+        self_cond: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """
         Predict velocity field for water nodes given protein context and time.
 
         Args:
             data: HeteroData with:
-                - 'protein' nodes (may include symmetry mates): pos (N_p, 3), x (N_p, feat_dim)
-                - 'water' nodes: pos (N_w, 3), x (N_w, 16)
+                - 'protein' nodes (may include symmetry mates):
+                    positions: (N_p, 3) Cartesian coordinates
+                    features: (N_p, feat_dim) element one-hot or encoder embeddings
+                - 'water' nodes:
+                    positions: (N_w, 3) Cartesian coordinates
+                    features: (N_w, 16) element one-hot encoding
             t: (B,) flow time per complex in batch, values in [0, 1]
-            sc: Optional self-conditioning dict with 'x1_pred' key containing
+            self_cond: Optional self-conditioning dict with 'x1_pred' key containing
                 previous prediction (N_w, 3) for iterative refinement
 
         Returns:
@@ -427,8 +401,8 @@ class FlowWaterGVP(nn.Module):
         )
 
         # self conditioning
-        if sc is not None and ("x1_pred" in sc) and sc["x1_pred"] is not None:
-            delta = sc["x1_pred"] - data["water"].pos
+        if self_cond is not None and ("x1_pred" in self_cond) and self_cond["x1_pred"] is not None:
+            delta = self_cond["x1_pred"] - data["water"].pos
             delta_vec = delta.unsqueeze(1)
 
             # vector conditioning (equivariant)
@@ -549,6 +523,9 @@ class FlowMatcher:
 
         Returns dict with 'loss', 'rmsd', 'sigma'.
         """
+        if accumulation_steps < 1:
+            raise ValueError(f"accumulation_steps must be >= 1, got {accumulation_steps}")
+
         self.model.train()
         device = batch["protein"].pos.device
 
@@ -576,17 +553,17 @@ class FlowMatcher:
                 x_t = x_t + indicator * mask * eps
 
         # self-conditioning
-        sc = None
+        self_cond = None
         if use_self_conditioning and torch.rand(1).item() < self.p_self_cond:
             with torch.no_grad():
                 batch["water"].pos = x_t
-                v_sc = self.model(batch, t, sc=None)
-                x1_sc = x_t + (1.0 - t_per_atom) * v_sc
-            sc = {"x1_pred": x1_sc}
+                v_pred_sc = self.model(batch, t, self_cond=None)
+                x1_pred_sc = x_t + (1.0 - t_per_atom) * v_pred_sc
+            self_cond = {"x1_pred": x1_pred_sc}
 
         # forward pass
         batch["water"].pos = x_t
-        v_pred = self.model(batch, t, sc=sc)
+        v_pred = self.model(batch, t, self_cond=self_cond)
 
         # target velocity
         v_target = x1_star - x0_star
@@ -656,7 +633,7 @@ class FlowMatcher:
         x_t = (1.0 - t_per_atom) * x0_star + t_per_atom * x1_star
 
         batch["water"].pos = x_t
-        v_pred = self.model(batch, t, sc=None)
+        v_pred = self.model(batch, t, self_cond=None)
         v_target = x1_star - x0_star
 
         w = 1.0 / (self.loss_eps + (1.0 - t_per_atom))
@@ -778,15 +755,15 @@ class FlowMatcher:
             t = t_scalar.expand(num_graphs)  # (num_graphs,) all same value
 
             g["water"].pos = x
-            sc = {"x1_pred": x1_pred_ema} if use_sc else None
-            v = self.model(g, t, sc=sc)
+            self_cond = {"x1_pred": x1_pred_ema} if use_sc else None
+            v = self.model(g, t, self_cond=self_cond)
             x = x + dt * v
 
             if use_sc:
                 t_next_scalar = ts[i + 1]
                 t_next = t_next_scalar.expand(num_graphs)
                 g["water"].pos = x
-                v_next = self.model(g, t_next, sc={"x1_pred": x1_pred_ema})
+                v_next = self.model(g, t_next, self_cond={"x1_pred": x1_pred_ema})
                 x1_pred_now = x + (1.0 - t_next_scalar) * v_next
                 x1_pred_ema = (
                     1.0 - sc_ema_alpha
@@ -884,8 +861,8 @@ class FlowMatcher:
 
             def f(xpos, t_tensor):
                 g["water"].pos = xpos
-                sc = {"x1_pred": x1_pred_ema} if use_sc else None
-                return self.model(g, t_tensor, sc=sc)
+                self_cond = {"x1_pred": x1_pred_ema} if use_sc else None
+                return self.model(g, t_tensor, self_cond=self_cond)
 
             k1 = f(x, t0)
             k2 = f(x + 0.5 * dt * k1, (t0_scalar + 0.5 * dt).expand(num_graphs))
@@ -898,7 +875,7 @@ class FlowMatcher:
                 t1_scalar = ts[step + 1]
                 t1 = t1_scalar.expand(num_graphs)
                 g["water"].pos = x
-                v_next = self.model(g, t1, sc={"x1_pred": x1_pred_ema})
+                v_next = self.model(g, t1, self_cond={"x1_pred": x1_pred_ema})
                 x1_pred_now = x + (1.0 - t1_scalar) * v_next
                 x1_pred_ema = (
                     1.0 - sc_ema_alpha

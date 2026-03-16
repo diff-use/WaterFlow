@@ -38,7 +38,9 @@ class BaseProteinEncoder(ABC, nn.Module):
         pass
 
     @abstractmethod
-    def forward(self, data: HeteroData) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self, data: HeteroData
+    ) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
         """
         Encode protein data.
 
@@ -46,9 +48,11 @@ class BaseProteinEncoder(ABC, nn.Module):
             data: HeteroData with protein nodes
 
         Returns:
-            tuple of (s, V) where:
+            tuple of (s, V, pp_edge_attr) where:
                 s: (N, scalar_dim) scalar features
                 V: (N, vector_dim, 3) vector features
+                pp_edge_attr: Optional (s_edge, V_edge) encoder-learned edge features,
+                    or None to use cached geometric features
         """
         pass
 
