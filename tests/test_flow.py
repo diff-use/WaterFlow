@@ -16,7 +16,7 @@ from src.flow import (
     ProteinWaterUpdate,
     build_knn_edges,
 )
-from src.gvp_encoder import GVPEncoder, ProteinGVPEncoder
+from src.gvp_encoder import GVPEncoder, ProteinGVPEncoder, make_gvp_encoder_data
 
 
 @pytest.fixture
@@ -143,15 +143,15 @@ class TestBuildKnnEdges:
 class TestMakeEncoderData:
     
     def test_basic_output(self, simple_hetero_data):
-        enc_data = GVPEncoder.make_encoder_data(simple_hetero_data)
+        enc_data = make_gvp_encoder_data(simple_hetero_data)
 
         assert isinstance(enc_data, Data)
         assert hasattr(enc_data, 'x')
         assert hasattr(enc_data, 'pos')
         assert hasattr(enc_data, 'edge_index')
-    
+
     def test_shapes(self, simple_hetero_data):
-        enc_data = GVPEncoder.make_encoder_data(simple_hetero_data)
+        enc_data = make_gvp_encoder_data(simple_hetero_data)
 
         n_nodes = simple_hetero_data['protein'].pos.size(0)
         n_edges = simple_hetero_data['protein', 'pp', 'protein'].edge_index.size(1)
@@ -159,20 +159,20 @@ class TestMakeEncoderData:
         assert enc_data.x.shape[0] == n_nodes
         assert enc_data.pos.shape == (n_nodes, 3)
         assert enc_data.edge_index.shape == (2, n_edges)
-    
+
     def test_batch_preserved(self, batched_hetero_data):
-        enc_data = GVPEncoder.make_encoder_data(batched_hetero_data)
+        enc_data = make_gvp_encoder_data(batched_hetero_data)
 
         assert hasattr(enc_data, 'batch')
         assert enc_data.batch.shape[0] == batched_hetero_data['protein'].pos.size(0)
-    
+
     def test_no_edges(self, device):
         data = HeteroData()
         data['protein'].pos = torch.randn(10, 3, device=device)
         data['protein'].x = torch.randn(10, 16, device=device)
         # No edges defined
 
-        enc_data = GVPEncoder.make_encoder_data(data)
+        enc_data = make_gvp_encoder_data(data)
 
         assert enc_data.edge_index.shape == (2, 0)
 
@@ -262,7 +262,7 @@ class TestFlowWaterGVP:
         base_encoder = ProteinGVPEncoder(
             node_scalar_in=16,
             hidden_dims=(64, 8),
-            edge_scalar_in=16,
+            n_edge_scalar_in=16,
             pool_residue=False,
         ).to(device)
         encoder = GVPEncoder(encoder=base_encoder, freeze=False)
@@ -283,7 +283,7 @@ class TestFlowWaterGVP:
         base_encoder = ProteinGVPEncoder(
             node_scalar_in=16,
             hidden_dims=(64, 8),
-            edge_scalar_in=16,
+            n_edge_scalar_in=16,
             pool_residue=False,
         ).to(device)
         encoder = GVPEncoder(encoder=base_encoder, freeze=False)
@@ -312,7 +312,7 @@ class TestFlowWaterGVP:
         base_encoder = ProteinGVPEncoder(
             node_scalar_in=16,
             hidden_dims=(64, 8),
-            edge_scalar_in=16,
+            n_edge_scalar_in=16,
             pool_residue=False,
         ).to(device)
         encoder = GVPEncoder(encoder=base_encoder, freeze=False)
@@ -342,7 +342,7 @@ class TestFlowMatcher:
         base_encoder = ProteinGVPEncoder(
             node_scalar_in=16,
             hidden_dims=(64, 8),
-            edge_scalar_in=16,
+            n_edge_scalar_in=16,
             pool_residue=False,
         ).to(device)
         encoder = GVPEncoder(encoder=base_encoder, freeze=False)
@@ -444,7 +444,7 @@ class TestDistortion:
         base_encoder = ProteinGVPEncoder(
             node_scalar_in=16,
             hidden_dims=(64, 8),
-            edge_scalar_in=16,
+            n_edge_scalar_in=16,
             pool_residue=False,
         ).to(device)
         encoder = GVPEncoder(encoder=base_encoder, freeze=False)
@@ -476,7 +476,7 @@ class TestEdgeCases:
         base_encoder = ProteinGVPEncoder(
             node_scalar_in=16,
             hidden_dims=(64, 8),
-            edge_scalar_in=16,
+            n_edge_scalar_in=16,
             pool_residue=False,
         ).to(device)
         encoder = GVPEncoder(encoder=base_encoder, freeze=False)
@@ -508,7 +508,7 @@ class TestEdgeCases:
         base_encoder = ProteinGVPEncoder(
             node_scalar_in=16,
             hidden_dims=(64, 8),
-            edge_scalar_in=16,
+            n_edge_scalar_in=16,
             pool_residue=False,
         ).to(device)
         encoder = GVPEncoder(encoder=base_encoder, freeze=True)

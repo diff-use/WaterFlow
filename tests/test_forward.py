@@ -11,7 +11,7 @@ import torch
 from torch_geometric.data import HeteroData
 
 from src.flow import FlowMatcher, FlowWaterGVP
-from src.gvp_encoder import GVPEncoder, ProteinGVPEncoder
+from src.gvp_encoder import GVPEncoder, ProteinGVPEncoder, make_gvp_encoder_data
 
 
 def _iter_tensors(obj):
@@ -165,7 +165,7 @@ def test_forward_pass_no_nan_with_module_hooks(device):
     base_encoder = ProteinGVPEncoder(
         node_scalar_in=16,
         hidden_dims=(64, 8),
-        edge_scalar_in=16,
+        n_edge_scalar_in=16,
         n_layers=2,
         pool_residue=False,
         num_edge_rbf=16,
@@ -182,7 +182,7 @@ def test_forward_pass_no_nan_with_module_hooks(device):
     ).to(device)
 
     # Quick pre-check: protein encoder input features created from pp edges
-    enc_data = GVPEncoder.make_encoder_data(data)
+    enc_data = make_gvp_encoder_data(data)
     assert_edge_index_in_range(enc_data.edge_index, enc_data.x.size(0), enc_data.x.size(0), "pp edge_index")
 
     # Also validate knn edges are sane (catches orientation / k issues)
@@ -231,7 +231,7 @@ def test_training_step_no_nan_tripwire(device):
     base_encoder = ProteinGVPEncoder(
         node_scalar_in=16,
         hidden_dims=(64, 8),
-        edge_scalar_in=16,
+        n_edge_scalar_in=16,
         n_layers=2,
         pool_residue=False,
         num_edge_rbf=16,
@@ -295,7 +295,7 @@ def test_forward_with_duplicate_protein_coords_catches_nan(device):
     base_encoder = ProteinGVPEncoder(
         node_scalar_in=16,
         hidden_dims=(64, 8),
-        edge_scalar_in=16,
+        n_edge_scalar_in=16,
         n_layers=2,
         pool_residue=False,
         num_edge_rbf=16,
@@ -339,7 +339,7 @@ def test_forward_with_duplicate_protein_coords_localizes_nan(device):
     base_encoder = ProteinGVPEncoder(
         node_scalar_in=16,
         hidden_dims=(64, 8),
-        edge_scalar_in=16,
+        n_edge_scalar_in=16,
         n_layers=2,
         pool_residue=False,
         num_edge_rbf=16,
@@ -356,7 +356,7 @@ def test_forward_with_duplicate_protein_coords_localizes_nan(device):
     ).to(device)
 
     # ---- Pre-check: encoder input edges ----
-    enc_data = GVPEncoder.make_encoder_data(data)
+    enc_data = make_gvp_encoder_data(data)
     for tensor in _iter_tensors(enc_data):
         assert torch.isfinite(tensor).all()
 
@@ -496,7 +496,7 @@ class TestFlowIntegrationCorrectness:
         data = make_batched_hetero(device, n_graphs=1, n_protein_per=24, n_water_per=12)
 
         base_encoder = ProteinGVPEncoder(
-            node_scalar_in=16, hidden_dims=(64, 8), edge_scalar_in=16,
+            node_scalar_in=16, hidden_dims=(64, 8), n_edge_scalar_in=16,
             pool_residue=False,
         ).to(device)
         encoder = GVPEncoder(encoder=base_encoder, freeze=False)
@@ -555,7 +555,7 @@ class TestVelocityFieldProperties:
         data = make_batched_hetero(device, n_graphs=1, n_protein_per=24, n_water_per=12)
 
         base_encoder = ProteinGVPEncoder(
-            node_scalar_in=16, hidden_dims=(64, 8), edge_scalar_in=16,
+            node_scalar_in=16, hidden_dims=(64, 8), n_edge_scalar_in=16,
             pool_residue=False,
         ).to(device)
         encoder = GVPEncoder(encoder=base_encoder, freeze=False)
@@ -585,7 +585,7 @@ class TestVelocityFieldProperties:
         data = make_batched_hetero(device, n_graphs=1, n_protein_per=24, n_water_per=12)
 
         base_encoder = ProteinGVPEncoder(
-            node_scalar_in=16, hidden_dims=(64, 8), edge_scalar_in=16,
+            node_scalar_in=16, hidden_dims=(64, 8), n_edge_scalar_in=16,
             pool_residue=False,
         ).to(device)
         encoder = GVPEncoder(encoder=base_encoder, freeze=False)
