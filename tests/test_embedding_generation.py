@@ -164,7 +164,6 @@ class TestAlignSlaeToGeometry:
 
             # Build arrays
             n_atoms = len(atom_specs)
-            n_residues = len(residue_keys)
 
             slae_residue_idx = torch.zeros(n_atoms, dtype=torch.long)
             slae_atom_type = torch.zeros(n_atoms, dtype=torch.long)
@@ -427,8 +426,9 @@ class TestAlignSlaeToGeometry:
     @pytest.mark.unit
     def test_empty_slae_embeddings(self):
         """All geometry atoms get zero vectors when SLAE is empty."""
-        import numpy as np
         from unittest.mock import patch
+
+        import numpy as np
 
         # Empty SLAE data
         slae_emb = torch.zeros(0, 128)

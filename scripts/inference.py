@@ -39,6 +39,7 @@ from src.utils import (
     setup_logging_for_tqdm,
 )
 
+
 # Configure logging to work with tqdm progress bars
 setup_logging_for_tqdm()
 

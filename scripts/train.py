@@ -29,14 +29,13 @@ import torch
 import wandb
 from loguru import logger
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR, LinearLR
-from tqdm import tqdm
-
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, StepLR
 from torch.utils.data import DataLoader
 from torch_geometric.data import HeteroData
+from tqdm import tqdm
 
-from src.encoder_base import build_encoder
 from src.dataset import get_dataloader
+from src.encoder_base import build_encoder
 from src.flow import FlowMatcher, FlowWaterGVP
 from src.utils import (
     compute_placement_metrics,

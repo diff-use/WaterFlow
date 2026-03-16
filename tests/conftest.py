@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 import torch
 
+
 TEST_DIR = Path(__file__).parent
 ENV_PDB_DIR = os.environ.get("ENV_PDB_DIR")
 PDB_BASE_DIR = Path(ENV_PDB_DIR) if ENV_PDB_DIR else TEST_DIR / "test_files"

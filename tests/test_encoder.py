@@ -14,8 +14,9 @@ import torch
 from torch_cluster import radius_graph
 from torch_geometric.data import Data, HeteroData
 
-from src.encoder_base import build_encoder, get_encoder_class, CachedEmbeddingEncoder
+from src.encoder_base import build_encoder, CachedEmbeddingEncoder, get_encoder_class
 from src.gvp_encoder import GVPEncoder, ProteinGVPEncoder
+
 
 # ============== Fixtures ==============
 

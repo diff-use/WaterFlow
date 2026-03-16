@@ -3,7 +3,7 @@
 All test cases created with assistance from Claude Code and refined.
 """
 
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -11,12 +11,12 @@ import torch
 from torch_geometric.data import Data, HeteroData
 
 from src.flow import (
+    build_knn_edges,
     FlowMatcher,
     FlowWaterGVP,
     ProteinWaterUpdate,
-    build_knn_edges,
 )
-from src.gvp_encoder import GVPEncoder, ProteinGVPEncoder, make_gvp_encoder_data
+from src.gvp_encoder import GVPEncoder, make_gvp_encoder_data, ProteinGVPEncoder
 
 
 @pytest.fixture

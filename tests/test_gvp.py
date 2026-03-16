@@ -1,8 +1,7 @@
-import pytest
 import torch
 import torch.nn.functional as F
 
-from src.gvp import GVP, Dropout, LayerNorm, _merge, _split, tuple_cat, tuple_sum
+from src.gvp import _merge, _split, Dropout, GVP, LayerNorm, tuple_cat, tuple_sum
 
 
 class TestGVPHelpers:

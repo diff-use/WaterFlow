@@ -11,7 +11,7 @@ import torch
 from torch_geometric.data import HeteroData
 
 from src.flow import FlowMatcher, FlowWaterGVP
-from src.gvp_encoder import GVPEncoder, ProteinGVPEncoder, make_gvp_encoder_data
+from src.gvp_encoder import GVPEncoder, make_gvp_encoder_data, ProteinGVPEncoder
 
 
 def _iter_tensors(obj):

@@ -24,21 +24,21 @@ import pytest
 import torch
 
 from src.dataset import (
-    ELEM_IDX,
-    ELEMENT_VOCAB,
-    ProteinWaterDataset,
     _make_undirected,
     check_chain_interactions,
     check_com_distance,
     check_water_clashes,
     compute_normalized_bfactors,
+    ELEM_IDX,
     element_onehot,
+    ELEMENT_VOCAB,
     filter_waters_by_quality,
     get_crystal_contacts_pymol,
     get_dataloader,
     load_edia_for_pdb,
     match_atoms_to_coords,
     parse_asu_with_biotite,
+    ProteinWaterDataset,
 )
 
 
@@ -599,12 +599,12 @@ class TestProteinWaterDataset:
 
     def test_cached_file_created(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
         """Preprocessing should create cached .pt file."""
-        dataset = ProteinWaterDataset(
+        _ = ProteinWaterDataset(
             pdb_list_file=single_pdb_list_file,
             processed_dir=str(tmp_processed_dir),
             base_pdb_dir=str(pdb_base_dir),
             preprocess=True,
-        )
+        ) # need to call this to trigger the processing
 
         cache_file = tmp_processed_dir / "6eey_final_A.pt"
         assert cache_file.exists()

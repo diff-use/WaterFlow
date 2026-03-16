@@ -14,7 +14,7 @@ Usage:
 """
 
 import argparse
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import as_completed, ProcessPoolExecutor
 from pathlib import Path
 
 import matplotlib.pyplot as plt
