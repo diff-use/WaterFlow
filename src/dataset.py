@@ -11,7 +11,7 @@ import pandas as pd
 import pymol2
 import torch
 import torch.nn.functional as F
-from biotite.structure.io.pdb import PDBFile, get_structure
+from biotite.structure.io.pdb import get_structure, PDBFile
 from loguru import logger
 from scipy.spatial.distance import cdist
 from torch import Tensor
@@ -22,6 +22,7 @@ from tqdm import tqdm
 
 from src.constants import EDGE_PP
 from src.utils import atom37_to_atoms
+
 
 ELEMENT_VOCAB = [
     "C", "N", "O", "S", "P", "SE", "MG", "ZN", "CA", "FE", "NA", "K", "CL", "F", "BR",
@@ -681,7 +682,7 @@ class ProteinWaterDataset(Dataset):
         pdb_path = str(entry['pdb_path'])
         chain_filter = [entry['chain_id']] if entry['chain_id'] is not None else None
 
-        protein_atoms, water_atoms = parse_asu_with_biotite(pdb_path, chain_filter)
+        protein_atoms, water_atoms = parse_asu_with_biotite(pdb_path)
 
         # check inter-chain interactions for multi-chain proteins
         chain_valid, chain_reason, _ = check_chain_interactions(

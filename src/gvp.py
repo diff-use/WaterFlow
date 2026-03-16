@@ -113,7 +113,7 @@ class GVP(nn.Module):
         activations=(F.relu, torch.sigmoid),
         vector_gate=False,
     ):
-        super(GVP, self).__init__()
+        super().__init__()
         self.si, self.vi = in_dims
         self.so, self.vo = out_dims
         self.vector_gate = vector_gate
@@ -172,7 +172,7 @@ class _VDropout(nn.Module):
     """
 
     def __init__(self, drop_rate):
-        super(_VDropout, self).__init__()
+        super().__init__()
         self.drop_rate = drop_rate
         self.dummy_param = nn.Parameter(torch.empty(0))
 
@@ -197,7 +197,7 @@ class Dropout(nn.Module):
     """
 
     def __init__(self, drop_rate):
-        super(Dropout, self).__init__()
+        super().__init__()
         self.sdropout = nn.Dropout(drop_rate)
         self.vdropout = _VDropout(drop_rate)
 
@@ -220,7 +220,7 @@ class LayerNorm(nn.Module):
     """
 
     def __init__(self, dims):
-        super(LayerNorm, self).__init__()
+        super().__init__()
         self.s, self.v = dims
         self.scalar_norm = nn.LayerNorm(self.s)
 
@@ -270,7 +270,7 @@ class GVPConv(MessagePassing):
         activations=(F.relu, torch.sigmoid),
         vector_gate=False,
     ):
-        super(GVPConv, self).__init__(aggr=aggr)
+        super().__init__(aggr=aggr)
         self.si, self.vi = in_dims
         self.so, self.vo = out_dims
         self.se, self.ve = edge_dims
@@ -352,7 +352,7 @@ class GVPConvLayer(nn.Module):
         activations=(F.relu, torch.sigmoid),
         vector_gate=False,
     ):
-        super(GVPConvLayer, self).__init__()
+        super().__init__()
         self.conv = GVPConv(
             node_dims,
             node_dims,
@@ -462,7 +462,7 @@ class EdgeUpdate(nn.Module):
         node_tuple: tuple,               # (s_node, V_node) with s_node: (N, S_node)
         edge_index: torch.Tensor,        # (2, E)
         edge_attr: tuple,                # (s_edge, V_edge) with s_edge: (E, s_edge_width)
-        distance_feat: torch.Tensor = None,  # (E, D) if enabled
+        distance_feat: torch.Tensor | None = None,  # (E, D) if enabled
     ) -> tuple:
 
         s_node, _ = node_tuple
@@ -514,7 +514,7 @@ class GVPMultiEdge(MessagePassing):
         for i in range(n_message_gvps):
             vin = v_dim + (1 if i == 0 else 0) + (v_dim if (i == 0 and use_dst_feats) else 0)
             sin = s_dim + (rbf_dim if i == 0 else 0) + (s_dim if (i == 0 and use_dst_feats) else 0)
-            msg_layers.append(GVP(
+            msg_layers.append(GVP_(
                 in_dims=(sin, vin),
                 out_dims=(s_dim, v_dim),
                 vector_gate=True,
@@ -622,7 +622,7 @@ class GVPMultiEdgeConv(nn.Module):
         for nt in dst_ntypes:
             upd_layers = []
             for _ in range(n_update_gvps):
-                upd_layers.append(GVP((s_dim, v_dim), (s_dim, v_dim)))
+                upd_layers.append(GVP_((s_dim, v_dim), (s_dim, v_dim)))
             self.node_updates[nt] = nn.Sequential(*upd_layers)
 
         # per-edge-type message convs feeding a HeteroConv(aggr='sum' across relations)

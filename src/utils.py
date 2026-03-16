@@ -1,6 +1,7 @@
 # utils.py
 from __future__ import annotations
 
+
 """
 Utility functions organized by category:
 1. Feature encoding (rbf, atom37_to_atoms, normalize_ins_code)
@@ -23,10 +24,10 @@ from e3nn.math import soft_one_hot_linspace
 from PIL import Image
 from scipy.optimize import linear_sum_assignment
 from torch import Tensor
-
 from tqdm import tqdm
 
 from src.constants import NUM_RBF, RBF_CUTOFF
+
 
 def setup_logging_for_tqdm(
     level: str = "INFO",
@@ -235,15 +236,15 @@ def recall_precision(
         recall: fraction of true points with a prediction within thresh
         precision: fraction of predictions within thresh of a true point
     """
-    # handle empty inputs
+    # convert numpy arrays to tensors first
     if isinstance(pred, np.ndarray):
-        if pred.size == 0 or true.size == 0:
-            return 0.0, 0.0
         pred = torch.from_numpy(pred)
+    if isinstance(true, np.ndarray):
         true = torch.from_numpy(true)
-    else:
-        if pred.numel() == 0 or true.numel() == 0:
-            return 0.0, 0.0
+
+    # handle empty inputs
+    if pred.numel() == 0 or true.numel() == 0:
+        return 0.0, 0.0
 
     # ensure same device
     if pred.device != true.device:
@@ -347,13 +348,13 @@ def compute_placement_metrics(
 def plot_3d_frame(
     ax,
     protein_pos: np.ndarray,
-    mate_pos: np.ndarray,
+    mate_pos: np.ndarray | None,
     water_pred: np.ndarray,
     water_true: np.ndarray,
     title: str = "",
-    xlim: tuple[float, float] = None,
-    ylim: tuple[float, float] = None,
-    zlim: tuple[float, float] = None,
+    xlim: tuple[float, float] | None = None,
+    ylim: tuple[float, float] | None = None,
+    zlim: tuple[float, float] | None = None,
 ):
     """
     Plot a single 3D frame showing protein structure and water positions.
@@ -434,7 +435,7 @@ def create_trajectory_gif(
     save_path: str,
     title: str = "",
     fps: int = 10,
-    pdb_id: str = None,
+    pdb_id: str | None = None,
 ):
     """
     Create a GIF from a trajectory of water positions.

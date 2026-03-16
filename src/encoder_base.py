@@ -15,11 +15,12 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 
+
 if TYPE_CHECKING:
     from torch_geometric.data import HeteroData
 
 # global encoder registry
-_ENCODER_REGISTRY: dict[str, type[BaseProteinEncoder]] = {}
+_ENCODER_REGISTRY: dict[str, type["BaseProteinEncoder"]] = {}
 
 
 def register_encoder(name: str):

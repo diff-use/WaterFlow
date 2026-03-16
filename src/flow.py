@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import copy
-import math
-from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch import Tensor, nn
-from torch_geometric.data import Batch, Data, HeteroData
+from torch import nn, Tensor
+from torch_geometric.data import Batch, HeteroData
 from torch_geometric.nn import knn
 from torch_scatter import scatter_mean
 from tqdm.auto import tqdm
@@ -378,7 +376,7 @@ class FlowMatcher:
         return float(pos.std().item())
 
     @staticmethod
-    def compute_sigma_per_graph(data: HeteroData, device: torch.device) -> torch.Tensor:
+    def compute_sigma_per_graph(data: HeteroData | Batch, device: torch.device) -> torch.Tensor:
         """
         Compute sigma (std of protein coordinates) per graph in a batch.
 
@@ -402,7 +400,7 @@ class FlowMatcher:
         optimizer: torch.optim.Optimizer,
         grad_clip: float = 1.0,
         use_self_conditioning: bool = True,
-    ) -> dict[str, float]:
+    ) -> dict[str, float | dict | None]:
         """
         Single flow matching training step.
         
@@ -578,7 +576,7 @@ class FlowMatcher:
         num_steps: int = 100,
         use_sc: bool = True,
         sc_ema_alpha: float = 0.2,
-        device: str = "cuda",
+        device: str | torch.device = "cuda",
         water_ratio: float | None = None,
     ) -> list[np.ndarray]:
         """
@@ -656,7 +654,7 @@ class FlowMatcher:
         num_steps: int = 500,
         use_sc: bool = True,
         sc_ema_alpha: float = 0.2,
-        device: str = "cuda",
+        device: str | torch.device = "cuda",
         return_trajectory: bool = True,
         water_ratio: float | None = None,
     ) -> list[dict[str, np.ndarray]]:
