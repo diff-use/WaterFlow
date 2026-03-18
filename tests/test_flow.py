@@ -405,9 +405,14 @@ class TestFlowMatcher:
         results = flow_matcher.euler_integrate(
             simple_hetero_data, num_steps=5, use_sc=False, device=str(device)
         )
-        # euler_integrate returns List[np.ndarray], one per input graph
-        water_pred = results[0]
+        # euler_integrate returns List[Dict], one per input graph
+        result = results[0]
+        assert "water_pred" in result
+        assert "protein_pos" in result
+        assert "water_true" in result
+        assert "pdb_id" in result
 
+        water_pred = result["water_pred"]
         n_water = simple_hetero_data["water"].num_nodes
         assert water_pred.shape == (n_water, 3)
         assert isinstance(water_pred, np.ndarray)

@@ -737,7 +737,7 @@ class FlowMatcher:
         sc_ema_alpha: float = 0.2,
         device: str | torch.device = "cuda",
         water_ratio: float | None = None,
-    ) -> list[np.ndarray]:
+    ) -> list[dict[str, np.ndarray]]:
         """
         Euler integration from noise to final positions.
 
@@ -751,7 +751,11 @@ class FlowMatcher:
                         instead of using ground truth water count
 
         Returns:
-            List of (Nw_i, 3) predicted water positions for each input graph
+            List of dicts, one per input graph, each with keys:
+                'protein_pos': (Np, 3) - includes both ASU and mate atoms
+                'water_true': (Nw, 3) - None if water_ratio is used
+                'water_pred': (Nw, 3) final prediction
+                'pdb_id': PDB identifier
         """
         self.model.eval()
         device = torch.device(device if torch.cuda.is_available() else "cpu")
@@ -760,8 +764,17 @@ class FlowMatcher:
         if isinstance(graphs, HeteroData):
             graphs = [graphs]
 
+        # store original pdb_ids before batching
+        pdb_ids = [getattr(g, "pdb_id", None) for g in graphs]
+
         # batch graphs together
         g = Batch.from_data_list([copy.deepcopy(graph) for graph in graphs]).to(device)
+
+        batch_p = g["protein"].batch
+
+        # store ground truth water positions and batch indices before modifying
+        x1_true = g["water"].pos.clone()
+        batch_w_true = g["water"].batch.clone()
 
         if water_ratio is not None:
             # sample waters based on residue count
@@ -803,10 +816,25 @@ class FlowMatcher:
 
         # split results by graph
         x_cpu = x.detach().cpu()
+        protein_pos_cpu = g["protein"].pos.detach().cpu()
+        x1_true_cpu = x1_true.detach().cpu()
+        batch_w_cpu = batch_w.cpu()
+        batch_w_true_cpu = batch_w_true.cpu()
+        batch_p_cpu = batch_p.cpu()
+
         results = []
         for i in range(num_graphs):
-            mask = batch_w.cpu() == i
-            results.append(x_cpu[mask].numpy())
+            mask_w = batch_w_cpu == i
+            mask_w_true = batch_w_true_cpu == i
+            mask_p = batch_p_cpu == i
+
+            result = {
+                "protein_pos": protein_pos_cpu[mask_p].numpy(),
+                "water_true": x1_true_cpu[mask_w_true].numpy(),
+                "water_pred": x_cpu[mask_w].numpy(),
+                "pdb_id": pdb_ids[i],
+            }
+            results.append(result)
 
         return results
 
@@ -973,6 +1001,7 @@ class FlowMatcher:
 
         if method == "euler":
             results = self.euler_integrate(graphs, num_steps, use_sc, device=device)
+            results = [r["water_pred"] for r in results]
         elif method == "rk4":
             results = self.rk4_integrate(
                 graphs, num_steps, use_sc, device=device, return_trajectory=False
