@@ -54,8 +54,8 @@ def compute_esm_embeddings(
     Compute ESM3 residue-level embeddings using an in-memory sanitized structure.
 
     This bypasses ESM's default behavior of dropping HETATM non-canonicals.
-    It extracts the sequence, strips HETATM flags, renames modified residues 
-    (e.g., MSE -> MET) and unknowns (-> UNK), and feeds the buffer directly 
+    It extracts the sequence, strips HETATM flags, renames modified residues
+    (e.g., MSE -> MET) and unknowns (-> UNK), and feeds the buffer directly
     to ESM3 so that all residues receive a structural embedding.
 
     How ESM parses: (https://github.com/evolutionaryscale/esm/blob/main/esm/utils/structure/protein_chain.py)
@@ -89,7 +89,7 @@ def compute_esm_embeddings(
                 key_to_resname[key] = res_name_arr[i]
 
         unique_res_keys = list(key_to_resname.keys())
-        
+
         biotite_seq = [
             THREE_TO_ONE.get(key_to_resname[key], "X") for key in unique_res_keys
         ]
