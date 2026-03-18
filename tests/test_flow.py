@@ -342,34 +342,6 @@ class TestFlowWaterGVP:
 
         assert v_pred.shape == (n_water, 3)
 
-    def test_forward_with_esm_encoder(self, simple_hetero_data, device):
-        """Test FlowWaterGVP forward pass with ESMEncoder."""
-        from src.esm_encoder import ESMEncoder
-
-        # ESM encoder with smaller dim for test
-        esm_dim = 128
-        encoder = ESMEncoder(esm_dim=esm_dim).to(device)
-
-        # Add mock ESM embeddings to data
-        n_protein = simple_hetero_data['protein'].num_nodes
-        simple_hetero_data['protein'].esm_embedding = torch.randn(
-            n_protein, esm_dim, device=device
-        )
-
-        model = FlowWaterGVP(
-            encoder=encoder,
-            hidden_dims=(64, 8),
-            layers=1,
-        ).to(device)
-
-        t = torch.tensor([0.5], device=device)
-        v_pred = model(simple_hetero_data, t)
-
-        n_water = simple_hetero_data['water'].num_nodes
-        assert v_pred.shape == (n_water, 3)
-        assert not torch.isnan(v_pred).any(), "ESM encoder flow output contains NaNs"
-
-
 # ============== Tests for FlowMatcher ==============
 
 

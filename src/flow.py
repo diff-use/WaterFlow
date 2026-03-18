@@ -16,7 +16,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
 from torch_geometric.data import Batch, HeteroData
-from torch_geometric.nn import nn
+from torch_geometric.nn import knn
 from torch_scatter import scatter_mean
 from tqdm.auto import tqdm
 

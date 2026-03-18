@@ -627,6 +627,7 @@ class GVPMultiEdge(MessagePassing):
         self.s_dim, self.v_dim = s_dim, v_dim
         self.use_dst_feats = use_dst_feats
         self.rbf_dim, self.rbf_dmax = rbf_dim, rbf_dmax
+        GVP_ = functools.partial(GVP, activations=activations, vector_gate=vector_gate)
 
         # message GVP stack; first layer takes [unit_vec] and [rbf] extras
         msg_layers = []
@@ -793,6 +794,7 @@ class GVPMultiEdgeConv(nn.Module):
         super().__init__()
         self.s_dim, self.v_dim = s_dim, v_dim
         self.drop = Dropout(drop_rate)
+        GVP_ = functools.partial(GVP, activations=activations, vector_gate=vector_gate)
 
         # per-dst-type norms and update stacks
         dst_ntypes = sorted({dst for (_, _, dst) in etypes})

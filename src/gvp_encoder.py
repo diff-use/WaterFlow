@@ -21,7 +21,7 @@ from torch_scatter import scatter_add, scatter_max, scatter_mean
 from src.constants import EDGE_PP, NODE_FEATURE_DIM, NUM_RBF, RBF_CUTOFF
 from src.encoder_base import BaseProteinEncoder, register_encoder
 from src.gvp import EdgeUpdate, GVP, GVPConvLayer
-from src.utils import rbf
+from src.utils import compute_edge_geometry, rbf
 
 
 # Type aliases for GVP feature tuples
@@ -332,7 +332,7 @@ class ProteinGVPEncoder(nn.Module):
             node_features = (x_scalar, data.node_v.unsqueeze(1))
 
         x = self.input_gvp(node_features)
-        edge_attr, dist_feat = self._compute_edge_attr(data)
+        edge_attr, dist_feat = self._compute_edge_attr(data.pos, data.edge_index)
 
         for layer in self.layers:
             x = layer(x, data.edge_index, edge_attr)
