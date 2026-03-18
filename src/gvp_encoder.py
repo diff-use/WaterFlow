@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Literal, TypeAlias
+from typing import Any, Literal
 
 import torch
 import torch.nn as nn
@@ -24,17 +24,17 @@ from src.gvp import EdgeUpdate, GVP, GVPConvLayer
 from src.utils import rbf
 
 # Type aliases for GVP feature tuples
-GVPTuple: TypeAlias = tuple[torch.Tensor, torch.Tensor]
+type GVPTuple = tuple[torch.Tensor, torch.Tensor]
 """(scalar, vector) feature pair. Scalar: (N, dim), Vector: (N, dim, 3)."""
 
-NodeFeatures: TypeAlias = GVPTuple
+type NodeFeatures = GVPTuple
 """Node (scalar, vector) features from GVP layers."""
 
-EdgeAttr: TypeAlias = GVPTuple
+type EdgeAttr = GVPTuple
 """Edge (scalar, vector) attributes."""
 
 # Forward return type: either pooled residue embeddings or full GVP features
-ForwardOutput: TypeAlias = tuple[NodeFeatures | torch.Tensor, EdgeAttr | None]
+type ForwardOutput = tuple[NodeFeatures | torch.Tensor, EdgeAttr | None]
 """Return type of forward():
 - When pool_residue=True: (residue_embed: Tensor, None)
 - When pool_residue=False: (node_features: GVPTuple, edge_attr: GVPTuple | None)
