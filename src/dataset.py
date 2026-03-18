@@ -957,7 +957,7 @@ class ProteinWaterDataset(Dataset):
         if final_protein_pos.size(0) > 0:
             pp_edge_index = radius_graph(final_protein_pos, r=self.cutoff, loop=False)
             pp_edge_index = _make_undirected(pp_edge_index)
-            pp_edge_unit, pp_edge_rbf = compute_edge_features(
+            pp_edge_unit_vectors, pp_edge_rbf = compute_edge_features(
                 final_protein_pos,
                 pp_edge_index,
                 num_gaussians=NUM_RBF,
@@ -965,7 +965,7 @@ class ProteinWaterDataset(Dataset):
             )
         else:
             pp_edge_index = torch.empty((2, 0), dtype=torch.long)
-            pp_edge_unit, pp_edge_rbf = compute_edge_features(
+            pp_edge_unit_vectors, pp_edge_rbf = compute_edge_features(
                 final_protein_pos,
                 pp_edge_index,
                 num_gaussians=NUM_RBF,
@@ -982,7 +982,7 @@ class ProteinWaterDataset(Dataset):
                 "water_x": water_x,
                 # PP topology and features (precomputed)
                 "pp_edge_index": pp_edge_index,
-                "pp_edge_unit": pp_edge_unit,
+                "pp_edge_unit_vectors": pp_edge_unit_vectors,
                 "pp_edge_rbf": pp_edge_rbf,
                 # Metadata
                 "num_asu_protein": num_asu_protein,
@@ -1121,7 +1121,7 @@ class ProteinWaterDataset(Dataset):
         - 'water' node type with pos, x
         - ('protein', 'pp', 'protein') edges with:
             - edge_index: (2, E) topology
-            - edge_unit: (E, 3) unit vectors
+            - edge_unit_vectors: (E, 3) unit vectors
             - edge_rbf: (E, 16) RBF features
         - NO water edges (built dynamically in flow model)
         """
@@ -1143,7 +1143,7 @@ class ProteinWaterDataset(Dataset):
         protein_x = cached["protein_x"]
         protein_res_idx = cached["protein_res_idx"]
         pp_edge_index = cached["pp_edge_index"]
-        pp_edge_unit = cached["pp_edge_unit"]
+        pp_edge_unit_vectors = cached["pp_edge_unit_vectors"]
         pp_edge_rbf = cached["pp_edge_rbf"]
         num_asu_protein = cached["num_asu_protein"]
         num_protein_residues = cached["num_protein_residues"]
@@ -1181,7 +1181,7 @@ class ProteinWaterDataset(Dataset):
 
         # load PP edges and features from cache
         data[EDGE_PP].edge_index = pp_edge_index
-        data[EDGE_PP].edge_unit = pp_edge_unit
+        data[EDGE_PP].edge_unit_vectors = pp_edge_unit_vectors
         data[EDGE_PP].edge_rbf = pp_edge_rbf
 
         # store metadata (use embedding_key for consistency with existing code)

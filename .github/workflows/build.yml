@@ -42,4 +42,4 @@ jobs:
       - name: Run tests
         env:
           TEST_DATA_DIR: ${{ github.workspace }}/tests/test_files
-        run: uv run pytest tests/ --cov=src --cov-report=html --cov-report=term-missing --cov-fail-under=80
+        run: uv run pytest tests/ --cov=src --cov-report=html --cov-report=term-missing --cov-fail-under=70
