@@ -20,15 +20,12 @@ import torch
 
 matplotlib.use("Agg")
 
-from pathlib import Path
 
 from src.utils import (
     ATOM37_FILL,
     atom37_to_atoms,
     compute_placement_metrics,
     compute_rmsd,
-    create_trajectory_gif,
-    # Optimal transport
     ot_coupling,
     # Visualization
     plot_3d_frame,

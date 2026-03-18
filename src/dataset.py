@@ -102,8 +102,12 @@ def get_crystal_contacts_pymol(pdb_path: str, cutoff: float = 5.0) -> dict:
         asu_atoms = cmd.get_model(obj, state=1).atom
         mate_atoms = cmd.get_model("sym* and interface", state=1).atom
 
-        asu_coords = asu_coords if asu_coords is not None else np.zeros((0, 3), dtype=float)
-        mate_coords = mate_coords if mate_coords is not None else np.zeros((0, 3), dtype=float)
+        asu_coords = (
+            asu_coords if asu_coords is not None else np.zeros((0, 3), dtype=float)
+        )
+        mate_coords = (
+            mate_coords if mate_coords is not None else np.zeros((0, 3), dtype=float)
+        )
         return {
             "asu_coords": asu_coords,
             "mate_coords": mate_coords,
