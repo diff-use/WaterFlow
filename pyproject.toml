@@ -231,6 +231,8 @@ warn_return_any = true
 warn_unused_configs = true
 
 [tool.ty.rules]
+# uvx runs ty in isolation without project dependencies - ignore missing imports
+unresolved-import = "ignore"
 # PyTorch Geometric has incomplete type stubs - dynamic attributes on Batch/Data
 unresolved-attribute = "ignore"
 # PyG's MessagePassing.message() override pattern is intentional
