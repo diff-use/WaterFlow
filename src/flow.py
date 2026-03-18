@@ -540,7 +540,7 @@ class FlowMatcher:
         batch: HeteroData,
         use_self_conditioning: bool = True,
         accumulation_steps: int = 1,
-    ) -> dict[str, float]:
+    ) -> dict[str, float | int | None | dict]:
         """
         Single flow matching training step (forward + backward only).
 
