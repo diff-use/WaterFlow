@@ -75,3 +75,37 @@ def gvp_encoder(base_encoder):
     from src.gvp_encoder import GVPEncoder
 
     return GVPEncoder(encoder=base_encoder, freeze=False)
+
+
+# ============== Dataset test fixtures ==============
+
+
+@pytest.fixture
+def create_mock_dataset(tmp_path, pdb_base_dir):
+    """Factory fixture to create mock ProteinWaterDataset instances."""
+    from src.dataset import ProteinWaterDataset
+
+    def _create(
+        pdb_ids=None,
+        encoder_type="gvp",
+        include_mates=True,
+        preprocess=False,
+        **kwargs,
+    ):
+        if pdb_ids is None:
+            pdb_ids = ["6eey"]
+
+        list_file = tmp_path / f"list_{encoder_type}.txt"
+        list_file.write_text("\n".join(f"{pdb_id}_final" for pdb_id in pdb_ids))
+
+        return ProteinWaterDataset(
+            pdb_list_file=str(list_file),
+            processed_dir=str(tmp_path / f"processed_{encoder_type}"),
+            base_pdb_dir=str(pdb_base_dir),
+            encoder_type=encoder_type,
+            include_mates=include_mates,
+            preprocess=preprocess,
+            **kwargs,
+        )
+
+    return _create
