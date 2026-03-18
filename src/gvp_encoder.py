@@ -23,6 +23,7 @@ from src.encoder_base import BaseProteinEncoder, register_encoder
 from src.gvp import EdgeUpdate, GVP, GVPConvLayer
 from src.utils import rbf
 
+
 # Type aliases for GVP feature tuples
 type GVPTuple = tuple[torch.Tensor, torch.Tensor]
 """(scalar, vector) feature pair. Scalar: (N, dim), Vector: (N, dim, 3)."""
