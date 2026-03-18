@@ -37,9 +37,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
-      
+
       - name: Setup UV and python version
         uses: astral-sh/setup-uv@v7
 
+      - name: Install dependencies
+        run: uv sync
+
       - name: Run ty
-        run: uvx ty check src/
+        run: uv run ty check src/

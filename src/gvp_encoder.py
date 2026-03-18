@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias
 
 import torch
 import torch.nn as nn
@@ -22,6 +22,23 @@ from src.constants import EDGE_PP, NODE_FEATURE_DIM, NUM_RBF, RBF_CUTOFF
 from src.encoder_base import BaseProteinEncoder, register_encoder
 from src.gvp import EdgeUpdate, GVP, GVPConvLayer
 from src.utils import rbf
+
+# Type aliases for GVP feature tuples
+GVPTuple: TypeAlias = tuple[torch.Tensor, torch.Tensor]
+"""(scalar, vector) feature pair. Scalar: (N, dim), Vector: (N, dim, 3)."""
+
+NodeFeatures: TypeAlias = GVPTuple
+"""Node (scalar, vector) features from GVP layers."""
+
+EdgeAttr: TypeAlias = GVPTuple
+"""Edge (scalar, vector) attributes."""
+
+# Forward return type: either pooled residue embeddings or full GVP features
+ForwardOutput: TypeAlias = tuple[NodeFeatures | torch.Tensor, EdgeAttr | None]
+"""Return type of forward():
+- When pool_residue=True: (residue_embed: Tensor, None)
+- When pool_residue=False: (node_features: GVPTuple, edge_attr: GVPTuple | None)
+"""
 
 
 def edge_vectors(
@@ -309,7 +326,7 @@ class ProteinGVPEncoder(nn.Module):
         V_edge = u.unsqueeze(1)
         return (s_edge, V_edge), s_edge_raw
 
-    def forward(self, data: Batch) -> tuple[tuple, tuple | None]:
+    def forward(self, data: Batch) -> ForwardOutput:
         """
         Forward pass through the GVP encoder.
 
