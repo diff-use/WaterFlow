@@ -334,13 +334,14 @@ class TestFlowWaterGVP:
             layers=1,
         ).to(device)
 
-        n_water = simple_hetero_data['water'].num_nodes
-        sc = {'x1_pred': torch.randn(n_water, 3, device=device)}
+        n_water = simple_hetero_data["water"].num_nodes
+        sc = {"x1_pred": torch.randn(n_water, 3, device=device)}
         t = torch.tensor([0.5], device=device)
 
         v_pred = model(simple_hetero_data, t, self_cond=sc)
 
         assert v_pred.shape == (n_water, 3)
+
 
 # ============== Tests for FlowMatcher ==============
 
@@ -372,12 +373,14 @@ class TestFlowMatcher:
         )
         optimizer.step()
 
-        assert 'loss' in result
-        assert 'rmsd' in result
-        assert 'sigma' in result
-        assert result['loss'] >= 0
+        assert "loss" in result
+        assert "rmsd" in result
+        assert "sigma" in result
+        assert result["loss"] >= 0
 
-    def test_training_step_with_self_cond(self, flow_matcher, simple_hetero_data, device):
+    def test_training_step_with_self_cond(
+        self, flow_matcher, simple_hetero_data, device
+    ):
         optimizer = torch.optim.Adam(flow_matcher.model.parameters(), lr=1e-4)
 
         # Force self-conditioning
@@ -387,9 +390,9 @@ class TestFlowMatcher:
             simple_hetero_data, use_self_conditioning=True
         )
         optimizer.step()
-        
-        assert 'loss' in result
-    
+
+        assert "loss" in result
+
     def test_validation_step(self, flow_matcher, simple_hetero_data):
         result = flow_matcher.validation_step(simple_hetero_data)
 

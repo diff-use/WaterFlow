@@ -18,7 +18,7 @@ from torch_geometric.nn import HeteroConv, MessagePassing
 from torch_scatter import scatter_add
 
 from src.constants import NUM_RBF, RBF_CUTOFF
-from src.utils import compute_edge_features, rbf
+from src.utils import compute_edge_features
 
 
 def tuple_sum(*args):
@@ -139,7 +139,7 @@ class GVP(nn.Module):
             activations: (scalar_act, vector_act) activation functions
             vector_gate: If True, use vector gating; vector_act becomes sigma^+ gate
         """
-        super(GVP, self).__init__()
+        super().__init__()
         self.si, self.vi = in_dims
         self.so, self.vo = out_dims
         self.vector_gate = vector_gate
@@ -252,7 +252,7 @@ class LayerNorm(nn.Module):
         Args:
             dims: (n_scalar, n_vector) feature dimensions
         """
-        super(LayerNorm, self).__init__()
+        super().__init__()
         self.s, self.v = dims
         self.scalar_norm = nn.LayerNorm(self.s)
 
@@ -315,7 +315,7 @@ class GVPConv(MessagePassing):
             activations: (scalar_act, vector_act) activation functions
             vector_gate: Whether to use vector gating in GVP layers
         """
-        super(GVPConv, self).__init__(aggr=aggr)
+        super().__init__(aggr=aggr)
         self.si, self.vi = in_dims
         self.so, self.vo = out_dims
         self.se, self.ve = edge_dims
@@ -423,7 +423,7 @@ class GVPConvLayer(nn.Module):
             activations: (scalar_act, vector_act) activation functions
             vector_gate: Whether to use vector gating
         """
-        super(GVPConvLayer, self).__init__()
+        super().__init__()
         self.conv = GVPConv(
             node_dims,
             node_dims,

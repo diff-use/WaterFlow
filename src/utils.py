@@ -24,10 +24,10 @@ from e3nn.math import soft_one_hot_linspace
 from PIL import Image
 from scipy.optimize import linear_sum_assignment
 from torch import Tensor
+from torch_geometric.nn import knn
 from tqdm import tqdm
 
 from src.constants import NUM_RBF, RBF_CUTOFF
-from torch_geometric.nn import knn
 
 
 def build_knn_edges(
@@ -62,7 +62,6 @@ def build_knn_edges(
         idx = idx[:, mask]
 
     return idx.unique(dim=1)
-
 
 
 def setup_logging_for_tqdm(
@@ -265,7 +264,9 @@ def compute_edge_features(
     return unit_vectors, rbf_features
 
 
-def atom37_to_atoms(atom_tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def atom37_to_atoms(
+    atom_tensor: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Convert atom37 representation to flat atom list.
 

@@ -25,8 +25,6 @@ from src.utils import (
     ATOM37_FILL,
     atom37_to_atoms,
     # Edge geometry
-    compute_edge_features,
-    compute_edge_geometry,
     compute_placement_metrics,
     compute_rmsd,
     ot_coupling,

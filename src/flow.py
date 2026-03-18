@@ -425,7 +425,11 @@ class FlowWaterGVP(nn.Module):
         )
 
         # self conditioning
-        if self_cond is not None and ("x1_pred" in self_cond) and self_cond["x1_pred"] is not None:
+        if (
+            self_cond is not None
+            and ("x1_pred" in self_cond)
+            and self_cond["x1_pred"] is not None
+        ):
             delta = self_cond["x1_pred"] - data["water"].pos
             delta_vec = delta.unsqueeze(1)
 
@@ -550,7 +554,9 @@ class FlowMatcher:
         Returns dict with 'loss', 'rmsd', 'sigma'.
         """
         if accumulation_steps < 1:
-            raise ValueError(f"accumulation_steps must be >= 1, got {accumulation_steps}")
+            raise ValueError(
+                f"accumulation_steps must be >= 1, got {accumulation_steps}"
+            )
 
         self.model.train()
         device = batch["protein"].pos.device
@@ -979,4 +985,3 @@ class FlowMatcher:
         if single_input:
             return results[0]
         return results
-        
