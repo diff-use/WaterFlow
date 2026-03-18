@@ -35,7 +35,7 @@ def register_encoder(name: str):
 
     def decorator(cls: type[BaseProteinEncoder]) -> type[BaseProteinEncoder]:
         if name in _ENCODER_REGISTRY:
-            raise ValueError(f"Encoder '{name}' is already registered")
+            raise KeyError(f"Encoder '{name}' is already registered")
         _ENCODER_REGISTRY[name] = cls
         return cls
 
@@ -75,7 +75,7 @@ def build_encoder(config: dict, device: torch.device) -> BaseProteinEncoder:
         Instantiated encoder implementing BaseProteinEncoder
     """
     if "encoder_type" not in config:
-        raise ValueError("'encoder_type' must be specified in config")
+        raise KeyError("'encoder_type' must be specified in config")
     encoder_type = config["encoder_type"]
     encoder_cls = get_encoder_class(encoder_type)
     return encoder_cls.from_config(config, device)

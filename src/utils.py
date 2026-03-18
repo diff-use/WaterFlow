@@ -221,7 +221,7 @@ def ot_coupling(
 @torch.no_grad()
 def recall_precision(
     pred: torch.Tensor | np.ndarray,
-    true: torch.Tensor | np.ndarray,
+    ground_truth: torch.Tensor | np.ndarray,
     thresh: float = 1.0,
 ) -> tuple[float, float]:
     """
@@ -231,7 +231,7 @@ def recall_precision(
 
     Args:
         pred: (N_pred, 3) predicted positions
-        true: (N_true, 3) ground truth positions
+        ground_truth: (N_true, 3) ground truth positions
         thresh: distance threshold in Angstroms
 
     Returns:
@@ -241,18 +241,18 @@ def recall_precision(
     # convert numpy arrays to tensors first
     if isinstance(pred, np.ndarray):
         pred = torch.from_numpy(pred)
-    if isinstance(true, np.ndarray):
-        true = torch.from_numpy(true)
+    if isinstance(ground_truth, np.ndarray):
+        ground_truth = torch.from_numpy(ground_truth)
 
     # handle empty inputs
-    if pred.numel() == 0 or true.numel() == 0:
+    if pred.numel() == 0 or ground_truth.numel() == 0:
         return 0.0, 0.0
 
     # ensure same device
-    if pred.device != true.device:
-        true = true.to(pred.device)
+    if pred.device != ground_truth.device:
+        ground_truth = ground_truth.to(pred.device)
 
-    D = torch.cdist(true.float(), pred.float(), p=2)
+    D = torch.cdist(ground_truth.float(), pred.float(), p=2)
 
     recall = (D.min(dim=1)[0] <= thresh).float().mean().item()
     precision = (D.min(dim=0)[0] <= thresh).float().mean().item()

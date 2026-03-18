@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'figures/**'
+      - '.gitignore'
+      - 'LICENSE'
   workflow_dispatch:
 
 jobs:

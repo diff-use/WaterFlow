@@ -77,8 +77,8 @@ def make_gvp_encoder_data(data: HeteroData) -> Data:
         pp_edge = data[EDGE_PP]
         if hasattr(pp_edge, "edge_rbf"):
             enc_data.edge_rbf = pp_edge.edge_rbf
-        if hasattr(pp_edge, "edge_unit"):
-            enc_data.edge_unit = pp_edge.edge_unit
+        if hasattr(pp_edge, "edge_unit_vectors"):
+            enc_data.edge_unit_vectors = pp_edge.edge_unit_vectors
 
     # batch for multi-complex batches
     if hasattr(prot, "batch"):
@@ -271,7 +271,7 @@ class ProteinGVPEncoder(nn.Module):
             )
             return out
         else:
-            raise ValueError(f"Unknown pool_aggr={aggr!r}")
+            raise ValueError(f"Unknown pool_aggr={aggr}")
 
     @staticmethod
     def _initial_node_tuple(
@@ -286,20 +286,20 @@ class ProteinGVPEncoder(nn.Module):
         """
         Build edge attributes from positions or cached features.
 
-        If cached edge features (edge_rbf, edge_unit) are both available in data,
+        If cached edge features (edge_rbf, edge_unit_vectors) are both available in data,
         use them directly. Otherwise, compute from positions.
 
         Args:
-            data: Batch with pos, edge_index, and optionally edge_rbf, edge_unit
+            data: Batch with pos, edge_index, and optionally edge_rbf, edge_unit_vectors
 
         Returns:
             (s_edge, V_edge): Tuple of scalar and vector edge features
             s_edge_raw: Raw RBF features (for distance conditioning)
         """
         # Use cached features if available
-        if hasattr(data, "edge_rbf") and hasattr(data, "edge_unit"):
+        if hasattr(data, "edge_rbf") and hasattr(data, "edge_unit_vectors"):
             s_edge_raw = data.edge_rbf
-            u = data.edge_unit
+            u = data.edge_unit_vectors
         else:
             # Fallback: compute from positions
             rij, u = edge_vectors(data.pos, data.edge_index)
@@ -320,7 +320,7 @@ class ProteinGVPEncoder(nn.Module):
                 - edge_index: (2, E) edge indices
                 Optional cached edge features (if absent, computed from pos):
                 - edge_rbf: (E, num_rbf) RBF distance features
-                - edge_unit: (E, 3) unit edge vectors
+                - edge_unit_vectors: (E, 3) unit edge vectors
 
         Returns:
             x: tuple (s, V) of node scalar and vector features

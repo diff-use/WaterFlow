@@ -474,9 +474,10 @@ class EdgeUpdate(nn.Module):
         s_node, _ = node_tuple
         s_edge, V_edge = edge_attr
 
-        assert s_edge.shape[-1] == self.s_edge_width, (
-            f"EdgeUpdate expected width {self.s_edge_width}, got {s_edge.shape[-1]}"
-        )
+        if s_edge.shape[-1] != self.s_edge_width:
+            raise ValueError(
+                f"EdgeUpdate expected width {self.s_edge_width}, got {s_edge.shape[-1]}"
+            )
 
         src, dst = edge_index[0], edge_index[1]
         parts = [s_node[src], s_node[dst], s_edge]
@@ -524,19 +525,19 @@ class GVPMultiEdge(MessagePassing):
         # message GVP stack; first layer takes [unit_vec] and [rbf] extras
         msg_layers = []
         for i in range(n_message_gvps):
-            vin = (
+            vector_input_dim = (
                 v_dim
-                + (1 if i == 0 else 0)
+                + (1 if i == 0 else 0)  # +1 for unit displacement vector on first layer
                 + (v_dim if (i == 0 and use_dst_feats) else 0)
             )
-            sin = (
+            scalar_input_dim = (
                 s_dim
                 + (rbf_dim if i == 0 else 0)
                 + (s_dim if (i == 0 and use_dst_feats) else 0)
             )
             msg_layers.append(
                 GVP_(
-                    in_dims=(sin, vin),
+                    in_dims=(scalar_input_dim, vector_input_dim),
                     out_dims=(s_dim, v_dim),
                     vector_gate=True,
                     activations=activations,
@@ -625,7 +626,7 @@ class GVPMultiEdgeConv(nn.Module):
 
     def __init__(
         self,
-        etypes,  # List[EdgeType]
+        etypes: list[tuple[str, str, str]],  # (src_type, edge_type, dst_type)
         s_dim: int,
         v_dim: int,
         rbf_dim: int = 16,

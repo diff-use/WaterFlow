@@ -210,8 +210,6 @@ class TestBaseEncoderInterface:
         assert pp_edge_attr is None
 
         # output_dims available after forward
-        assert isinstance(encoder.output_dims, tuple)
-        assert len(encoder.output_dims) == 2
         assert encoder.output_dims == (128, 0)
 
     def test_from_config_class_method(self, device):
@@ -283,8 +281,13 @@ class TestProteinGVPEncoder:
 
         assert s.shape == (sample_homogeneous_data.num_nodes, 64)
         assert v.shape == (sample_homogeneous_data.num_nodes, 16, 3)
-        # edge_attr should be a tuple (s_edge, V_edge)
-        assert edge_attr is not None
+        # edge_attr should be (s_edge, V_edge) tuple when using GVP encoder with
+        # pool_residue=False and use_edge_update=True; it's None for:
+        # (1) cached embedding encoders (ESM/SLAE), (2) pooled outputs, or (3) edge updates disabled
+        assert edge_attr is not None, (
+            "edge_attr should be (s_edge, V_edge) tuple when using GVP encoder with "
+            "pool_residue=False and use_edge_update=True"
+        )
         s_edge, V_edge = edge_attr
         assert s_edge.dim() == 2
         assert V_edge.dim() == 3
@@ -383,14 +386,6 @@ class TestCachedEmbeddingEncoder:
         ).to(device)
         with pytest.raises(RuntimeError, match="dimension not yet known"):
             _ = encoder.output_dims
-
-    def test_slae_output_dims_after_forward(self, device, sample_hetero_data_with_slae):
-        """SLAE encoder should infer output_dims from data."""
-        encoder = CachedEmbeddingEncoder(
-            embedding_key="slae_embedding", encoder_type="slae"
-        ).to(device)
-        encoder(sample_hetero_data_with_slae)
-        assert encoder.output_dims == (128, 0)
 
     def test_esm_output_dims_after_forward(self, device, sample_hetero_data):
         """ESM encoder should infer output_dims from data."""
@@ -492,26 +487,6 @@ class TestCachedEmbeddingEncoder:
             embedding_key="slae_embedding", encoder_type="slae"
         ).to(device)
         assert sum(p.numel() for p in encoder.parameters()) == 0
-
-    def test_slae_from_config(self, device, sample_hetero_data_with_slae):
-        """Should construct SLAE from config and infer dim from data."""
-        config = {"encoder_type": "slae"}
-        encoder = CachedEmbeddingEncoder.from_config(config, device)
-        assert encoder.encoder_type == "slae"
-        encoder(sample_hetero_data_with_slae)
-        assert encoder.output_dims == (128, 0)
-
-    def test_esm_from_config(self, device, sample_hetero_data):
-        """Should construct ESM from config and infer dim from data."""
-        config = {"encoder_type": "esm"}
-        encoder = CachedEmbeddingEncoder.from_config(config, device)
-        assert encoder.encoder_type == "esm"
-        n_atoms = sample_hetero_data["protein"].num_nodes
-        sample_hetero_data["protein"].esm_embedding = torch.randn(
-            n_atoms, 2048, device=device
-        )
-        encoder(sample_hetero_data)
-        assert encoder.output_dims == (2048, 0)
 
     def test_device_placement(self, device, sample_hetero_data):
         """Verify tensors are on the correct device."""

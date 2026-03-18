@@ -4,6 +4,7 @@ Integration-ish tests to catch NaNs/Infs during forward/training.
 All test cases created with assistance from Claude Code and refined.
 """
 
+import math
 import os
 
 import pytest
@@ -209,6 +210,8 @@ def test_forward_pass_no_nan_with_module_hooks(device):
 
     t = torch.linspace(0.05, 0.95, steps=n_graphs, device=device)
 
+    # FiniteHookManager registers forward hooks on modules to catch NaN/Inf
+    # outputs early. This helps identify exactly which layer produces invalid values.
     with FiniteHookManager() as hm:
         # Encoder internals (access via .encoder.encoder for wrapped GVPEncoder)
         hm.watch(
@@ -287,7 +290,7 @@ def test_training_step_no_nan_tripwire(device):
             )
             loss = out["loss"]
             assert isinstance(loss, float)
-            assert loss == loss, "loss is NaN"
+            assert not math.isnan(loss), "loss is NaN"
 
             # ensure params stayed finite
             for name, p in model.named_parameters():
@@ -596,20 +599,12 @@ class TestFlowIntegrationCorrectness:
 class TestVelocityFieldProperties:
     """Test velocity field sanity checks."""
 
-    def test_velocity_field_finite(self, device):
+    def test_velocity_field_finite(self, device, gvp_encoder):
         """Velocity predictions should be finite (no NaN or Inf)."""
         data = make_batched_hetero(device, n_graphs=1, n_protein_per=24, n_water_per=12)
 
-        base_encoder = ProteinGVPEncoder(
-            node_scalar_in=16,
-            hidden_dims=(64, 8),
-            n_edge_scalar_in=16,
-            pool_residue=False,
-        ).to(device)
-        encoder = GVPEncoder(encoder=base_encoder, freeze=False)
-
         model = FlowWaterGVP(
-            encoder=encoder,
+            encoder=gvp_encoder,
             hidden_dims=(64, 8),
             layers=1,
             k_pw=8,
@@ -631,20 +626,12 @@ class TestVelocityFieldProperties:
                 f"Velocity magnitude too large at t={t_val}: {max_mag:.3e}"
             )
 
-    def test_velocity_field_changes_with_t(self, device):
+    def test_velocity_field_changes_with_t(self, device, gvp_encoder):
         """Velocity field should depend on t (different outputs for different times)."""
         data = make_batched_hetero(device, n_graphs=1, n_protein_per=24, n_water_per=12)
 
-        base_encoder = ProteinGVPEncoder(
-            node_scalar_in=16,
-            hidden_dims=(64, 8),
-            n_edge_scalar_in=16,
-            pool_residue=False,
-        ).to(device)
-        encoder = GVPEncoder(encoder=base_encoder, freeze=False)
-
         model = FlowWaterGVP(
-            encoder=encoder,
+            encoder=gvp_encoder,
             hidden_dims=(64, 8),
             layers=1,
             k_pw=8,
@@ -659,10 +646,14 @@ class TestVelocityFieldProperties:
         v0 = model(data, t0, sc=None)
         v1 = model(data, t1, sc=None)
 
-        # Velocities should be different
-        diff = torch.norm(v0 - v1, dim=-1).mean().item()
-
-        assert diff > 1e-4, f"Velocity field doesn't change with t (diff={diff:.6f})"
+        # Velocities should be different - check that MOST individual waters show change
+        per_water_diff = torch.norm(v0 - v1, dim=-1)  # per-water norm
+        n_different = (per_water_diff > 1e-5).sum().item()
+        n_water = v0.shape[0]
+        assert n_different >= n_water * 0.9, (
+            f"Velocity field doesn't change with t for most waters "
+            f"({n_different}/{n_water} changed)"
+        )
 
 
 @pytest.mark.unit

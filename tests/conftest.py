@@ -51,3 +51,27 @@ def pdb_8dzt():
 def pdb_1deu():
     """1deu - has insertion codes (52 residues with ins_code='P')."""
     return _resolve_pdb_path("1deu")
+
+
+# ============== Shared encoder fixtures ==============
+
+
+@pytest.fixture
+def base_encoder(device):
+    """Base ProteinGVPEncoder for flow model tests."""
+    from src.gvp_encoder import ProteinGVPEncoder
+
+    return ProteinGVPEncoder(
+        node_scalar_in=16,
+        hidden_dims=(64, 8),
+        n_edge_scalar_in=16,
+        pool_residue=False,
+    ).to(device)
+
+
+@pytest.fixture
+def gvp_encoder(base_encoder):
+    """Wrapped GVPEncoder for flow model tests."""
+    from src.gvp_encoder import GVPEncoder
+
+    return GVPEncoder(encoder=base_encoder, freeze=False)

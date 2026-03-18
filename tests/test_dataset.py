@@ -412,11 +412,8 @@ class TestCheckChainInteractions:
         atoms = bts.AtomArray(20)
         atoms.chain_id = np.array(["A"] * 10 + ["B"] * 10)
         # Place chains close together
-        atoms.coord = np.zeros((20, 3))
-        atoms.coord[:10] = np.random.randn(10, 3)
-        atoms.coord[10:] = np.random.randn(10, 3) + np.array(
-            [2.0, 0.0, 0.0]
-        )  # 2A offset
+        atoms.coord = np.random.randn(20, 3)
+        atoms.coord[10:] += np.array([2.0, 0.0, 0.0])
 
         is_valid, reason, status = check_chain_interactions(
             atoms, interface_dist_threshold=4.0
@@ -433,10 +430,7 @@ class TestCheckChainInteractions:
         atoms.chain_id = np.array(["A"] * 10 + ["B"] * 10)
         # Place chains far apart
         atoms.coord = np.zeros((20, 3))
-        atoms.coord[:10] = np.zeros((10, 3))
-        atoms.coord[10:] = np.zeros((10, 3)) + np.array(
-            [100.0, 0.0, 0.0]
-        )  # 100A offset
+        atoms.coord[10:] += np.array([100.0, 0.0, 0.0])
 
         is_valid, reason, status = check_chain_interactions(
             atoms, interface_dist_threshold=4.0

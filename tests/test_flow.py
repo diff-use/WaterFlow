@@ -8,6 +8,7 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 import torch
+import torch.nn.functional as F
 from torch_geometric.data import Data, HeteroData
 
 from src.flow import (
@@ -49,14 +50,18 @@ def batched_hetero_data(device):
 
     # Protein: 20 atoms (10 per graph)
     data["protein"].pos = torch.randn(20, 3, device=device)
-    data["protein"].x = torch.randn(20, 16, device=device)
+    # One-hot encoded element types (16 classes: 15 elements + 1 "other")
+    protein_elem_indices = torch.randint(0, 16, (20,), device=device)
+    data["protein"].x = F.one_hot(protein_elem_indices, num_classes=16).float()
     data["protein"].batch = torch.cat(
         [torch.zeros(10, dtype=torch.long), torch.ones(10, dtype=torch.long)]
     ).to(device)
 
     # Water: 8 molecules (4 per graph)
     data["water"].pos = torch.randn(8, 3, device=device)
-    data["water"].x = torch.randn(8, 16, device=device)
+    # One-hot encoded element types (water is oxygen, index 2 in ELEMENT_VOCAB)
+    water_elem_indices = torch.full((8,), 2, dtype=torch.long, device=device)
+    data["water"].x = F.one_hot(water_elem_indices, num_classes=16).float()
     data["water"].batch = torch.cat(
         [torch.zeros(4, dtype=torch.long), torch.ones(4, dtype=torch.long)]
     ).to(device)
@@ -88,6 +93,9 @@ def mock_encoder(device):
     return encoder
 
 
+# base_encoder and gvp_encoder fixtures are defined in conftest.py
+
+
 @pytest.mark.unit
 class TestBuildKnnEdges:
     def test_basic_knn(self, device):
@@ -99,8 +107,16 @@ class TestBuildKnnEdges:
         edges = build_knn_edges(src, dst, k=2)
 
         assert edges.shape[0] == 2
-        assert edges.shape[1] > 0
+        assert edges.shape[1] >= 4  # At least 2 dst points × 2 neighbors each
         assert edges.dtype == torch.long
+
+        # dst[0] at 0.5 should connect to src[0] (dist=0.5) and src[1] (dist=0.5)
+        # dst[1] at 1.5 should connect to src[1] (dist=0.5) and src[2] (dist=0.5)
+        edge_set = set(zip(edges[0].tolist(), edges[1].tolist()))
+        assert (0, 0) in edge_set, f"Missing edge src[0]->dst[0], got {edge_set}"
+        assert (1, 0) in edge_set, f"Missing edge src[1]->dst[0], got {edge_set}"
+        assert (1, 1) in edge_set, f"Missing edge src[1]->dst[1], got {edge_set}"
+        assert (2, 1) in edge_set, f"Missing edge src[2]->dst[1], got {edge_set}"
 
     def test_empty_src(self, device):
         src = torch.empty(0, 3, device=device)
@@ -309,17 +325,9 @@ class TestFlowWaterGVP:
 
         assert v_pred.shape == (0, 3)
 
-    def test_self_conditioning(self, simple_hetero_data, device):
-        base_encoder = ProteinGVPEncoder(
-            node_scalar_in=16,
-            hidden_dims=(64, 8),
-            n_edge_scalar_in=16,
-            pool_residue=False,
-        ).to(device)
-        encoder = GVPEncoder(encoder=base_encoder, freeze=False)
-
+    def test_self_conditioning(self, simple_hetero_data, device, gvp_encoder):
         model = FlowWaterGVP(
-            encoder=encoder,
+            encoder=gvp_encoder,
             hidden_dims=(64, 8),
             layers=1,
         ).to(device)
@@ -339,17 +347,9 @@ class TestFlowWaterGVP:
 @pytest.mark.unit
 class TestFlowMatcher:
     @pytest.fixture
-    def flow_matcher(self, device):
-        base_encoder = ProteinGVPEncoder(
-            node_scalar_in=16,
-            hidden_dims=(64, 8),
-            n_edge_scalar_in=16,
-            pool_residue=False,
-        ).to(device)
-        encoder = GVPEncoder(encoder=base_encoder, freeze=False)
-
+    def flow_matcher(self, device, gvp_encoder):
         model = FlowWaterGVP(
-            encoder=encoder,
+            encoder=gvp_encoder,
             hidden_dims=(64, 8),
             layers=1,
         ).to(device)
