@@ -1,8 +1,8 @@
 name: Lint
 
 on:
-  # pull_request:
-  #   branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -37,7 +37,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
-      
+
       - name: Setup UV and python version
         uses: astral-sh/setup-uv@v7
 

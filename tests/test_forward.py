@@ -4,6 +4,7 @@ Integration-ish tests to catch NaNs/Infs during forward/training.
 All test cases created with assistance from Claude Code and refined.
 """
 
+import math
 import os
 
 import pytest
@@ -11,7 +12,7 @@ import torch
 from torch_geometric.data import HeteroData
 
 from src.flow import FlowMatcher, FlowWaterGVP
-from src.gvp_encoder import GVPEncoder, ProteinGVPEncoder, make_encoder_data
+from src.gvp_encoder import GVPEncoder, make_gvp_encoder_data, ProteinGVPEncoder
 
 
 def _iter_tensors(obj):
@@ -129,7 +130,9 @@ def make_batched_hetero(
     return data
 
 
-def assert_edge_index_in_range(edge_index: torch.Tensor, n_src: int, n_dst: int, name: str):
+def assert_edge_index_in_range(
+    edge_index: torch.Tensor, n_src: int, n_dst: int, name: str
+):
     if edge_index.numel() == 0:
         return
     smax = int(edge_index[0].max().item())
@@ -137,11 +140,14 @@ def assert_edge_index_in_range(edge_index: torch.Tensor, n_src: int, n_dst: int,
     assert smax < n_src, f"{name}: src index out of range (max={smax}, n_src={n_src})"
     assert dmax < n_dst, f"{name}: dst index out of range (max={dmax}, n_dst={n_dst})"
 
+
 def test_rbf_zero_is_finite(device):
     from src.utils import rbf
+
     r = torch.zeros(128, device=device)
     out = rbf(r, num_gaussians=16, cutoff=8.0)
     assert torch.isfinite(out).all()
+
 
 @pytest.mark.slow
 def test_forward_pass_no_nan_with_module_hooks(device):
@@ -165,7 +171,7 @@ def test_forward_pass_no_nan_with_module_hooks(device):
     base_encoder = ProteinGVPEncoder(
         node_scalar_in=16,
         hidden_dims=(64, 8),
-        edge_scalar_in=16,
+        n_edge_scalar_in=16,
         n_layers=2,
         pool_residue=False,
         num_edge_rbf=16,
@@ -177,24 +183,40 @@ def test_forward_pass_no_nan_with_module_hooks(device):
         encoder=encoder,
         hidden_dims=(64, 8),
         layers=2,
-        k_pw=8,   # keep <= n_water_per
-        k_ww=8,   # keep <= n_water_per
+        k_pw=8,  # keep <= n_water_per
+        k_ww=8,  # keep <= n_water_per
     ).to(device)
 
     # Quick pre-check: protein encoder input features created from pp edges
-    enc_data = make_encoder_data(data)
-    assert_edge_index_in_range(enc_data.edge_index, enc_data.x.size(0), enc_data.x.size(0), "pp edge_index")
+    enc_data = make_gvp_encoder_data(data)
+    assert_edge_index_in_range(
+        enc_data.edge_index, enc_data.x.size(0), enc_data.x.size(0), "pp edge_index"
+    )
 
     # Also validate knn edges are sane (catches orientation / k issues)
     edge_dict = model.updater.build_edges(data, k_pw=model.k_pw, k_ww=model.k_ww)
-    assert_edge_index_in_range(edge_dict[("protein", "pw", "water")], data["protein"].pos.size(0), data["water"].pos.size(0), "pw edge_index")
-    assert_edge_index_in_range(edge_dict[("water", "ww", "water")], data["water"].pos.size(0), data["water"].pos.size(0), "ww edge_index")
+    assert_edge_index_in_range(
+        edge_dict[("protein", "pw", "water")],
+        data["protein"].pos.size(0),
+        data["water"].pos.size(0),
+        "pw edge_index",
+    )
+    assert_edge_index_in_range(
+        edge_dict[("water", "ww", "water")],
+        data["water"].pos.size(0),
+        data["water"].pos.size(0),
+        "ww edge_index",
+    )
 
     t = torch.linspace(0.05, 0.95, steps=n_graphs, device=device)
 
+    # FiniteHookManager registers forward hooks on modules to catch NaN/Inf
+    # outputs early. This helps identify exactly which layer produces invalid values.
     with FiniteHookManager() as hm:
         # Encoder internals (access via .encoder.encoder for wrapped GVPEncoder)
-        hm.watch(model.encoder.encoder.input_scalar_encoder, "encoder.input_scalar_encoder")
+        hm.watch(
+            model.encoder.encoder.input_scalar_encoder, "encoder.input_scalar_encoder"
+        )
         hm.watch(model.encoder.encoder.input_gvp, "encoder.input_gvp")
         for i, layer in enumerate(model.encoder.encoder.layers):
             hm.watch(layer, f"encoder.layers[{i}]")
@@ -231,7 +253,7 @@ def test_training_step_no_nan_tripwire(device):
     base_encoder = ProteinGVPEncoder(
         node_scalar_in=16,
         hidden_dims=(64, 8),
-        edge_scalar_in=16,
+        n_edge_scalar_in=16,
         n_layers=2,
         pool_residue=False,
         num_edge_rbf=16,
@@ -249,7 +271,7 @@ def test_training_step_no_nan_tripwire(device):
 
     fm = FlowMatcher(
         model=model,
-        p_self_cond=0.0,         # simpler/cleaner for tripwire
+        p_self_cond=0.0,  # simpler/cleaner for tripwire
         use_distortion=False,
         loss_eps=1e-3,
     )
@@ -270,7 +292,7 @@ def test_training_step_no_nan_tripwire(device):
 
             loss = out["loss"]
             assert isinstance(loss, float)
-            assert loss == loss, "loss is NaN"
+            assert not math.isnan(loss), "loss is NaN"
 
             # ensure params stayed finite
             for name, p in model.named_parameters():
@@ -299,7 +321,7 @@ def test_forward_with_duplicate_protein_coords_catches_nan(device):
     base_encoder = ProteinGVPEncoder(
         node_scalar_in=16,
         hidden_dims=(64, 8),
-        edge_scalar_in=16,
+        n_edge_scalar_in=16,
         n_layers=2,
         pool_residue=False,
         num_edge_rbf=16,
@@ -326,6 +348,7 @@ def test_forward_with_duplicate_protein_coords_catches_nan(device):
 
     assert torch.isfinite(v_pred).all(), "v_pred has NaN/Inf under duplicate coords"
 
+
 @pytest.mark.slow
 def test_forward_with_duplicate_protein_coords_localizes_nan(device):
     torch.manual_seed(2)
@@ -337,13 +360,13 @@ def test_forward_with_duplicate_protein_coords_localizes_nan(device):
         n_graphs=1,
         n_protein_per=32,
         n_water_per=16,
-        duplicate_protein_coords=True,   # force a zero-distance pair
+        duplicate_protein_coords=True,  # force a zero-distance pair
     )
 
     base_encoder = ProteinGVPEncoder(
         node_scalar_in=16,
         hidden_dims=(64, 8),
-        edge_scalar_in=16,
+        n_edge_scalar_in=16,
         n_layers=2,
         pool_residue=False,
         num_edge_rbf=16,
@@ -360,7 +383,7 @@ def test_forward_with_duplicate_protein_coords_localizes_nan(device):
     ).to(device)
 
     # ---- Pre-check: encoder input edges ----
-    enc_data = make_encoder_data(data)
+    enc_data = make_gvp_encoder_data(data)
     for tensor in _iter_tensors(enc_data):
         assert torch.isfinite(tensor).all()
 
@@ -368,7 +391,9 @@ def test_forward_with_duplicate_protein_coords_localizes_nan(device):
 
     with FiniteHookManager() as hm:
         # encoder internals (access via .encoder.encoder for wrapped GVPEncoder)
-        hm.watch(model.encoder.encoder.input_scalar_encoder, "encoder.input_scalar_encoder")
+        hm.watch(
+            model.encoder.encoder.input_scalar_encoder, "encoder.input_scalar_encoder"
+        )
         hm.watch(model.encoder.encoder.input_gvp, "encoder.input_gvp")
         for i, layer in enumerate(model.encoder.encoder.layers):
             hm.watch(layer, f"encoder.layers[{i}]")
@@ -387,6 +412,7 @@ def test_forward_with_duplicate_protein_coords_localizes_nan(device):
 
 # ============== Tests for Flow Matching Fundamentals ==============
 
+
 @pytest.mark.unit
 class TestHungarianMatchingConsistency:
     """Tests for Hungarian matching correctness."""
@@ -404,8 +430,12 @@ class TestHungarianMatchingConsistency:
         x0_star_2, x1_star_2 = ot_coupling(x1, batch, x0)
 
         # Should be identical
-        assert torch.allclose(x0_star_1, x0_star_2, atol=1e-6), "Hungarian matching is non-deterministic!"
-        assert torch.allclose(x1_star_1, x1_star_2, atol=1e-6), "Hungarian matching is non-deterministic!"
+        assert torch.allclose(x0_star_1, x0_star_2, atol=1e-6), (
+            "Hungarian matching is non-deterministic!"
+        )
+        assert torch.allclose(x1_star_1, x1_star_2, atol=1e-6), (
+            "Hungarian matching is non-deterministic!"
+        )
 
     def test_hungarian_is_permutation(self, device):
         """Hungarian matching is a permutation (reordering)."""
@@ -421,25 +451,27 @@ class TestHungarianMatchingConsistency:
         for i in range(len(x1_star)):
             dists = torch.norm(x1 - x1_star[i], dim=-1)
             min_dist = dists.min().item()
-            assert min_dist < 1e-5, f"x1_star[{i}] not found in x1 (min_dist={min_dist})"
+            assert min_dist < 1e-5, (
+                f"x1_star[{i}] not found in x1 (min_dist={min_dist})"
+            )
 
     def test_hungarian_batched_no_cross_contamination(self, device):
         """Hungarian matching doesn't cross batch boundaries."""
         from src.utils import ot_coupling
 
         # Two separate graphs
-        x1 = torch.cat([
-            torch.randn(5, 3, device=device),
-            torch.randn(7, 3, device=device) + 100.0  # Far away
-        ])
-        x0 = torch.cat([
-            torch.randn(5, 3, device=device),
-            torch.randn(7, 3, device=device) + 100.0
-        ])
-        batch = torch.cat([
-            torch.zeros(5, dtype=torch.long),
-            torch.ones(7, dtype=torch.long)
-        ]).to(device)
+        x1 = torch.cat(
+            [
+                torch.randn(5, 3, device=device),
+                torch.randn(7, 3, device=device) + 100.0,  # Far away
+            ]
+        )
+        x0 = torch.cat(
+            [torch.randn(5, 3, device=device), torch.randn(7, 3, device=device) + 100.0]
+        )
+        batch = torch.cat(
+            [torch.zeros(5, dtype=torch.long), torch.ones(7, dtype=torch.long)]
+        ).to(device)
 
         x0_star, x1_star = ot_coupling(x1, batch, x0)
 
@@ -459,13 +491,16 @@ class TestNoiseSamplingScale:
 
     def test_compute_sigma_matches_protein_std(self, device):
         """Sigma should equal std of protein coordinates."""
-        data = make_batched_hetero(device, n_graphs=1, n_protein_per=100, n_water_per=20)
+        data = make_batched_hetero(
+            device, n_graphs=1, n_protein_per=100, n_water_per=20
+        )
 
         sigma = FlowMatcher.compute_sigma(data)
-        expected_sigma = data['protein'].pos.std().item()
+        expected_sigma = data["protein"].pos.std().item()
 
-        assert abs(sigma - expected_sigma) < 1e-5, \
+        assert abs(sigma - expected_sigma) < 1e-5, (
             f"Sigma {sigma:.6f} doesn't match protein std {expected_sigma:.6f}"
+        )
 
     def test_sigma_consistent_across_calls(self, device):
         """compute_sigma should be deterministic."""
@@ -481,14 +516,15 @@ class TestNoiseSamplingScale:
         data = make_batched_hetero(device, n_graphs=1, n_protein_per=50, n_water_per=20)
 
         sigma = FlowMatcher.compute_sigma(data)
-        n_water = data['water'].num_nodes
+        n_water = data["water"].num_nodes
         x0 = torch.randn(n_water, 3, device=device) * sigma
 
         x0_std = x0.std().item()
 
         # Allow some variation due to random sampling
-        assert abs(x0_std - sigma) / sigma < 0.3, \
+        assert abs(x0_std - sigma) / sigma < 0.3, (
             f"x0 std {x0_std:.3f} too different from sigma {sigma:.3f}"
+        )
 
 
 @pytest.mark.unit
@@ -500,28 +536,37 @@ class TestFlowIntegrationCorrectness:
         data = make_batched_hetero(device, n_graphs=1, n_protein_per=24, n_water_per=12)
 
         base_encoder = ProteinGVPEncoder(
-            node_scalar_in=16, hidden_dims=(64, 8), edge_scalar_in=16,
+            node_scalar_in=16,
+            hidden_dims=(64, 8),
+            n_edge_scalar_in=16,
             pool_residue=False,
         ).to(device)
         encoder = GVPEncoder(encoder=base_encoder, freeze=False)
 
         model = FlowWaterGVP(
-            encoder=encoder, hidden_dims=(64, 8), layers=1,
-            k_pw=8, k_ww=8,
+            encoder=encoder,
+            hidden_dims=(64, 8),
+            layers=1,
+            k_pw=8,
+            k_ww=8,
         ).to(device)
 
         fm = FlowMatcher(model, p_self_cond=0.0)
 
         num_steps = 20
         results = fm.rk4_integrate(
-            data, num_steps=num_steps, use_sc=False,
-            device=str(device), return_trajectory=True
+            data,
+            num_steps=num_steps,
+            use_sc=False,
+            device=str(device),
+            return_trajectory=True,
         )
         # rk4_integrate returns List[Dict], one per input graph
         result = results[0]
 
-        assert len(result['trajectory']) == num_steps, \
+        assert len(result["trajectory"]) == num_steps, (
             f"Expected {num_steps} trajectory steps, got {len(result['trajectory'])}"
+        )
 
     def test_interpolation_at_boundaries(self, device):
         """Interpolation x_t = (1-t)*x0 + t*x1 gives correct values at boundaries."""
@@ -538,35 +583,34 @@ class TestFlowIntegrationCorrectness:
         t_per_atom_0 = t0[batch].unsqueeze(-1)
         x_t_0 = (1.0 - t_per_atom_0) * x0_star + t_per_atom_0 * x1_star
 
-        assert torch.allclose(x_t_0, x0_star, atol=1e-6), \
+        assert torch.allclose(x_t_0, x0_star, atol=1e-6), (
             "Interpolation at t=0 doesn't match x0"
+        )
 
         # At t=1: x_t should equal x1_star
         t1 = torch.ones(1, device=device)
         t_per_atom_1 = t1[batch].unsqueeze(-1)
         x_t_1 = (1.0 - t_per_atom_1) * x0_star + t_per_atom_1 * x1_star
 
-        assert torch.allclose(x_t_1, x1_star, atol=1e-6), \
+        assert torch.allclose(x_t_1, x1_star, atol=1e-6), (
             "Interpolation at t=1 doesn't match x1"
+        )
 
 
 @pytest.mark.unit
 class TestVelocityFieldProperties:
     """Test velocity field sanity checks."""
 
-    def test_velocity_field_finite(self, device):
+    def test_velocity_field_finite(self, device, gvp_encoder):
         """Velocity predictions should be finite (no NaN or Inf)."""
         data = make_batched_hetero(device, n_graphs=1, n_protein_per=24, n_water_per=12)
 
-        base_encoder = ProteinGVPEncoder(
-            node_scalar_in=16, hidden_dims=(64, 8), edge_scalar_in=16,
-            pool_residue=False,
-        ).to(device)
-        encoder = GVPEncoder(encoder=base_encoder, freeze=False)
-
         model = FlowWaterGVP(
-            encoder=encoder, hidden_dims=(64, 8), layers=1,
-            k_pw=8, k_ww=8,
+            encoder=gvp_encoder,
+            hidden_dims=(64, 8),
+            layers=1,
+            k_pw=8,
+            k_ww=8,
         ).to(device)
 
         model.eval()
@@ -576,27 +620,24 @@ class TestVelocityFieldProperties:
             t = torch.tensor([t_val], device=device)
             v_pred = model(data, t, self_cond=None)
 
-            assert torch.isfinite(v_pred).all(), \
-                f"Velocity has NaN/Inf at t={t_val}"
+            assert torch.isfinite(v_pred).all(), f"Velocity has NaN/Inf at t={t_val}"
 
             # Check magnitude is not absurdly large
             max_mag = torch.norm(v_pred, dim=-1).max().item()
-            assert max_mag < 1e6, \
+            assert max_mag < 1e6, (
                 f"Velocity magnitude too large at t={t_val}: {max_mag:.3e}"
+            )
 
-    def test_velocity_field_changes_with_t(self, device):
+    def test_velocity_field_changes_with_t(self, device, gvp_encoder):
         """Velocity field should depend on t (different outputs for different times)."""
         data = make_batched_hetero(device, n_graphs=1, n_protein_per=24, n_water_per=12)
 
-        base_encoder = ProteinGVPEncoder(
-            node_scalar_in=16, hidden_dims=(64, 8), edge_scalar_in=16,
-            pool_residue=False,
-        ).to(device)
-        encoder = GVPEncoder(encoder=base_encoder, freeze=False)
-
         model = FlowWaterGVP(
-            encoder=encoder, hidden_dims=(64, 8), layers=1,
-            k_pw=8, k_ww=8,
+            encoder=gvp_encoder,
+            hidden_dims=(64, 8),
+            layers=1,
+            k_pw=8,
+            k_ww=8,
         ).to(device)
 
         model.eval()
@@ -607,11 +648,14 @@ class TestVelocityFieldProperties:
         v0 = model(data, t0, self_cond=None)
         v1 = model(data, t1, self_cond=None)
 
-        # Velocities should be different
-        diff = torch.norm(v0 - v1, dim=-1).mean().item()
-
-        assert diff > 1e-4, \
-            f"Velocity field doesn't change with t (diff={diff:.6f})"
+        # Velocities should be different - check that MOST individual waters show change
+        per_water_diff = torch.norm(v0 - v1, dim=-1)  # per-water norm
+        n_different = (per_water_diff > 1e-5).sum().item()
+        n_water = v0.shape[0]
+        assert n_different >= n_water * 0.9, (
+            f"Velocity field doesn't change with t for most waters "
+            f"({n_different}/{n_water} changed)"
+        )
 
 
 @pytest.mark.unit
@@ -629,8 +673,8 @@ class TestTargetVelocityScale:
 
         data = make_batched_hetero(device, n_graphs=1, n_protein_per=50, n_water_per=20)
 
-        x1 = data['water'].pos
-        batch = data['water'].batch
+        x1 = data["water"].pos
+        batch = data["water"].batch
 
         sigma = FlowMatcher.compute_sigma(data)
         x0 = torch.randn_like(x1) * sigma
@@ -642,7 +686,6 @@ class TestTargetVelocityScale:
         target_mag = torch.norm(v_target, dim=-1).mean().item()
 
         # Should be on order of sigma (could be sigma to 3*sigma depending on x1 spread)
-        assert 0.5 * sigma < target_mag < 5 * sigma, \
+        assert 0.5 * sigma < target_mag < 5 * sigma, (
             f"Target velocity magnitude {target_mag:.3f} seems off (sigma={sigma:.3f})"
-
-
+        )

@@ -198,7 +198,7 @@ class _VDropout(nn.Module):
     """
 
     def __init__(self, drop_rate):
-        super(_VDropout, self).__init__()
+        super().__init__()
         self.drop_rate = drop_rate
         self.dummy_param = nn.Parameter(torch.empty(0))
 
@@ -223,7 +223,7 @@ class Dropout(nn.Module):
     """
 
     def __init__(self, drop_rate):
-        super(Dropout, self).__init__()
+        super().__init__()
         self.sdropout = nn.Dropout(drop_rate)
         self.vdropout = _VDropout(drop_rate)
 
@@ -513,7 +513,7 @@ class EdgeUpdate(nn.Module):
         self,
         n_node_scalars: int,  # S_node (e.g., 256)
         s_edge_width: int,  # fixed model edge width used everywhere
-        update_w_distance: bool = False,
+        update_w_distance_features: bool = False,
         distance_dim: int = 0,  # e.g., RBF size
     ):
         """
@@ -526,13 +526,13 @@ class EdgeUpdate(nn.Module):
             distance_dim: Dimension of distance features (e.g., RBF size)
         """
         super().__init__()
-        self.update_w_distance = update_w_distance
+        self.update_w_distance_features = update_w_distance_features
         self.s_edge_width = s_edge_width
 
         in_dim = (
             (2 * n_node_scalars)
             + s_edge_width
-            + (distance_dim if update_w_distance else 0)
+            + (distance_dim if update_w_distance_features else 0)
         )
 
         self.edge_mlp = nn.Sequential(
@@ -548,7 +548,7 @@ class EdgeUpdate(nn.Module):
         node_tuple: tuple,  # (s_node, V_node) with s_node: (N, S_node)
         edge_index: torch.Tensor,  # (2, E)
         edge_attr: tuple,  # (s_edge, V_edge) with s_edge: (E, s_edge_width)
-        distance_feat: torch.Tensor = None,  # (E, D) if enabled
+        distance_feat: torch.Tensor | None = None,  # (E, D) if enabled
     ) -> tuple:
         """
         Compute residual edge feature update.
@@ -566,14 +566,15 @@ class EdgeUpdate(nn.Module):
         s_node, _ = node_tuple
         s_edge, V_edge = edge_attr
 
-        assert s_edge.shape[-1] == self.s_edge_width, (
-            f"EdgeUpdate expected width {self.s_edge_width}, got {s_edge.shape[-1]}"
-        )
+        if s_edge.shape[-1] != self.s_edge_width:
+            raise ValueError(
+                f"EdgeUpdate expected width {self.s_edge_width}, got {s_edge.shape[-1]}"
+            )
 
         src, dst = edge_index[0], edge_index[1]
         parts = [s_node[src], s_node[dst], s_edge]
 
-        if self.update_w_distance:
+        if self.update_w_distance_features:
             parts.append(distance_feat)
 
         h = torch.cat(parts, dim=-1)  # (E, 2*S_node + s_edge_width (+D))
@@ -630,19 +631,19 @@ class GVPMultiEdge(MessagePassing):
         # message GVP stack; first layer takes [unit_vec] and [rbf] extras
         msg_layers = []
         for i in range(n_message_gvps):
-            vin = (
+            vector_input_dim = (
                 v_dim
-                + (1 if i == 0 else 0)
+                + (1 if i == 0 else 0)  # +1 for unit displacement vector on first layer
                 + (v_dim if (i == 0 and use_dst_feats) else 0)
             )
-            sin = (
+            scalar_input_dim = (
                 s_dim
                 + (rbf_dim if i == 0 else 0)
                 + (s_dim if (i == 0 and use_dst_feats) else 0)
             )
             msg_layers.append(
-                GVP(
-                    in_dims=(sin, vin),
+                GVP_(
+                    in_dims=(scalar_input_dim, vector_input_dim),
                     out_dims=(s_dim, v_dim),
                     vector_gate=True,
                     activations=activations,
@@ -761,7 +762,7 @@ class GVPMultiEdgeConv(nn.Module):
 
     def __init__(
         self,
-        etypes,  # List[EdgeType]
+        etypes: list[tuple[str, str, str]],  # (src_type, edge_type, dst_type)
         s_dim: int,
         v_dim: int,
         rbf_dim: int = 16,
@@ -806,7 +807,7 @@ class GVPMultiEdgeConv(nn.Module):
         for nt in dst_ntypes:
             upd_layers = []
             for _ in range(n_update_gvps):
-                upd_layers.append(GVP((s_dim, v_dim), (s_dim, v_dim)))
+                upd_layers.append(GVP_((s_dim, v_dim), (s_dim, v_dim)))
             self.node_updates[nt] = nn.Sequential(*upd_layers)
 
         # per-edge-type message convs feeding a HeteroConv(aggr='sum' across relations)

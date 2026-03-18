@@ -14,15 +14,39 @@ import copy
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch import Tensor, nn
+from torch import nn, Tensor
 from torch_geometric.data import Batch, HeteroData
+from torch_geometric.nn import nn
 from torch_scatter import scatter_mean
 from tqdm.auto import tqdm
 
 from src.constants import ALL_EDGE_TYPES, EDGE_PP, EDGE_PW, EDGE_WP, EDGE_WW, NUM_RBF
 from src.encoder_base import BaseProteinEncoder
 from src.gvp import GVP, GVPMultiEdgeConv
-from src.utils import build_knn_edges, ot_coupling
+from src.utils import ot_coupling
+
+
+def build_knn_edges(
+    src_pos: torch.Tensor,
+    dst_pos: torch.Tensor,
+    k: int,
+    batch_src: torch.Tensor | None = None,
+    batch_dst: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """
+    KNN edges from src -> dst (source indices in row 0, dest in row 1).
+    """
+    if src_pos.numel() == 0 or dst_pos.numel() == 0:
+        return torch.empty(2, 0, dtype=torch.long, device=src_pos.device)
+
+    idx = knn(x=dst_pos, y=src_pos, k=k, batch_x=batch_dst, batch_y=batch_src)
+
+    # remove self-edges if homogeneous
+    if src_pos.data_ptr() == dst_pos.data_ptr():
+        mask = idx[0] != idx[1]
+        idx = idx[:, mask]
+
+    return idx.unique(dim=1)
 
 
 class ProteinWaterUpdate(nn.Module):
@@ -487,7 +511,9 @@ class FlowMatcher:
         return float(pos.std().item())
 
     @staticmethod
-    def compute_sigma_per_graph(data: HeteroData, device: torch.device) -> torch.Tensor:
+    def compute_sigma_per_graph(
+        data: HeteroData | Batch, device: torch.device
+    ) -> torch.Tensor:
         """
         Compute sigma (std of protein coordinates) per graph in a batch.
 
@@ -703,7 +729,7 @@ class FlowMatcher:
         num_steps: int = 100,
         use_sc: bool = True,
         sc_ema_alpha: float = 0.2,
-        device: str = "cuda",
+        device: str | torch.device = "cuda",
         water_ratio: float | None = None,
     ) -> list[np.ndarray]:
         """
@@ -785,7 +811,7 @@ class FlowMatcher:
         num_steps: int = 500,
         use_sc: bool = True,
         sc_ema_alpha: float = 0.2,
-        device: str = "cuda",
+        device: str | torch.device = "cuda",
         return_trajectory: bool = True,
         water_ratio: float | None = None,
     ) -> list[dict[str, np.ndarray]]:

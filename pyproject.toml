@@ -230,9 +230,21 @@ python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true
 
+[tool.ty.rules]
+# uvx runs ty in isolation without project dependencies - ignore missing imports
+unresolved-import = "ignore"
+# PyTorch Geometric has incomplete type stubs - dynamic attributes on Batch/Data
+unresolved-attribute = "ignore"
+# PyG's MessagePassing.message() override pattern is intentional
+invalid-method-override = "ignore"
+# PyG's propagate() uses **kwargs which ty doesn't understand
+missing-argument = "ignore"
+# Dict.get() returns union types that don't narrow well
+invalid-argument-type = "ignore"
+
 [tool.ruff.lint]
 fixable = ["I001", "F401", "UP"]
-ignore = ["E402", "E721", "E731", "E741", "F722", "F821", "UP015", "UP037"]
+ignore = ["E402", "E501", "E721", "E731", "E741", "F722", "F821", "UP015", "UP037"]
 select = ["E", "F", "I001", "UP"]
 
 [tool.ruff.lint.flake8-import-conventions.extend-aliases]

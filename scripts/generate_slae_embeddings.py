@@ -27,6 +27,7 @@ Output format (per cache file):
         'pdb_id': str,
     }
 """
+
 from __future__ import annotations
 
 import argparse
@@ -193,8 +194,8 @@ def compute_slae_embeddings_batch(
     """
     Compute and align SLAE node embeddings from atom37 coords for batched structures.
 
-    Embeddings are aligned to the target geometry's atom order. Non-canonical atoms 
-    lacking SLAE representations are zero-padded. All input lists share the 
+    Embeddings are aligned to the target geometry's atom order. Non-canonical atoms
+    lacking SLAE representations are zero-padded. All input lists share the
     same length (batch size).
 
     Args:
@@ -217,7 +218,11 @@ def compute_slae_embeddings_batch(
     slae_atom_info_list = []
 
     for coords, residue_type, residue_id, chains, ins_code in zip(
-        coords_list, residue_type_list, residue_id_list, chains_list, ins_code_list,
+        coords_list,
+        residue_type_list,
+        residue_id_list,
+        chains_list,
+        ins_code_list,
         strict=True,
     ):
         # create PyG Data object with atom37 coords (featurizer will convert to flat)
@@ -430,13 +435,14 @@ def main() -> None:
         # compute embeddings for batch
         if batch_data:
             try:
-                (coords_list,
-                 residue_type_list,
-                 residue_id_list,
-                 chains_list,
-                 ins_code_list,
-                 geometry_atom_info_list
-                 ) = zip(*batch_data)
+                (
+                    coords_list,
+                    residue_type_list,
+                    residue_id_list,
+                    chains_list,
+                    ins_code_list,
+                    geometry_atom_info_list,
+                ) = zip(*batch_data)
 
                 embeddings_list = compute_slae_embeddings_batch(
                     list(coords_list),
