@@ -1,6 +1,7 @@
 # utils.py
 from __future__ import annotations
 
+
 """
 Utility functions organized by category:
 1. Feature encoding (rbf, atom37_to_atoms, normalize_ins_code)
@@ -23,10 +24,10 @@ from e3nn.math import soft_one_hot_linspace
 from PIL import Image
 from scipy.optimize import linear_sum_assignment
 from torch import Tensor
-
 from tqdm import tqdm
 
 from src.constants import NUM_RBF, RBF_CUTOFF
+
 
 def setup_logging_for_tqdm(
     level: str = "INFO",
@@ -130,6 +131,7 @@ def parse_split_file(split_file: Path, base_pdb_dir: Path) -> list[dict]:
 
 ATOM37_FILL = 1e-5
 
+
 def rbf(r: Tensor, num_gaussians: int = NUM_RBF, cutoff: float = RBF_CUTOFF) -> Tensor:
     """
     Compute radial basis function encoding of distances.
@@ -214,11 +216,12 @@ def ot_coupling(
 
     return x0_star, x1_star
 
+
 # eval metric functions
 @torch.no_grad()
 def recall_precision(
     pred: torch.Tensor | np.ndarray,
-    true: torch.Tensor | np.ndarray,
+    ground_truth: torch.Tensor | np.ndarray,
     thresh: float = 1.0,
 ) -> tuple[float, float]:
     """
@@ -228,33 +231,34 @@ def recall_precision(
 
     Args:
         pred: (N_pred, 3) predicted positions
-        true: (N_true, 3) ground truth positions
+        ground_truth: (N_true, 3) ground truth positions
         thresh: distance threshold in Angstroms
 
     Returns:
         recall: fraction of true points with a prediction within thresh
         precision: fraction of predictions within thresh of a true point
     """
-    # handle empty inputs
+    # convert numpy arrays to tensors first
     if isinstance(pred, np.ndarray):
-        if pred.size == 0 or true.size == 0:
-            return 0.0, 0.0
         pred = torch.from_numpy(pred)
-        true = torch.from_numpy(true)
-    else:
-        if pred.numel() == 0 or true.numel() == 0:
-            return 0.0, 0.0
+    if isinstance(ground_truth, np.ndarray):
+        ground_truth = torch.from_numpy(ground_truth)
+
+    # handle empty inputs
+    if pred.numel() == 0 or ground_truth.numel() == 0:
+        return 0.0, 0.0
 
     # ensure same device
-    if pred.device != true.device:
-        true = true.to(pred.device)
+    if pred.device != ground_truth.device:
+        ground_truth = ground_truth.to(pred.device)
 
-    D = torch.cdist(true.float(), pred.float(), p=2)
+    D = torch.cdist(ground_truth.float(), pred.float(), p=2)
 
     recall = (D.min(dim=1)[0] <= thresh).float().mean().item()
     precision = (D.min(dim=0)[0] <= thresh).float().mean().item()
 
     return recall, precision
+
 
 @torch.no_grad()
 def compute_rmsd(
@@ -294,6 +298,7 @@ def compute_rmsd(
     row_ind, col_ind = linear_sum_assignment(dist_matrix)
     diff = pred[row_ind] - target[col_ind]
     return float(np.sqrt(np.mean(np.sum(diff**2, axis=1))))
+
 
 def compute_placement_metrics(
     pred: torch.Tensor | np.ndarray,
@@ -343,17 +348,18 @@ def compute_placement_metrics(
 
     return {"precision": precision, "recall": recall, "f1": f1, "auc_pr": auc_pr}
 
+
 # viz functions
 def plot_3d_frame(
     ax,
     protein_pos: np.ndarray,
-    mate_pos: np.ndarray,
+    mate_pos: np.ndarray | None,
     water_pred: np.ndarray,
     water_true: np.ndarray,
     title: str = "",
-    xlim: tuple[float, float] = None,
-    ylim: tuple[float, float] = None,
-    zlim: tuple[float, float] = None,
+    xlim: tuple[float, float] | None = None,
+    ylim: tuple[float, float] | None = None,
+    zlim: tuple[float, float] | None = None,
 ):
     """
     Plot a single 3D frame showing protein structure and water positions.
@@ -427,6 +433,7 @@ def plot_3d_frame(
     if zlim is not None:
         ax.set_zlim(zlim)
 
+
 def create_trajectory_gif(
     trajectory: Sequence[np.ndarray],
     protein_pos: np.ndarray,
@@ -434,7 +441,7 @@ def create_trajectory_gif(
     save_path: str,
     title: str = "",
     fps: int = 10,
-    pdb_id: str = None,
+    pdb_id: str | None = None,
 ):
     """
     Create a GIF from a trajectory of water positions.
@@ -505,6 +512,7 @@ def create_trajectory_gif(
             duration=1000 // fps,
             loop=0,
         )
+
 
 def save_protein_plot(
     pred_ca: torch.Tensor,
