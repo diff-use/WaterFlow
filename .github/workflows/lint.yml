@@ -41,8 +41,5 @@ jobs:
       - name: Setup UV and python version
         uses: astral-sh/setup-uv@v7
 
-      - name: Install dependencies
-        run: uv sync
-
       - name: Run ty
-        run: uv run ty check src/
+        run: uvx ty check src/
