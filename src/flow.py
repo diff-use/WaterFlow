@@ -238,19 +238,22 @@ class ProteinWaterUpdate(nn.Module):
         if EDGE_PP in data.edge_types:
             pp_edge = data[EDGE_PP]
 
-            # V_edge fallback is for backward compatibility with datasets                                         
-            # that don't have cached edge features. A given model only sees one or the other. 
+            # V_edge fallback is for backward compatibility with datasets
+            # that don't have cached edge features. A given model only sees one or the other.
             if pp_edge_attr is not None:
-                # Use encoder-learned scalar features (s_edge) with unit vectors 
+                # Use encoder-learned scalar features (s_edge) with unit vectors
                 s_edge, V_edge = pp_edge_attr
                 if hasattr(pp_edge, "edge_unit_vectors"):
                     cached_edge_attr_dict[EDGE_PP] = (s_edge, pp_edge.edge_unit_vectors)
                 else:
-                    # Fallback for datasets without cached unit vectors 
+                    # Fallback for datasets without cached unit vectors
                     cached_edge_attr_dict[EDGE_PP] = (s_edge, V_edge.squeeze(1))
             elif hasattr(pp_edge, "edge_rbf") and hasattr(pp_edge, "edge_unit_vectors"):
-                # No encoder edge features (e.g., SLAE/ESM) - use cached geometric features                                        
-                cached_edge_attr_dict[EDGE_PP] = (pp_edge.edge_rbf, pp_edge.edge_unit_vectors)
+                # No encoder edge features (e.g., SLAE/ESM) - use cached geometric features
+                cached_edge_attr_dict[EDGE_PP] = (
+                    pp_edge.edge_rbf,
+                    pp_edge.edge_unit_vectors,
+                )
 
         for block in self.blocks:
             x_dict = block(x_dict, edge_index_dict, pos_dict, cached_edge_attr_dict)
