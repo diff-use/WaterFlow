@@ -1618,9 +1618,7 @@ class TestLoadSlaeEmbedding:
         """Should raise ValueError if atom count doesn't match."""
         slae_dir = tmp_path / "processed" / "slae"
         slae_dir.mkdir(parents=True, exist_ok=True)
-        torch.save(
-            {"node_embeddings": torch.randn(50, 64)}, slae_dir / "test_final.pt"
-        )
+        torch.save({"node_embeddings": torch.randn(50, 64)}, slae_dir / "test_final.pt")
 
         with pytest.raises(ValueError, match="atom count mismatch"):
             mock_dataset._load_slae_embedding(
@@ -2221,7 +2219,9 @@ class TestRBFFeatureComputation:
         assert not torch.isnan(rbf).any()
         assert not torch.isinf(rbf).any()
 
-    def test_unit_vectors_normalized(self, single_pdb_list_file, tmp_path, pdb_base_dir):
+    def test_unit_vectors_normalized(
+        self, single_pdb_list_file, tmp_path, pdb_base_dir
+    ):
         """Edge unit vectors should have norm ~1."""
         dataset = ProteinWaterDataset(
             pdb_list_file=single_pdb_list_file,
