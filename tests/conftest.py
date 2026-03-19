@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 import torch
 
+
 TEST_DIR = Path(__file__).parent
 ENV_PDB_DIR = os.environ.get("ENV_PDB_DIR")
 PDB_BASE_DIR = Path(ENV_PDB_DIR) if ENV_PDB_DIR else TEST_DIR / "test_files"
@@ -13,10 +14,10 @@ PDB_BASE_DIR = Path(ENV_PDB_DIR) if ENV_PDB_DIR else TEST_DIR / "test_files"
 def device():
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+
 @pytest.fixture(scope="session")
 def pdb_base_dir():
-    """Wrapper of constant PDB_BASE_DIR.
-    """
+    """Wrapper of constant PDB_BASE_DIR."""
     return PDB_BASE_DIR
 
 
@@ -50,3 +51,27 @@ def pdb_8dzt():
 def pdb_1deu():
     """1deu - has insertion codes (52 residues with ins_code='P')."""
     return _resolve_pdb_path("1deu")
+
+
+# ============== Shared encoder fixtures ==============
+
+
+@pytest.fixture
+def base_encoder(device):
+    """Base ProteinGVPEncoder for flow model tests."""
+    from src.gvp_encoder import ProteinGVPEncoder
+
+    return ProteinGVPEncoder(
+        node_scalar_in=16,
+        hidden_dims=(64, 8),
+        n_edge_scalar_in=16,
+        pool_residue=False,
+    ).to(device)
+
+
+@pytest.fixture
+def gvp_encoder(base_encoder):
+    """Wrapped GVPEncoder for flow model tests."""
+    from src.gvp_encoder import GVPEncoder
+
+    return GVPEncoder(encoder=base_encoder, freeze=False)
