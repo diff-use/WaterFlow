@@ -40,10 +40,6 @@ from src.utils import (
 )
 
 
-# Configure logging to work with tqdm progress bars
-setup_logging_for_tqdm()
-
-
 def parse_args():
     """
     Parse command-line arguments for inference configuration.
@@ -102,7 +98,7 @@ def parse_args():
         help="Include symmetry mate atoms as protein nodes",
     )
     p.add_argument(
-        "--geometry_cache",
+        "--geometry_cache_name",
         type=str,
         default=None,
         help="Subdirectory name within processed_dir specifying which water coordinate set to use. "
@@ -133,7 +129,7 @@ def parse_args():
         help="Number of integration steps (default: 100)",
     )
     p.add_argument(
-        "--use_sc",
+        "--use_self_cond",
         action="store_true",
         help="Use self-conditioning during integration",
     )
@@ -156,6 +152,9 @@ def parse_args():
         default="cuda",
         help="Device to run inference on (default: cuda)",
     )
+
+    p.add_argument("--log_level", type=str, default="INFO")
+    p.add_argument("--log_file", type=str, default=None)
 
     p.add_argument(
         "--batch_size",
@@ -257,8 +256,8 @@ def build_model_from_config(config: dict, device: torch.device) -> nn.Module:
         edge_scalar_dim=config.get("edge_scalar_dim") or NUM_RBF,
         layers=config.get("flow_layers") or 3,
         drop_rate=config.get("drop_rate", 0.1),
-        n_message_gvps=config.get("n_message_gvps", 2),
-        n_update_gvps=config.get("n_update_gvps", 2),
+        n_message_gvps=config.get("n_message_gvps", 2),  # ty: ignore[unknown-argument]
+        n_update_gvps=config.get("n_update_gvps", 2),  # ty: ignore[unknown-argument]
         k_pw=config.get("k_pw") or 16,
         k_ww=config.get("k_ww") or 16,
     ).to(device)
@@ -298,7 +297,7 @@ def run_inference_batch(
     num_steps: int,
     use_sc: bool,
     device: str,
-    water_ratio: float = None,
+    water_ratio: float | None = None,
 ) -> list:
     """
     Run inference on a batch of graphs.
@@ -387,8 +386,8 @@ def save_plot(
 
 def main():
     """Run inference pipeline on a list of PDB structures."""
-    setup_logging_for_tqdm()
     args = parse_args()
+    setup_logging_for_tqdm(level=args.log_level, log_file=args.log_file)
 
     # setup paths
     run_dir = Path(args.run_dir)
@@ -426,8 +425,8 @@ def main():
     include_mates = args.include_mates or config.get("include_mates", False)
     encoder_type = config.get("encoder_type", "gvp")
 
-    # Use --geometry_cache if provided, otherwise use config's geometry_cache_name
-    geometry_cache_name = args.geometry_cache or config.get(
+    # Use --geometry_cache_name if provided, otherwise use config's geometry_cache_name
+    geometry_cache_name = args.geometry_cache_name or config.get(
         "geometry_cache_name", "geometry"
     )
 
@@ -435,9 +434,9 @@ def main():
         pdb_list_file=args.pdb_list,
         processed_dir=args.processed_dir,
         base_pdb_dir=args.base_pdb_dir,
-        encoder_type=encoder_type,
+        encoder_type=encoder_type,  # ty: ignore[unknown-argument]
         include_mates=include_mates,
-        geometry_cache_name=geometry_cache_name,
+        geometry_cache_name=geometry_cache_name,  # ty: ignore[unknown-argument]
         preprocess=True,
     )
 
@@ -446,7 +445,7 @@ def main():
 
     # run inference
     logger.info(f"Running inference with method={args.method}, steps={args.num_steps}")
-    logger.info(f"Self-conditioning: {args.use_sc}")
+    logger.info(f"Self-conditioning: {args.use_self_cond}")
     logger.info(f"Threshold for metrics: {args.threshold}Å")
     logger.info(f"Batch size: {args.batch_size}")
 
@@ -496,7 +495,7 @@ def main():
             batch_graphs,
             method=args.method,
             num_steps=args.num_steps,
-            use_sc=args.use_sc,
+            use_sc=args.use_self_cond,
             device=args.device,
             water_ratio=args.water_ratio,
         )
@@ -597,7 +596,7 @@ def main():
                         "checkpoint": args.checkpoint,
                         "method": args.method,
                         "num_steps": args.num_steps,
-                        "use_sc": args.use_sc,
+                        "use_sc": args.use_self_cond,
                         "threshold": args.threshold,
                         "include_mates": include_mates,
                         "water_ratio": args.water_ratio,
