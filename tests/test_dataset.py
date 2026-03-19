@@ -1430,9 +1430,9 @@ class TestApplyThresholdFilter:
         )
 
         # Only ("A", 2, "") with value 0.3 < 0.4 should fail
-        assert fail_mask[0] == False  # 0.8 >= 0.4
-        assert fail_mask[1] == True  # 0.3 < 0.4
-        assert fail_mask[2] == False  # 0.5 >= 0.4
+        assert not fail_mask[0]  # 0.8 >= 0.4
+        assert fail_mask[1]  # 0.3 < 0.4
+        assert not fail_mask[2]  # 0.5 >= 0.4
 
     def test_fail_if_above_mode(self):
         """Values above threshold should fail when fail_if_below=False."""
@@ -1444,9 +1444,9 @@ class TestApplyThresholdFilter:
         )
 
         # Only ("A", 2, "") with value 6.0 > 5.0 should fail
-        assert fail_mask[0] == False  # 1.0 <= 5.0
-        assert fail_mask[1] == True  # 6.0 > 5.0
-        assert fail_mask[2] == False  # 3.0 <= 5.0
+        assert not fail_mask[0]  # 1.0 <= 5.0
+        assert fail_mask[1]  # 6.0 > 5.0
+        assert not fail_mask[2]  # 3.0 <= 5.0
 
     def test_missing_keys_return_nan_and_pass(self):
         """Missing keys should get NaN and pass the filter (conservative)."""
@@ -1458,9 +1458,9 @@ class TestApplyThresholdFilter:
         )
 
         # NaN comparisons return False, so missing keys pass
-        assert fail_mask[0] == False  # 0.8 >= 0.4
-        assert fail_mask[1] == False  # NaN comparison
-        assert fail_mask[2] == False  # NaN comparison
+        assert not fail_mask[0]  # 0.8 >= 0.4
+        assert not fail_mask[1]  # NaN comparison
+        assert not fail_mask[2]  # NaN comparison
 
     def test_empty_water_keys(self):
         """Empty water keys should return empty array."""
@@ -1480,9 +1480,9 @@ class TestApplyThresholdFilter:
             water_keys, lookup, threshold=0.5, fail_if_below=True
         )
 
-        assert fail_mask[0] == False  # 0.8 >= 0.5
-        assert fail_mask[1] == True  # 0.3 < 0.5
-        assert fail_mask[2] == False  # 0.6 >= 0.5
+        assert not fail_mask[0]  # 0.8 >= 0.5
+        assert fail_mask[1]  # 0.3 < 0.5
+        assert not fail_mask[2]  # 0.6 >= 0.5
 
 
 # ============== Tests for _pad_atom_embeddings_for_mates ==============
@@ -1922,7 +1922,7 @@ class TestCachingBehavior:
         self, single_pdb_list_file, tmp_path, pdb_base_dir
     ):
         """Cache should contain all required keys."""
-        dataset = ProteinWaterDataset(
+        _ = ProteinWaterDataset(
             pdb_list_file=single_pdb_list_file,
             processed_dir=str(tmp_path),
             base_pdb_dir=str(pdb_base_dir),
