@@ -34,6 +34,7 @@ type NodeFeatures = GVPTuple
 type EdgeAttr = GVPTuple
 """Edge (scalar, vector) attributes."""
 
+
 def edge_vectors(
     pos: torch.Tensor, edge_index: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
