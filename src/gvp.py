@@ -133,8 +133,11 @@ class GVP(nn.Module):
         Initialize Geometric Vector Perceptron layer.
 
         Args:
-            in_dims: (n_scalar_in, n_vector_in) input dimensions
-            out_dims: (n_scalar_out, n_vector_out) output dimensions
+            in_dims: (n_scalar_in, n_vector_in) input dimensions, where n_vector_in
+                is the number of 3D vector channels (each vector has 3 components)
+            out_dims: (n_scalar_out, n_vector_out) output dimensions, where n_vector_out
+                is the number of 3D vector channels. E.g., n_vector_out=1 means
+                output shape is (batch, 1, 3) - one vector channel with 3D coordinates.
             h_dim: Intermediate vector channel dimension, defaults to max(vi, vo)
             activations: (scalar_act, vector_act) activation functions
             vector_gate: If True, use vector gating; vector_act becomes sigma^+ gate
@@ -419,7 +422,9 @@ class GVPConvLayer(nn.Module):
             n_message: Number of GVPs in message function
             n_feedforward: Number of GVPs in feedforward function
             drop_rate: Dropout probability
-            autoregressive: If True, use 'add' aggregation for masked decoding
+            autoregressive: If True, use 'add' aggregation for masked decoding where
+                future nodes are masked out. Default 'mean' aggregation is used for
+                standard bidirectional message passing.
             activations: (scalar_act, vector_act) activation functions
             vector_gate: Whether to use vector gating
         """
@@ -652,30 +657,6 @@ class GVPMultiEdge(MessagePassing):
             )
         self.edge_message = nn.Sequential(*msg_layers)
 
-    @staticmethod
-    def _unit_and_rbf(pos_src, pos_dst, edge_index, rbf_dim, rbf_dmax):
-        """
-        Compute unit vectors and RBF distance features for edges.
-
-        Args:
-            pos_src: (N_src, 3) source node positions
-            pos_dst: (N_dst, 3) destination node positions
-            edge_index: (2, E) edge indices
-            rbf_dim: Number of RBF basis functions
-            rbf_dmax: Maximum distance for RBF encoding
-
-        Returns:
-            unit: (E, 3) unit vectors from source to destination
-            rbf_e: (E, rbf_dim) RBF distance features
-        """
-        return compute_edge_features(
-            pos=pos_src,
-            edge_index=edge_index,
-            pos_dst=pos_dst,
-            num_gaussians=rbf_dim,
-            cutoff=rbf_dmax,
-        )
-
     def forward(self, x, edge_index, pos_pair, cached_edge_attr=None):
         """
         x: ((s_src, v_src), (s_dst, v_dst)) for bipartite, or (s,v) for homogeneous
@@ -706,8 +687,12 @@ class GVPMultiEdge(MessagePassing):
         if cached_edge_attr is not None:
             rbf_e, unit = cached_edge_attr
         else:
-            unit, rbf_e = self._unit_and_rbf(
-                pos_src, pos_dst, edge_index, self.rbf_dim, self.rbf_dmax
+            unit, rbf_e = compute_edge_features(
+                pos=pos_src,
+                edge_index=edge_index,
+                pos_dst=pos_dst,
+                num_gaussians=self.rbf_dim,
+                cutoff=self.rbf_dmax,
             )
 
         # pack as simple tensors for message()
@@ -840,7 +825,9 @@ class GVPMultiEdgeConv(nn.Module):
             edge_index_dict: Dict mapping (src, rel, dst) to (2, E) edge indices
             pos_dict: Dict mapping node type to (N, 3) position tensors
             cached_edge_attr_dict: Optional dict mapping edge types to
-                (rbf, unit) tuples for pre-computed edge features
+                (rbf_features, unit_vectors) tuples for pre-computed edge features,
+                where rbf_features are (E, rbf_dim) radial basis function distance
+                encodings and unit_vectors are (E, 3) normalized displacement vectors.
 
         Returns:
             Updated x_dict with same structure as input

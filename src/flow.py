@@ -218,8 +218,8 @@ class ProteinWaterUpdate(nn.Module):
             k_wp: Number of nearest neighbors for water-protein edges
             pp_edge_attr: Optional encoder-learned edge features (s_edge, V_edge) for PP edges.
                 If provided, uses encoder-learned scalar features (s_edge) combined with
-                cached edge direction unit vectors (edge_unit, pre-normalized at preprocessing).
-                If None, uses cached geometric edge features (edge_rbf, edge_unit) from the dataset.
+                cached edge direction unit vectors (edge_unit_vectors, pre-normalized at preprocessing).
+                If None, uses cached geometric edge features (edge_rbf, edge_unit_vectors) from the dataset.
 
         Returns:
             Updated x_dict with same structure as input
@@ -238,18 +238,19 @@ class ProteinWaterUpdate(nn.Module):
         if EDGE_PP in data.edge_types:
             pp_edge = data[EDGE_PP]
 
+            # V_edge fallback is for backward compatibility with datasets                                         
+            # that don't have cached edge features. A given model only sees one or the other. 
             if pp_edge_attr is not None:
-                # Use encoder-learned scalar features with original cached unit vectors
-                # This preserves gradient flow through learned edge representations
+                # Use encoder-learned scalar features (s_edge) with unit vectors 
                 s_edge, V_edge = pp_edge_attr
-                if hasattr(pp_edge, "edge_unit"):
-                    cached_edge_attr_dict[EDGE_PP] = (s_edge, pp_edge.edge_unit)
+                if hasattr(pp_edge, "edge_unit_vectors"):
+                    cached_edge_attr_dict[EDGE_PP] = (s_edge, pp_edge.edge_unit_vectors)
                 else:
-                    # Fall back to full encoder output if no cached unit vectors
+                    # Fallback for datasets without cached unit vectors 
                     cached_edge_attr_dict[EDGE_PP] = (s_edge, V_edge.squeeze(1))
-            elif hasattr(pp_edge, "edge_rbf") and hasattr(pp_edge, "edge_unit"):
-                # Use cached geometric edge features
-                cached_edge_attr_dict[EDGE_PP] = (pp_edge.edge_rbf, pp_edge.edge_unit)
+            elif hasattr(pp_edge, "edge_rbf") and hasattr(pp_edge, "edge_unit_vectors"):
+                # No encoder edge features (e.g., SLAE/ESM) - use cached geometric features                                        
+                cached_edge_attr_dict[EDGE_PP] = (pp_edge.edge_rbf, pp_edge.edge_unit_vectors)
 
         for block in self.blocks:
             x_dict = block(x_dict, edge_index_dict, pos_dict, cached_edge_attr_dict)
@@ -287,19 +288,19 @@ class FlowWaterGVP(nn.Module):
 
         Args:
             encoder: Protein encoder implementing BaseProteinEncoder interface
-            hidden_dims: (scalar_dim, vector_dim) hidden dimensions for flow model
-            edge_scalar_dim: Dimension of edge scalar features (typically NUM_RBF)
-            layers: Number of heterogeneous GVP message passing layers
-            drop_rate: Dropout rate for regularization
+            hidden_dims: (scalar_dim, vector_dim) hidden dimensions. Default: (256, 32)
+            edge_scalar_dim: Dimension of edge scalar features. Default: NUM_RBF (32)
+            layers: Number of heterogeneous GVP message passing layers. Default: 4
+            drop_rate: Dropout rate for regularization. Default: 0.1
             n_message_gvps: Number of GVP modules in each edge-type's message function
-                (distinct from `layers` which controls message-passing iterations)
+                (distinct from `layers` which controls message-passing iterations). Default: 2
             n_update_gvps: Number of GVP modules in the node update function
-                (applied after aggregating messages from all edge types)
-            vector_gate: Whether to use vector gating in GVP layers
-            k_pw: K nearest neighbors for protein-water edges
-            k_ww: K nearest neighbors for water-water edges
-            k_wp: K nearest neighbors for water-protein edges
-            water_input_dim: Input dimension for water node features (element one-hot)
+                (applied after aggregating messages from all edge types). Default: 2
+            vector_gate: Whether to use vector gating in GVP layers. Default: True
+            k_pw: K nearest neighbors for protein-water edges. Default: 12
+            k_ww: K nearest neighbors for water-water edges. Default: 8
+            k_wp: K nearest neighbors for water-protein edges. Default: 8
+            water_input_dim: Input dimension for water node features. Default: 16
         """
         super().__init__()
         self.encoder = encoder
@@ -365,6 +366,9 @@ class FlowWaterGVP(nn.Module):
         )
 
         # Water vector field head: project (s_h, v_h) -> (s_h // 4, 1) -> single vector channel
+        # NOTE: vector_gate=True requires scalar input features. GVP gating works by
+        # computing gate values from scalars via a learned linear map, then applying
+        # sigmoid-gated element-wise multiplication to the output vectors.
         self.vfield_head = GVP(
             in_dims=hidden_dims,
             out_dims=(s_h // 4, 1),
@@ -551,7 +555,19 @@ class FlowMatcher:
             use_self_conditioning: Whether to use self-conditioning
             accumulation_steps: Number of gradient accumulation steps (loss is scaled by 1/accumulation_steps)
 
-        Returns dict with 'loss', 'rmsd', 'sigma'.
+        Returns:
+            Dict with 'loss', 'rmsd', 'sigma', and optionally 'per_sample_info'.
+
+        Note:
+            This method only computes forward pass, loss, and backward(). The caller
+            is responsible for:
+            1. optimizer.zero_grad() before calling
+            2. Gradient clipping (e.g., torch.nn.utils.clip_grad_norm_)
+            3. optimizer.step() after accumulating gradients
+
+            For gradient accumulation, call this method N times, then step once.
+            The loss is automatically scaled by 1/accumulation_steps for correct
+            gradient magnitude. See scripts/train.py for reference implementation.
         """
         if accumulation_steps < 1:
             raise ValueError(
@@ -637,7 +653,7 @@ class FlowMatcher:
             "per_sample_info": per_sample_info,
         }
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def validation_step(self, batch: HeteroData) -> dict[str, float]:
         """
         Run single validation step without gradients.
@@ -647,6 +663,11 @@ class FlowMatcher:
 
         Returns:
             Dict with 'loss' and 'rmsd' metrics
+
+        Note:
+            This method is for inference only. It sets model.eval(), disables
+            gradients, and returns metrics. Training uses training_step() which
+            handles gradient computation and loss calculation.
         """
         self.model.eval()
         device = batch["protein"].pos.device
@@ -728,7 +749,7 @@ class FlowMatcher:
 
         return x, batch_w
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def euler_integrate(
         self,
         graphs: HeteroData | list[HeteroData],
@@ -838,7 +859,7 @@ class FlowMatcher:
 
         return results
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def rk4_integrate(
         self,
         graphs: HeteroData | list[HeteroData],

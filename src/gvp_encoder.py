@@ -301,6 +301,7 @@ class ProteinGVPEncoder(nn.Module):
         return (x_scalar, zeros)
 
     def _compute_edge_attr(self, pos: torch.Tensor, edge_index: torch.Tensor):
+        # d: (E,) edge distances, u: (E, 3) unit displacement vectors (source -> dest)
         d, u = compute_edge_geometry(pos, edge_index)
         s_edge_raw = rbf(d, num_gaussians=self.num_edge_rbf, cutoff=self.radius)
         s_edge = self.edge_in_proj(s_edge_raw)
