@@ -34,14 +34,6 @@ type NodeFeatures = GVPTuple
 type EdgeAttr = GVPTuple
 """Edge (scalar, vector) attributes."""
 
-# Forward return type: either pooled residue embeddings or full GVP features
-type ForwardOutput = tuple[NodeFeatures | torch.Tensor, EdgeAttr | None]
-"""Return type of forward():
-- When pool_residue=True: (residue_embed: Tensor, None)
-- When pool_residue=False: (node_features: GVPTuple, edge_attr: GVPTuple | None)
-"""
-
-
 def edge_vectors(
     pos: torch.Tensor, edge_index: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -327,7 +319,7 @@ class ProteinGVPEncoder(nn.Module):
         V_edge = u.unsqueeze(1)
         return (s_edge, V_edge), s_edge_raw
 
-    def forward(self, data: Batch) -> ForwardOutput:
+    def forward(self, data: Batch) -> tuple[torch.Tensor, torch.Tensor, tuple | None]:
         """
         Forward pass through the GVP encoder.
 
@@ -341,8 +333,9 @@ class ProteinGVPEncoder(nn.Module):
                 - edge_unit_vectors: (E, 3) unit edge vectors
 
         Returns:
-            x: tuple (s, V) of node scalar and vector features
-            edge_attr: tuple (s_edge, V_edge) of edge features, or None if use_edge_update=False
+            s: (N, scalar_dim) scalar node features
+            V: (N, vector_dim, 3) vector node features (empty tensor if pooling)
+            edge_attr: tuple (s_edge, V_edge) of edge features, or None if pooling or edge updates disabled
         """
         x_scalar = self.input_scalar_encoder(data.x)
 
@@ -376,11 +369,12 @@ class ProteinGVPEncoder(nn.Module):
             res_embed = self._pool_by_residue(
                 atom_embed, data.residue_index, int(data.num_residues)
             )
-            return res_embed, None  # No edge features when pooling
+            # Return empty V tensor (N, 0, 3) to match 3-tuple signature
+            return res_embed, res_embed.new_empty(res_embed.size(0), 0, 3), None
 
         # Return edge_attr only if edge_update was used
         final_edge_attr = edge_attr if self.edge_update is not None else None
-        return x, final_edge_attr
+        return x[0], x[1], final_edge_attr
 
 
 def load_encoder_from_checkpoint(
@@ -527,7 +521,7 @@ class GVPEncoder(BaseProteinEncoder):
         enc_data = make_gvp_encoder_data(data)
 
         with torch.set_grad_enabled(not self._freeze):
-            (s, V), edge_attr = self.encoder(enc_data)
+            s, V, edge_attr = self.encoder(enc_data)
 
         return s, V, edge_attr
 
