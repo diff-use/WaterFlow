@@ -234,7 +234,7 @@ To resume training from a checkpoint, you can load the model weights and optimiz
 | `--scheduler` | `cosine` | LR scheduler: `cosine`, `step`, or `none` |
 | `--warmup_steps` | `0` | Linear warmup steps |
 | `--processed_dir` | `~/flow_cache/` | Cache directory for preprocessed data |
-| `--save_dir` | `/home/srivasv/flow_checkpoints` | Directory to save checkpoints |
+| `--save_dir` | `../flow_checkpoints` | Directory to save checkpoints |
 | `--save_every` | `10` | Save checkpoint every N epochs |
 | `--eval_every` | `5` | Run evaluation every N epochs |
 
@@ -245,7 +245,7 @@ Training automatically logs to W&B. Configure with:
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--wandb_project` | `water-flow` | W&B project name |
-| `--wandb_dir` | `/home/srivasv/wandb_logs` | Local W&B log directory |
+| `--wandb_dir` | `../wandb_logs` | Local W&B log directory |
 | `--run_name` | auto-generated | Custom run name (format: `YYYYMMDD_HHMMSS_encoder_layers_hidden`) |
 
 ## Quality Filtering
