@@ -22,3 +22,5 @@ uv pip install biotite wandb Bio networkx e3nn pytest pytest-cov
 ```
 
 If you have trouble installing torch_cluster or scatter, I would suggest changing the cuda version in the wheel.
+
+
