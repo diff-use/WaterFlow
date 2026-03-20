@@ -55,6 +55,35 @@ Each PDB should have `_final` suffix and contain:
 - Protein atoms (used as conditioning context)
 - Water molecules (HOH residues, used as ground truth)
 
+### Data Processing Pipeline
+
+WaterFlow processes PDB files through several stages to create training-ready graph representations:
+
+**PDB Parsing**
+- Uses Biotite to extract protein atoms and water molecules (HOH residues)
+- Modified residues are mapped to standard amino acids (MSE→M, SEC→U)
+- Hydrogen atoms are excluded; only the first model is used
+- For atoms with alternate conformations, the highest-occupancy conformer is selected
+
+**Crystal Contact Detection**
+- Uses PyMOL's `symexp` to generate symmetry mates within 5.0Å cutoff
+- Symmetry mate atoms are included as additional protein context when `include_mates=True`
+- Mate atoms are stored separately for proper handling during training
+
+**Graph Representation**
+- Node types: `protein` (ASU + symmetry mates), `water` (ground truth)
+- Edge types (defined in `src/constants.py`):
+  - `('protein', 'pp', 'protein')`: protein-protein edges
+  - `('protein', 'pw', 'water')`: protein to water
+  - `('water', 'wp', 'protein')`: water to protein
+  - `('water', 'ww', 'water')`: water-water edges
+- Default edge cutoff: 8.0Å (`RBF_CUTOFF` in constants.py)
+
+**Feature Encoding**
+- Element vocabulary (15 elements + "other" bucket = 16 dims):
+  `C, N, O, S, P, SE, MG, ZN, CA, FE, NA, K, CL, F, BR`
+- Edge features: RBF distance encoding (16 Bessel basis functions)
+
 ### Split File Format
 
 Split files are plain text with one PDB entry per line:
@@ -68,20 +97,32 @@ Split files are plain text with one PDB entry per line:
 
 ### Cache Directory Structure
 
-Preprocessed data is cached under `--processed_dir`:
+Preprocessed data is cached under `--processed_dir` in a three-layer architecture:
 
 ```
 <processed_dir>/
-├── geometry/           # Cached graph structures (protein + water nodes)
-│   ├── 1abc_final.pt
-│   └── ...
-├── esm/                # ESM embeddings (per-residue)
-│   ├── 1abc_final.pt
-│   └── ...
-└── slae/               # SLAE embeddings (per-residue)
-    ├── 1abc_final.pt
-    └── ...
+├── geometry/              # Graph structures (or geometry_mates/ when include_mates=True)
+│   └── <pdb_id>_final.pt
+│       - protein_pos: centered protein coordinates (N, 3)
+│       - protein_x: element one-hot encoding (N, 16)
+│       - protein_res_idx: residue indices for grouping
+│       - water_pos, water_x: water coordinates and features
+│       - mate_pos, mate_x, mate_res_idx: symmetry mate data (if included)
+├── esm/                   # ESM embeddings (per-residue)
+│   └── <pdb_id>_final.pt
+│       - residue_embeddings: ESM3 embeddings (N_res, embed_dim)
+│       - sequence: extracted sequence string
+│       - num_residues: residue count
+└── slae/                  # SLAE embeddings (per-atom, 128-dim)
+    └── <pdb_id>_final.pt
+        - node_embeddings: atom-level embeddings aligned to geometry order
+        - atom37_coords: standard atom37 coordinates (N_res, 37, 3)
 ```
+
+**Cache Generation Notes:**
+- Geometry cache is generated automatically when `preprocess=True` (default)
+- ESM/SLAE caches require running the respective `generate_*_embeddings.py` scripts first
+- Preprocessing failures are logged to `<geometry_dir>/preprocessing_failures.log`
 
 ## Environment Setup
 
@@ -220,7 +261,7 @@ These checks determine whether a structure is included in training:
 | `--max_com_dist` | `25.0` | Max protein-water center-of-mass distance (A) |
 | `--max_clash_fraction` | `0.05` | Max fraction of waters clashing with protein |
 | `--clash_dist` | `2.0` | Distance threshold for clash detection (A) |
-| `--min_water_residue_ratio` | `0.6` | Minimum waters per residue ratio |
+| `--min_water_residue_ratio` | `0.8` | Minimum waters per residue ratio |
 
 ### Per-Water Quality Filters
 
@@ -228,7 +269,7 @@ These filters remove individual low-quality waters (can be toggled):
 
 | Parameter | Default | Toggle Flag | Description |
 |-----------|---------|-------------|-------------|
-| `--max_protein_dist` | `5.0` | `--no_filter_by_distance` | Remove waters far from protein |
+| `--max_protein_dist` | `6.0` | `--no_filter_by_distance` | Remove waters far from protein |
 | `--min_edia` | `0.4` | `--no_filter_by_edia` | Remove waters with low EDIA scores |
 | `--max_bfactor_zscore` | `1.5` | `--no_filter_by_bfactor` | Remove waters with high B-factor |
 
