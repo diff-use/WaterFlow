@@ -24,6 +24,7 @@ matplotlib.use("Agg")
 from src.utils import (
     ATOM37_FILL,
     atom37_to_atoms,
+    # Edge geometry
     compute_placement_metrics,
     compute_rmsd,
     ot_coupling,

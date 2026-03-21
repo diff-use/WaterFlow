@@ -1,5 +1,13 @@
-# gvp.py
-# generic GVP and GVPConv layers adapted from Jing et al. (2021)
+"""
+Geometric Vector Perceptron (GVP) layers adapted from Jing et al. (2021).
+
+This module provides:
+- Core GVP operations: GVP, LayerNorm, Dropout
+- Graph convolution: GVPConv, GVPConvLayer
+- Edge updates: EdgeUpdate
+- Multi-edge heterogeneous convolution: GVPMultiEdge, GVPMultiEdgeConv
+- Utility functions: tuple_sum, tuple_cat, tuple_index, randn
+"""
 
 import functools
 
@@ -9,12 +17,20 @@ from torch import nn
 from torch_geometric.nn import HeteroConv, MessagePassing
 from torch_scatter import scatter_add
 
-from src.utils import rbf
+from src.constants import NUM_RBF, RBF_CUTOFF
+from src.utils import compute_edge_features
 
 
 def tuple_sum(*args):
     """
-    Sums any number of tuples (s, V) elementwise.
+    Sum any number of GVP tuples (s, V) elementwise.
+
+    Args:
+        *args: Variable number of (s, V) tuples where s is scalar tensor
+            and V is vector tensor
+
+    Returns:
+        (s_sum, V_sum) tuple with elementwise sums
     """
     return tuple(map(sum, zip(*args)))
 
@@ -113,6 +129,19 @@ class GVP(nn.Module):
         activations=(F.relu, torch.sigmoid),
         vector_gate=False,
     ):
+        """
+        Initialize Geometric Vector Perceptron layer.
+
+        Args:
+            in_dims: (n_scalar_in, n_vector_in) input dimensions, where n_vector_in
+                is the number of 3D vector channels (each vector has 3 components)
+            out_dims: (n_scalar_out, n_vector_out) output dimensions, where n_vector_out
+                is the number of 3D vector channels. E.g., n_vector_out=1 means
+                output shape is (batch, 1, 3) - one vector channel with 3D coordinates.
+            h_dim: Intermediate vector channel dimension, defaults to max(vi, vo)
+            activations: (scalar_act, vector_act) activation functions
+            vector_gate: If True, use vector gating; vector_act becomes sigma^+ gate
+        """
         super().__init__()
         self.si, self.vi = in_dims
         self.so, self.vo = out_dims
@@ -220,6 +249,12 @@ class LayerNorm(nn.Module):
     """
 
     def __init__(self, dims):
+        """
+        Initialize combined layer normalization for GVP tuples.
+
+        Args:
+            dims: (n_scalar, n_vector) feature dimensions
+        """
         super().__init__()
         self.s, self.v = dims
         self.scalar_norm = nn.LayerNorm(self.s)
@@ -270,6 +305,19 @@ class GVPConv(MessagePassing):
         activations=(F.relu, torch.sigmoid),
         vector_gate=False,
     ):
+        """
+        Initialize GVP graph convolution layer.
+
+        Args:
+            in_dims: (n_scalar_in, n_vector_in) input node dimensions
+            out_dims: (n_scalar_out, n_vector_out) output node dimensions
+            edge_dims: (n_scalar_edge, n_vector_edge) edge feature dimensions
+            n_layers: Number of GVPs in message function
+            module_list: Pre-constructed message function, overrides n_layers
+            aggr: Aggregation method ('mean' or 'add')
+            activations: (scalar_act, vector_act) activation functions
+            vector_gate: Whether to use vector gating in GVP layers
+        """
         super().__init__(aggr=aggr)
         self.si, self.vi = in_dims
         self.so, self.vo = out_dims
@@ -312,6 +360,19 @@ class GVPConv(MessagePassing):
         return _split(message, self.vo)
 
     def message(self, s_i, v_i, s_j, v_j, edge_attr):
+        """
+        Construct message from source to destination node.
+
+        Args:
+            s_i: (E,) destination scalar features (flattened for PyG)
+            v_i: (E, 3*n_vector) destination vector features (flattened)
+            s_j: (E,) source scalar features
+            v_j: (E, 3*n_vector) source vector features (flattened)
+            edge_attr: (s_edge, V_edge) edge feature tuple
+
+        Returns:
+            (E, s_out + 3*v_out) merged message tensor
+        """
         v_j = v_j.view(v_j.shape[0], v_j.shape[1] // 3, 3)
         v_i = v_i.view(v_i.shape[0], v_i.shape[1] // 3, 3)
         message = tuple_cat((s_j, v_j), edge_attr, (s_i, v_i))
@@ -352,6 +413,21 @@ class GVPConvLayer(nn.Module):
         activations=(F.relu, torch.sigmoid),
         vector_gate=False,
     ):
+        """
+        Initialize full GVP convolution layer with residual and feedforward.
+
+        Args:
+            node_dims: (n_scalar, n_vector) node feature dimensions
+            edge_dims: (n_scalar_edge, n_vector_edge) edge feature dimensions
+            n_message: Number of GVPs in message function
+            n_feedforward: Number of GVPs in feedforward function
+            drop_rate: Dropout probability
+            autoregressive: If True, use 'add' aggregation for masked decoding where
+                future nodes are masked out. Default 'mean' aggregation is used for
+                standard bidirectional message passing.
+            activations: (scalar_act, vector_act) activation functions
+            vector_gate: Whether to use vector gating
+        """
         super().__init__()
         self.conv = GVPConv(
             node_dims,
@@ -445,6 +521,15 @@ class EdgeUpdate(nn.Module):
         update_w_distance_features: bool = False,
         distance_dim: int = 0,  # e.g., RBF size
     ):
+        """
+        Initialize residual edge update module.
+
+        Args:
+            n_node_scalars: Dimension of node scalar features
+            s_edge_width: Fixed edge scalar width maintained across layers
+            update_w_distance: If True, include distance features in update
+            distance_dim: Dimension of distance features (e.g., RBF size)
+        """
         super().__init__()
         self.update_w_distance_features = update_w_distance_features
         self.s_edge_width = s_edge_width
@@ -470,7 +555,19 @@ class EdgeUpdate(nn.Module):
         edge_attr: tuple,  # (s_edge, V_edge) with s_edge: (E, s_edge_width)
         distance_feat: torch.Tensor | None = None,  # (E, D) if enabled
     ) -> tuple:
+        """
+        Compute residual edge feature update.
 
+        Args:
+            node_tuple: (s_node, V_node) where s_node is (N, n_node_scalars)
+            edge_index: (2, E) edge indices
+            edge_attr: (s_edge, V_edge) current edge features
+            distance_feat: (E, distance_dim) optional distance features
+
+        Returns:
+            (s_edge_updated, V_edge) tuple with updated scalar features;
+            vector features pass through unchanged
+        """
         s_node, _ = node_tuple
         s_edge, V_edge = edge_attr
 
@@ -506,20 +603,35 @@ class GVPMultiEdge(MessagePassing):
         dst_type: str,
         s_dim: int,
         v_dim: int,
-        rbf_dim: int = 16,
+        rbf_dim: int = NUM_RBF,
         use_dst_feats: bool = False,
         n_message_gvps: int = 1,
         activations=(F.relu, torch.sigmoid),
         vector_gate=True,
         aggr="sum",
-        rbf_dmax: float = 20.0,
+        rbf_dmax: float = RBF_CUTOFF,
     ):
+        """
+        Initialize per-edge-type GVP message passing layer.
+
+        Args:
+            src_type: Source node type identifier
+            dst_type: Destination node type identifier
+            s_dim: Scalar feature dimension
+            v_dim: Vector feature dimension (number of 3D channels)
+            rbf_dim: Number of radial basis functions
+            use_dst_feats: If True, include destination features in messages
+            n_message_gvps: Number of GVP layers in message function
+            activations: (scalar_act, vector_act) activation functions
+            vector_gate: Whether to use vector gating
+            aggr: Message aggregation method ('sum' or 'mean')
+            rbf_dmax: Maximum distance in Angstroms for RBF encoding
+        """
         super().__init__(aggr=aggr)
         self.src_type, self.dst_type = src_type, dst_type
         self.s_dim, self.v_dim = s_dim, v_dim
         self.use_dst_feats = use_dst_feats
         self.rbf_dim, self.rbf_dmax = rbf_dim, rbf_dmax
-
         GVP_ = functools.partial(GVP, activations=activations, vector_gate=vector_gate)
 
         # message GVP stack; first layer takes [unit_vec] and [rbf] extras
@@ -545,22 +657,11 @@ class GVPMultiEdge(MessagePassing):
             )
         self.edge_message = nn.Sequential(*msg_layers)
 
-    @staticmethod
-    def _unit_and_rbf(pos_src, pos_dst, edge_index, rbf_dim, rbf_dmax):
-        # displacement from src->dst (dst - src) to match your original convention
-        s, d = edge_index
-        disp = pos_dst[d] - pos_src[s]  # (E, 3)
-        dist = torch.clamp(disp.norm(dim=-1, keepdim=True), min=1e-5)  # (E,1)
-        unit = disp / dist  # (E, 3)
-        rbf_e = rbf(
-            dist.squeeze(-1), num_gaussians=rbf_dim, cutoff=rbf_dmax
-        )  # (E, rbf_dim)
-        return unit, rbf_e
-
-    def forward(self, x, edge_index, pos_pair):
+    def forward(self, x, edge_index, pos_pair, cached_edge_attr=None):
         """
         x: ((s_src, v_src), (s_dst, v_dst)) for bipartite, or (s,v) for homogeneous
-        pos_dict: {ntype: pos}
+        pos_pair: (pos_src, pos_dst) positions
+        cached_edge_attr: optional tuple (cached_rbf, cached_unit) for pre-computed edge features
         returns: merged messages at dst nodes: shape [N_dst, s_dim + 3*v_dim]
         """
         # Unpack by relation type:
@@ -582,10 +683,17 @@ class GVPMultiEdge(MessagePassing):
         v_src_f = v_src.reshape(v_src.size(0), -1)  # (N_src, 3*v)
         v_dst_f = v_dst.reshape(v_dst.size(0), -1)  # (N_dst, 3*v)
 
-        # compute geometric edge attributes on the fly
-        unit, rbf_e = self._unit_and_rbf(
-            pos_src, pos_dst, edge_index, self.rbf_dim, self.rbf_dmax
-        )
+        # use cached edge features if provided, otherwise compute on the fly
+        if cached_edge_attr is not None:
+            rbf_e, unit = cached_edge_attr
+        else:
+            unit, rbf_e = compute_edge_features(
+                pos=pos_src,
+                edge_index=edge_index,
+                pos_dst=pos_dst,
+                num_gaussians=self.rbf_dim,
+                cutoff=self.rbf_dmax,
+            )
 
         # pack as simple tensors for message()
         # edge_attr = (rbf_e, unit)  -- pass separately to keep shapes explicit
@@ -600,6 +708,20 @@ class GVPMultiEdge(MessagePassing):
         return out  # merged messages (s_msg + flattened v_msg)
 
     def message(self, s_i, s_j, vf_i, vf_j, rbf_e, unit):
+        """
+        Construct GVP message from source to destination.
+
+        Args:
+            s_i: (E, s_dim) destination scalar features
+            s_j: (E, s_dim) source scalar features
+            vf_i: (E, 3*v_dim) destination vector features (flattened)
+            vf_j: (E, 3*v_dim) source vector features (flattened)
+            rbf_e: (E, rbf_dim) RBF distance features
+            unit: (E, 3) unit displacement vectors
+
+        Returns:
+            (E, s_dim + 3*v_dim) merged message tensor
+        """
         # Unflatten vectors
         v_j = vf_j.view(vf_j.size(0), -1, 3)  # (E, v, 3)
         v_i = vf_i.view(vf_i.size(0), -1, 3)  # (E, v, 3)
@@ -638,9 +760,26 @@ class GVPMultiEdgeConv(nn.Module):
         activations=(F.relu, torch.sigmoid),
         vector_gate=True,
     ):
+        """
+        Initialize heterogeneous multi-edge GVP convolution layer.
+
+        Args:
+            etypes: List of (src_type, relation, dst_type) edge type tuples
+            s_dim: Scalar feature dimension
+            v_dim: Vector feature dimension
+            rbf_dim: Number of radial basis functions
+            n_message_gvps: Number of GVPs in per-edge-type message function
+            n_update_gvps: Number of GVPs in per-node-type update function
+            use_dst_feats: If True, include destination features in messages
+            drop_rate: Dropout probability
+            aggr_edges: Per-edge aggregation method ('sum' or 'mean')
+            activations: (scalar_act, vector_act) activation functions
+            vector_gate: Whether to use vector gating
+        """
         super().__init__()
         self.s_dim, self.v_dim = s_dim, v_dim
         self.drop = Dropout(drop_rate)
+        GVP_ = functools.partial(GVP, activations=activations, vector_gate=vector_gate)
 
         # per-dst-type norms and update stacks
         dst_ntypes = sorted({dst for (_, _, dst) in etypes})
@@ -651,7 +790,6 @@ class GVPMultiEdgeConv(nn.Module):
             {nt: LayerNorm((s_dim, v_dim)) for nt in dst_ntypes}
         )
 
-        GVP_ = functools.partial(GVP, activations=activations, vector_gate=vector_gate)
         self.node_updates = nn.ModuleDict()
         for nt in dst_ntypes:
             upd_layers = []
@@ -676,17 +814,43 @@ class GVPMultiEdgeConv(nn.Module):
             )
         self.hconv = HeteroConv(rel_convs, aggr="sum")  # sum messages across edge types
 
-    def forward(self, x_dict, edge_index_dict, pos_dict):
+    def forward(self, x_dict, edge_index_dict, pos_dict, cached_edge_attr_dict=None):
         """
-        x_dict: {ntype: (s, v)}
-        returns updated x_dict
+        Run heterogeneous message passing across all edge types.
+
+        Args:
+            x_dict: Dict mapping node type to (s, V) feature tuples
+                - s: (N, s_dim) scalar features
+                - V: (N, v_dim, 3) vector features
+            edge_index_dict: Dict mapping (src, rel, dst) to (2, E) edge indices
+            pos_dict: Dict mapping node type to (N, 3) position tensors
+            cached_edge_attr_dict: Optional dict mapping edge types to
+                (rbf_features, unit_vectors) tuples for pre-computed edge features,
+                where rbf_features are (E, rbf_dim) radial basis function distance
+                encodings and unit_vectors are (E, 3) normalized displacement vectors.
+
+        Returns:
+            Updated x_dict with same structure as input
         """
         # build per-edge-type (pos_src, pos_dst) tuples
         pos_pair_dict = {
             et: (pos_dict[et[0]], pos_dict[et[2]]) for et in edge_index_dict.keys()
         }
+
+        # build cached edge attr dict for HeteroConv (None for edges without cache)
+        if cached_edge_attr_dict is None:
+            cached_edge_attr_dict = {}
+        edge_attr_for_hconv = {
+            et: cached_edge_attr_dict.get(et, None) for et in edge_index_dict.keys()
+        }
+
         # heteroConv will forward kwarg name without '_dict' into each conv
-        merged_msgs = self.hconv(x_dict, edge_index_dict, pos_pair_dict=pos_pair_dict)
+        merged_msgs = self.hconv(
+            x_dict,
+            edge_index_dict,
+            pos_pair_dict=pos_pair_dict,
+            cached_edge_attr_dict=edge_attr_for_hconv,
+        )
         # merged_msgs[ntype] is a merged tensor of total messages: [N, s_dim + 3*v_dim]
         for ntype, merged in merged_msgs.items():
             s_msg, v_msg = _split(merged, self.v_dim)
