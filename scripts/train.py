@@ -222,18 +222,12 @@ def parse_args():
     p.add_argument("--k_pw", type=int, default=16)
     p.add_argument("--k_ww", type=int, default=16)
 
-    # optional encoder-specific overrides
+    # optional cached-embedding override
     p.add_argument(
-        "--slae_dim",
+        "--embedding_dim",
         type=int,
         default=None,
-        help="Optional SLAE embedding dimension override",
-    )
-    p.add_argument(
-        "--esm_dim",
-        type=int,
-        default=None,
-        help="Optional ESM embedding dimension override",
+        help="Optional cached embedding dimension override for SLAE/ESM encoders",
     )
 
     # training
@@ -318,7 +312,10 @@ def parse_args():
     p.add_argument("--wandb_project", type=str, default="water-flow")
     p.add_argument("--wandb_dir", type=str, default="/home/srivasv/wandb_logs")
     p.add_argument("--device", type=str, default="cuda")
-    return p.parse_args()
+    args = p.parse_args()
+    if args.encoder_type == "gvp" and args.embedding_dim is not None:
+        p.error("--embedding_dim is only valid for cached encoders: slae or esm")
+    return args
 
 
 def _extract_quality_config(args: argparse.Namespace) -> dict:
@@ -425,13 +422,16 @@ def _required_embedding_field(encoder_type: str) -> str | None:
         encoder_type: Encoder identifier ('gvp', 'slae', or 'esm')
 
     Returns:
-        Field name string (e.g., 'slae_embedding') or None if encoder doesn't need embeddings
+        Field name string (e.g., 'embedding') or None if encoder doesn't need embeddings
     """
-    if encoder_type == "slae":
-        return "slae_embedding"
-    if encoder_type == "esm":
-        return "esm_embedding"
+    if encoder_type in {"slae", "esm"}:
+        return "embedding"
     return None
+
+
+def _uses_cached_embeddings(encoder_type: str) -> bool:
+    """Return whether the selected encoder consumes cached protein embeddings."""
+    return _required_embedding_field(encoder_type) is not None
 
 
 def _resolve_embedding_dim(
@@ -460,7 +460,15 @@ def _resolve_embedding_dim(
         raise ValueError(
             f"Selected encoder '{encoder_type}' requires protein.{field}, "
             f"but it is missing from dataset samples. "
-            f"Expected cache at {field.split('_')[0]}/<cache_key>.pt under --processed_dir."
+            f"Expected cached embeddings in data['protein'].embedding from "
+            f"--processed_dir/{encoder_type}/<cache_key>.pt."
+        )
+
+    embedding_type = sample_data["protein"].get("embedding_type")
+    if embedding_type is not None and embedding_type != encoder_type:
+        raise ValueError(
+            f"Selected encoder '{encoder_type}' requires protein.embedding_type="
+            f"'{encoder_type}', but sample data has '{embedding_type}'."
         )
 
     inferred_dim = int(sample_data["protein"][field].shape[-1])
@@ -484,8 +492,8 @@ def resolve_encoder_config(args, sample_data, node_scalar_in: int):
     Returns:
         dict: Encoder configuration ready for build_encoder(), e.g.:
             - GVP: {"encoder_type": "gvp", "hidden_s": 256, "hidden_v": 64, ...}
-            - SLAE: {"encoder_type": "slae", "slae_dim": 128, ...}
-            - ESM: {"encoder_type": "esm", "esm_dim": 1536, ...}
+            - SLAE: {"encoder_type": "slae", "embedding_key": "embedding", "embedding_dim": 128, ...}
+            - ESM: {"encoder_type": "esm", "embedding_key": "embedding", "embedding_dim": 1536, ...}
     """
     encoder_config = {
         "encoder_type": args.encoder_type,
@@ -496,13 +504,10 @@ def resolve_encoder_config(args, sample_data, node_scalar_in: int):
         "encoder_ckpt": args.encoder_ckpt,
     }
 
-    if args.encoder_type == "slae":
-        encoder_config["slae_dim"] = _resolve_embedding_dim(
-            sample_data, "slae", args.slae_dim
-        )
-    elif args.encoder_type == "esm":
-        encoder_config["esm_dim"] = _resolve_embedding_dim(
-            sample_data, "esm", args.esm_dim
+    if _uses_cached_embeddings(args.encoder_type):
+        encoder_config["embedding_key"] = "embedding"
+        encoder_config["embedding_dim"] = _resolve_embedding_dim(
+            sample_data, args.encoder_type, args.embedding_dim
         )
 
     return encoder_config
@@ -514,8 +519,9 @@ def log_encoder_sample_stats(sample_data: HeteroData, encoder_type: str) -> None
     if field is None:
         return
     emb = sample_data["protein"][field]
+    embedding_type = sample_data["protein"].get("embedding_type", "unknown")
     logger.info(
-        f"{field} shape={tuple(emb.shape)} "
+        f"{field} type={embedding_type} shape={tuple(emb.shape)} "
         f"mean={emb.mean():.4f} std={emb.std():.4f} min={emb.min():.4f} max={emb.max():.4f}"
     )
 
@@ -995,8 +1001,8 @@ def main():
     logger.info(f"Trainable parameters: {trainable_params:,}")
     logger.info(f"Total parameters: {total_params:,}")
 
-    # quick forward pass sanity check for embedding-based encoders
-    if args.encoder_type in {"slae", "esm"}:
+    # quick forward pass sanity check for cached embedding encoders
+    if _uses_cached_embeddings(args.encoder_type):
         logger.info(f"Testing forward pass with {args.encoder_type.upper()}...")
         model.eval()
         batch = next(iter(train_loader)).to(device)
