@@ -86,7 +86,9 @@ def mock_encoder(device):
         n = data["protein"].pos.size(0)
         s = torch.randn(n, 256, device=device)
         v = torch.randn(n, 32, 3, device=device)
-        return s, v
+        # Return 3 values: (s, V, pp_edge_attr)
+        # Mock encoder returns None for edge features (like SLAE/ESM)
+        return s, v, None
 
     encoder.side_effect = mock_forward
     encoder.__call__ = mock_forward
@@ -336,7 +338,7 @@ class TestFlowWaterGVP:
         sc = {"x1_pred": torch.randn(n_water, 3, device=device)}
         t = torch.tensor([0.5], device=device)
 
-        v_pred = model(simple_hetero_data, t, sc=sc)
+        v_pred = model(simple_hetero_data, t, self_cond=sc)
 
         assert v_pred.shape == (n_water, 3)
 
@@ -365,9 +367,11 @@ class TestFlowMatcher:
     def test_training_step(self, flow_matcher, simple_hetero_data, device):
         optimizer = torch.optim.Adam(flow_matcher.model.parameters(), lr=1e-4)
 
+        optimizer.zero_grad()
         result = flow_matcher.training_step(
-            simple_hetero_data, optimizer, use_self_conditioning=False
+            simple_hetero_data, use_self_conditioning=False
         )
+        optimizer.step()
 
         assert "loss" in result
         assert "rmsd" in result
@@ -381,9 +385,11 @@ class TestFlowMatcher:
 
         # Force self-conditioning
         flow_matcher.p_self_cond = 1.0
+        optimizer.zero_grad()
         result = flow_matcher.training_step(
-            simple_hetero_data, optimizer, use_self_conditioning=True
+            simple_hetero_data, use_self_conditioning=True
         )
+        optimizer.step()
 
         assert "loss" in result
 
@@ -399,9 +405,14 @@ class TestFlowMatcher:
         results = flow_matcher.euler_integrate(
             simple_hetero_data, num_steps=5, use_sc=False, device=str(device)
         )
-        # euler_integrate returns List[np.ndarray], one per input graph
-        water_pred = results[0]
+        # euler_integrate returns List[Dict], one per input graph
+        result = results[0]
+        assert "water_pred" in result
+        assert "protein_pos" in result
+        assert "water_true" in result
+        assert "pdb_id" in result
 
+        water_pred = result["water_pred"]
         n_water = simple_hetero_data["water"].num_nodes
         assert water_pred.shape == (n_water, 3)
         assert isinstance(water_pred, np.ndarray)

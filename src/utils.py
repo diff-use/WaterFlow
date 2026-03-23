@@ -24,9 +24,44 @@ from e3nn.math import soft_one_hot_linspace
 from PIL import Image
 from scipy.optimize import linear_sum_assignment
 from torch import Tensor
+from torch_geometric.nn import knn
 from tqdm import tqdm
 
 from src.constants import NUM_RBF, RBF_CUTOFF
+
+
+def build_knn_edges(
+    src_pos: torch.Tensor,
+    dst_pos: torch.Tensor,
+    k: int,
+    batch_src: torch.Tensor | None = None,
+    batch_dst: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """
+    Build KNN edges from source to destination nodes.
+
+    Args:
+        src_pos: (N_src, 3) source node positions
+        dst_pos: (N_dst, 3) destination node positions
+        k: Number of nearest neighbors per source node
+        batch_src: (N_src,) batch indices for source nodes, or None if single graph
+        batch_dst: (N_dst,) batch indices for destination nodes, or None if single graph
+
+    Returns:
+        (2, E) edge index tensor with source indices in row 0, destination in row 1.
+        Self-edges are removed for homogeneous graphs (src_pos is dst_pos).
+    """
+    if src_pos.numel() == 0 or dst_pos.numel() == 0:
+        return torch.empty(2, 0, dtype=torch.long, device=src_pos.device)
+
+    idx = knn(x=dst_pos, y=src_pos, k=k, batch_x=batch_dst, batch_y=batch_src)
+
+    # remove self-edges if homogeneous
+    if src_pos.data_ptr() == dst_pos.data_ptr():
+        mask = idx[0] != idx[1]
+        idx = idx[:, mask]
+
+    return idx.unique(dim=1)
 
 
 def setup_logging_for_tqdm(
@@ -164,15 +199,30 @@ def compute_edge_geometry(
     Supports both homogeneous graphs (single pos tensor) and bipartite graphs
     (separate pos_src and pos_dst tensors).
 
+    The function computes displacement vectors (pos_dst - pos_src) for each edge,
+    then computes distances as the L2 norm. Distances are clamped to a minimum value
+    to prevent division by zero during normalization. Unit vectors are computed by
+    dividing displacement vectors by the clamped distances.
+
+    Note:
+        For edges with very small displacements (below clamp_min), the returned
+        distance will be clamp_min and the unit vector will have a norm less than 1.
+        This is a numerical stability tradeoff to avoid NaN values from division
+        by near-zero distances.
+
     Args:
         pos: (N_src, 3) source node positions
         edge_index: (2, E) edge indices [src_indices, dst_indices]
         pos_dst: (N_dst, 3) destination node positions. If None, uses pos for both.
-        clamp_min: Minimum distance to clamp to avoid division by zero
+        clamp_min: Minimum distance value after computing L2 norm. Distances below
+            this threshold are set to clamp_min before normalizing displacement
+            vectors. Default is 1e-5.
 
     Returns:
-        distances: (E,) edge distances
-        unit_vectors: (E, 3) unit displacement vectors from source to destination
+        distances: (E,) clamped edge distances (minimum value is clamp_min)
+        unit_vectors: (E, 3) displacement vectors normalized by clamped distances.
+            For typical edges these are unit vectors; for edges with true distance
+            below clamp_min, these will have norm < 1.
     """
     src_idx, dst_idx = edge_index[0], edge_index[1]
     pos_src = pos
@@ -212,21 +262,6 @@ def compute_edge_features(
     distances, unit_vectors = compute_edge_geometry(pos, edge_index, pos_dst, clamp_min)
     rbf_features = rbf(distances, num_gaussians=num_gaussians, cutoff=cutoff)
     return unit_vectors, rbf_features
-
-
-def _normalize_ins_code(value) -> str:
-    """Normalize insertion code values from PDB/CSV into a stable key token."""
-    if value is None:
-        return ""
-    try:
-        if np.isnan(value):
-            return ""
-    except TypeError:
-        pass
-    ins = str(value).strip()
-    if ins in {"", "?", "."}:
-        return ""
-    return ins
 
 
 def atom37_to_atoms(
