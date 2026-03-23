@@ -104,7 +104,11 @@ Preprocessed data is cached under `--processed_dir` in a three-layer architectur
 │       - protein_x: element one-hot encoding (N, 16)
 │       - protein_res_idx: residue indices for grouping
 │       - water_pos, water_x: water coordinates and features
-│       - mate_pos, mate_x, mate_res_idx: symmetry mate data (if included)
+│       - num_asu_protein: ASU atom count (mate boundary metadata)
+│       # Note: When include_mates=True, mate atoms are concatenated into
+│       # protein_pos/protein_x. Recover boundaries via:
+│       #   ASU atoms = protein_pos[:num_asu_protein]
+│       #   Mate atoms = protein_pos[num_asu_protein:]
 ├── esm/                   # ESM embeddings (per-residue)
 │   └── <pdb_id>_final.pt
 │       - residue_embeddings: ESM3 embeddings (N_res, embed_dim)
@@ -138,7 +142,8 @@ source water/bin/activate
 uv pip install torch==2.8.0
 uv pip install torch_geometric
 uv pip install torch_cluster torch_scatter pyg_lib -f https://data.pyg.org/whl/torch-2.8.0+cu126.html
-uv pip install biotite wandb Bio networkx e3nn pytest pytest-cov
+uv pip install esm biotite pymol-open-source scipy pandas numpy matplotlib pillow loguru tqdm wandb e3nn
+uv pip install pytest pytest-cov  # dev dependencies
 ```
 
 If you have trouble installing torch_cluster or scatter, I would suggest changing the cuda version in the wheel.
@@ -234,6 +239,9 @@ To resume training from a checkpoint, you can load the model weights and optimiz
 | `--save_dir` | `../flow_checkpoints` | Directory to save checkpoints |
 | `--save_every` | `10` | Save checkpoint every N epochs |
 | `--eval_every` | `5` | Run evaluation every N epochs |
+| `--edia_dir` | (none) | Root directory for EDIA CSV files |
+| `--min_edia` | `0.4` | Minimum EDIA score threshold for waters |
+| `--no_filter_by_edia` | - | Disable EDIA-based water filtering |
 
 ### Weights & Biases Logging
 
@@ -275,7 +283,12 @@ These filters remove individual low-quality waters (can be toggled):
 
 EDIA measures how well an atom's position is supported by the experimental electron density map. Higher EDIA scores indicate more reliable atomic positions.
 
-EDIA results are expected at: `<edia_dir>/<pdb_id>/<pdb_id>_residue_stats.csv`
+**Configuration:**
+- EDIA filtering is enabled by default but only activates if `--edia_dir` is provided
+- If `--edia_dir` is not set, EDIA filtering is skipped (with a warning logged)
+- Use `--no_filter_by_edia` to explicitly disable EDIA filtering
+
+**Directory structure:** `{edia_dir}/{pdb_id}/{pdb_id}_residue_stats.csv`
 
 </details>
 
