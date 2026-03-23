@@ -236,6 +236,7 @@ class CachedEmbeddingEncoder(BaseProteinEncoder):
         Args:
             config: Configuration dictionary with:
                 - encoder_type: 'esm' or 'slae' (required)
+                - embedding_key: Optional key name (defaults to 'embedding')
                 - embedding_dim: Optional embedding dimension (if known upfront)
             device: Device to place the encoder on
 
@@ -243,6 +244,6 @@ class CachedEmbeddingEncoder(BaseProteinEncoder):
             Instantiated CachedEmbeddingEncoder
         """
         encoder_type = config["encoder_type"]  # "esm" or "slae"
-        embedding_key = f"{encoder_type}_embedding"
+        embedding_key = config.get("embedding_key", "embedding")
         embedding_dim = config.get("embedding_dim")
         return cls(embedding_key, encoder_type, embedding_dim).to(device)
