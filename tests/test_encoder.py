@@ -508,7 +508,9 @@ class TestCachedEmbeddingEncoder:
 class TestEncoderInteroperability:
     """Tests that both encoders work interchangeably with flow model."""
 
-    def test_both_encoders_work_with_flow(self, device, sample_hetero_data_with_embedding):
+    def test_both_encoders_work_with_flow(
+        self, device, sample_hetero_data_with_embedding
+    ):
         """Both encoders should work with FlowWaterGVP."""
         from src.flow import FlowWaterGVP
 

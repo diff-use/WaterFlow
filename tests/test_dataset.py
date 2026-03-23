@@ -19,8 +19,6 @@ Integration tests use real PDB files:
 All test cases created with assistance from Claude Code.
 """
 
-from pathlib import Path
-
 import numpy as np
 import pytest
 import torch
@@ -1633,7 +1631,9 @@ class TestLoadEsmEmbedding:
 
     def test_missing_residue_embeddings_key_raises(self, embedding_dir):
         """Should raise KeyError if 'residue_embeddings' key missing."""
-        torch.save({"other_key": torch.randn(10, 1280)}, embedding_dir / "test_final.pt")
+        torch.save(
+            {"other_key": torch.randn(10, 1280)}, embedding_dir / "test_final.pt"
+        )
 
         with pytest.raises(KeyError, match="Missing 'residue_embeddings'"):
             load_esm_embedding(
@@ -1645,7 +1645,8 @@ class TestLoadEsmEmbedding:
     def test_residue_count_mismatch_raises(self, embedding_dir):
         """Should raise ValueError if residue count doesn't match."""
         torch.save(
-            {"residue_embeddings": torch.randn(5, 1280)}, embedding_dir / "test_final.pt"
+            {"residue_embeddings": torch.randn(5, 1280)},
+            embedding_dir / "test_final.pt",
         )
 
         with pytest.raises(ValueError, match="residue count mismatch"):

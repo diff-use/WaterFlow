@@ -23,12 +23,12 @@ matplotlib.use("Agg")
 
 from src.utils import (
     ATOM37_FILL,
-    normalize_ins_code,
     atom37_to_atoms,
     compute_edge_features,
     compute_edge_geometry,
     compute_placement_metrics,
     compute_rmsd,
+    normalize_ins_code,
     ot_coupling,
     # Visualization
     plot_3d_frame,
