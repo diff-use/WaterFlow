@@ -77,7 +77,9 @@ def test_resolve_encoder_config_uses_embedding_dim(sample_cached_embedding_data)
     assert "embedding_dim" in config
 
 
-def test_resolve_encoder_config_applies_embedding_override(sample_cached_embedding_data):
+def test_resolve_encoder_config_applies_embedding_override(
+    sample_cached_embedding_data,
+):
     args = Namespace(
         encoder_type="slae",
         hidden_s=256,
@@ -92,7 +94,9 @@ def test_resolve_encoder_config_applies_embedding_override(sample_cached_embeddi
     assert config["embedding_dim"] == 128
 
 
-def test_cached_encoder_model_construction_succeeds(sample_cached_embedding_data, device):
+def test_cached_encoder_model_construction_succeeds(
+    sample_cached_embedding_data, device
+):
     args = Namespace(
         encoder_type="slae",
         hidden_s=256,
