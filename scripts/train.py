@@ -21,8 +21,8 @@ Usage:
 import argparse
 import json
 from datetime import datetime
-from typing import cast
 from pathlib import Path
+from typing import cast
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -679,7 +679,7 @@ def train_epoch(
         per_sample_info = metrics["per_sample_info"]
         if per_sample_info is not None and isinstance(per_sample_info, dict):
             per_sample_losses = per_sample_info["losses"].cpu()
-            num_graphs = per_sample_info["num_graphs"] 
+            num_graphs = per_sample_info["num_graphs"]
 
             if hasattr(batch, "pdb_id"):
                 pdb_ids = (
@@ -696,7 +696,7 @@ def train_epoch(
 
         processed_batches += 1
         total_loss += cast(float, metrics["loss"])
-        total_rmsd += cast(float, metrics["rmsd"]) 
+        total_rmsd += cast(float, metrics["rmsd"])
 
         # Step optimizer every grad_accum_steps
         if (step + 1) % args.grad_accum_steps == 0:
