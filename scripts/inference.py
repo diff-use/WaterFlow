@@ -207,6 +207,24 @@ def load_config(run_dir: Path) -> dict:
     return config
 
 
+def _extract_dataset_filter_config(config: dict) -> dict:
+    """Extract dataset filter params from training config with fallback to defaults."""
+    return {
+        "max_com_dist": config.get("max_com_dist", 25.0),
+        "max_clash_fraction": config.get("max_clash_fraction", 0.05),
+        "clash_dist": config.get("clash_dist", 2.0),
+        "interface_dist_threshold": config.get("interface_dist_threshold", 4.0),
+        "min_water_residue_ratio": config.get("min_water_residue_ratio", 0.6),
+        "edia_dir": config.get("edia_dir"),
+        "max_protein_dist": config.get("max_protein_dist", 5.0),
+        "min_edia": config.get("min_edia", 0.4),
+        "max_bfactor_zscore": config.get("max_bfactor_zscore", 1.5),
+        "filter_by_distance": config.get("filter_by_distance", True),
+        "filter_by_edia": config.get("filter_by_edia", True),
+        "filter_by_bfactor": config.get("filter_by_bfactor", True),
+    }
+
+
 def build_model_from_config(config: dict, device: torch.device) -> nn.Module:
     """
     Build model architecture from training configuration.
@@ -220,8 +238,7 @@ def build_model_from_config(config: dict, device: torch.device) -> nn.Module:
             - encoder_type: "gvp", "slae", or "esm"
             - hidden_s, hidden_v: Hidden dimensions for scalars/vectors
             - flow_layers: Number of flow layers
-            - For SLAE: slae_dim (default 128)
-            - For ESM: esm_dim (default 1536)
+            - For cached encoders: embedding_dim and embedding_key="embedding"
         device: Device to place model on
 
     Returns:
@@ -242,11 +259,9 @@ def build_model_from_config(config: dict, device: torch.device) -> nn.Module:
             "encoder_ckpt": config.get("encoder_ckpt"),
         }
 
-        # Add encoder-specific dimension (use 'or' to handle None values)
-        if encoder_type == "slae":
-            encoder_config["slae_dim"] = config.get("slae_dim") or 128
-        elif encoder_type == "esm":
-            encoder_config["esm_dim"] = config.get("esm_dim") or 1536
+        if encoder_type in {"slae", "esm"}:
+            encoder_config["embedding_key"] = "embedding"
+            encoder_config["embedding_dim"] = config.get("embedding_dim")
 
     encoder = build_encoder(encoder_config, device)
 
@@ -430,6 +445,9 @@ def main():
         "geometry_cache_name", "geometry"
     )
 
+    # Extract dataset filter config from training config for consistency
+    filter_config = _extract_dataset_filter_config(config)
+
     dataset = ProteinWaterDataset(
         pdb_list_file=args.pdb_list,
         processed_dir=args.processed_dir,
@@ -438,6 +456,7 @@ def main():
         include_mates=include_mates,
         geometry_cache_name=geometry_cache_name,  # ty: ignore[unknown-argument]
         preprocess=True,
+        **filter_config,
     )
 
     logger.info(f"Found {len(dataset)} PDB entries")

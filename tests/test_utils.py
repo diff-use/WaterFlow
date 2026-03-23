@@ -22,13 +22,13 @@ matplotlib.use("Agg")
 
 
 from src.utils import (
-    _normalize_ins_code,
     ATOM37_FILL,
     atom37_to_atoms,
     compute_edge_features,
     compute_edge_geometry,
     compute_placement_metrics,
     compute_rmsd,
+    normalize_ins_code,
     ot_coupling,
     # Visualization
     plot_3d_frame,
@@ -119,16 +119,16 @@ class TestInsertionCodeNormalization:
     """Tests for insertion code normalization helper."""
 
     def test_normalize_empty_variants(self):
-        assert _normalize_ins_code(None) == ""
-        assert _normalize_ins_code("") == ""
-        assert _normalize_ins_code(" ") == ""
-        assert _normalize_ins_code("?") == ""
-        assert _normalize_ins_code(".") == ""
-        assert _normalize_ins_code(np.nan) == ""
+        assert normalize_ins_code(None) == ""
+        assert normalize_ins_code("") == ""
+        assert normalize_ins_code(" ") == ""
+        assert normalize_ins_code("?") == ""
+        assert normalize_ins_code(".") == ""
+        assert normalize_ins_code(np.nan) == ""
 
     def test_normalize_valid_code(self):
-        assert _normalize_ins_code("A") == "A"
-        assert _normalize_ins_code(" B ") == "B"
+        assert normalize_ins_code("A") == "A"
+        assert normalize_ins_code(" B ") == "B"
 
 
 @pytest.mark.unit
