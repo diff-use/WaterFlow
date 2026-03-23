@@ -519,7 +519,7 @@ def compute_normalized_bfactors(
                 raw_bfactor = water_atoms.b_factor[i]
                 # If all water B-factors are identical, assign neutral z-score 0.0.
                 normalized = (
-                    (raw_bfactor - water_mean) / np.max(water_std, 1e-3)
+                    (raw_bfactor - water_mean) / max(water_std, 1e-3)
                     if water_std > 0
                     else 0.0
                 )
