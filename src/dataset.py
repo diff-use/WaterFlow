@@ -519,7 +519,9 @@ def compute_normalized_bfactors(
                 raw_bfactor = water_atoms.b_factor[i]
                 # If all water B-factors are identical, assign neutral z-score 0.0.
                 normalized = (
-                    (raw_bfactor - water_mean) / np.max(water_std, 1e-3) if water_std > 0 else 0.0
+                    (raw_bfactor - water_mean) / np.max(water_std, 1e-3)
+                    if water_std > 0
+                    else 0.0
                 )
                 bfactor_lookup[key] = normalized
 
@@ -1143,7 +1145,7 @@ class ProteinWaterDataset(Dataset):
         # map idx to actual entry index (handles duplication)
         if len(self.entries) == 0:
             raise IndexError("ProteinWaterDataset is empty; no entries available.")
-        
+
         actual_idx = idx % len(self.entries)
         entry = self.entries[actual_idx]
         cache_path = self.geometry_dir / f"{entry['cache_key']}.pt"
