@@ -78,3 +78,23 @@ ONE_TO_THREE = {
     "U": "SEC",
     "O": "PYL",
 }
+
+# Element vocabulary for atom types in protein structures
+ELEMENT_VOCAB = [
+    "C",
+    "N",
+    "O",
+    "S",
+    "P",
+    "SE",
+    "MG",
+    "ZN",
+    "CA",
+    "FE",
+    "NA",
+    "K",
+    "CL",
+    "F",
+    "BR",
+]
+ELEM_IDX = {e: i for i, e in enumerate(ELEMENT_VOCAB)}

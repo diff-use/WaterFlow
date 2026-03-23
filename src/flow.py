@@ -1,3 +1,12 @@
+"""
+Flow matching model components for water placement prediction.
+
+This module provides:
+- ProteinWaterUpdate: Heterogeneous GVP message passing across 4 edge types
+- FlowWaterGVP: End-to-end flow model combining encoder + GVP updates + vector field head
+- FlowMatcher: High-level training, validation, and numerical integration interface
+"""
+
 from __future__ import annotations
 
 import copy
@@ -11,7 +20,7 @@ from torch_geometric.nn import knn
 from torch_scatter import scatter_mean
 from tqdm.auto import tqdm
 
-from src.constants import ALL_EDGE_TYPES, EDGE_PP, EDGE_PW, EDGE_WP, EDGE_WW
+from src.constants import ALL_EDGE_TYPES, EDGE_PP, EDGE_PW, EDGE_WP, EDGE_WW, NUM_RBF
 from src.encoder_base import BaseProteinEncoder
 from src.gvp import GVP, GVPMultiEdgeConv
 from src.utils import ot_coupling
@@ -55,11 +64,30 @@ class ProteinWaterUpdate(nn.Module):
         rbf_dim=16,
         layers=3,
         drop_rate=0.0,
+        n_message_gvps=2,
+        n_update_gvps=2,
         vector_gate=True,
         aggr_edges="sum",
         use_dst_feats=True,
     ):
+        """
+        Initialize heterogeneous protein-water message passing module.
+
+        Args:
+            hidden_dims: (scalar_dim, vector_dim) hidden dimensions for GVP layers
+            rbf_dim: Number of radial basis functions for distance encoding
+            layers: Number of GVP message passing layers
+            drop_rate: Dropout rate for regularization
+            n_message_gvps: Number of GVP modules in each edge-type's message function
+                (distinct from `layers` which controls message-passing iterations)
+            n_update_gvps: Number of GVP modules in the node update function
+                (applied after aggregating messages from all edge types)
+            vector_gate: Whether to use vector gating in GVP layers
+            aggr_edges: Edge aggregation method ('sum' or 'mean')
+            use_dst_feats: Whether to include destination features in messages
+        """
         super().__init__()
+        # Unpack hidden dimensions: s_h = scalar hidden dim, v_h = vector hidden dim
         s_h, v_h = hidden_dims
 
         etypes = ALL_EDGE_TYPES
@@ -71,8 +99,8 @@ class ProteinWaterUpdate(nn.Module):
                     s_dim=s_h,
                     v_dim=v_h,
                     rbf_dim=rbf_dim,
-                    n_message_gvps=3,
-                    n_update_gvps=3,
+                    n_message_gvps=n_message_gvps,
+                    n_update_gvps=n_update_gvps,
                     use_dst_feats=use_dst_feats,
                     drop_rate=drop_rate,
                     aggr_edges=aggr_edges,
@@ -175,12 +203,26 @@ class ProteinWaterUpdate(nn.Module):
         k_pw: int = 12,
         k_ww: int = 8,
         k_wp: int = 8,
+        pp_edge_attr: tuple | None = None,
     ):
         """
-        x_dict: {
-            'protein': (s_p, v_p),
-            'water':   (s_w, v_w)
-        }
+        Run heterogeneous message passing across protein and water nodes.
+
+        Args:
+            x_dict: Node features dict with:
+                - 'protein': (s_p, v_p) where s_p is (N_p, scalar_dim), v_p is (N_p, vector_dim, 3)
+                - 'water': (s_w, v_w) where s_w is (N_w, scalar_dim), v_w is (N_w, vector_dim, 3)
+            data: HeteroData with 'protein' and 'water' node positions
+            k_pw: Number of nearest neighbors for protein-water edges
+            k_ww: Number of nearest neighbors for water-water edges
+            k_wp: Number of nearest neighbors for water-protein edges
+            pp_edge_attr: Optional encoder-learned edge features (s_edge, V_edge) for PP edges.
+                If provided, uses encoder-learned scalar features (s_edge) combined with
+                cached edge direction unit vectors (edge_unit_vectors, pre-normalized at preprocessing).
+                If None, uses cached geometric edge features (edge_rbf, edge_unit_vectors) from the dataset.
+
+        Returns:
+            Updated x_dict with same structure as input
         """
         pos_dict = {nt: data[nt].pos for nt in data.node_types if "pos" in data[nt]}
 
@@ -191,8 +233,30 @@ class ProteinWaterUpdate(nn.Module):
             k_wp=k_wp,
         )
 
+        # PP edge features: encoder-provided take priority over cached geometric features
+        cached_edge_attr_dict = {}
+        if EDGE_PP in data.edge_types:
+            pp_edge = data[EDGE_PP]
+
+            # V_edge fallback is for backward compatibility with datasets
+            # that don't have cached edge features. A given model only sees one or the other.
+            if pp_edge_attr is not None:
+                # Use encoder-learned scalar features (s_edge) with unit vectors
+                s_edge, V_edge = pp_edge_attr
+                if hasattr(pp_edge, "edge_unit_vectors"):
+                    cached_edge_attr_dict[EDGE_PP] = (s_edge, pp_edge.edge_unit_vectors)
+                else:
+                    # Fallback for datasets without cached unit vectors
+                    cached_edge_attr_dict[EDGE_PP] = (s_edge, V_edge.squeeze(1))
+            elif hasattr(pp_edge, "edge_rbf") and hasattr(pp_edge, "edge_unit_vectors"):
+                # No encoder edge features (e.g., SLAE/ESM) - use cached geometric features
+                cached_edge_attr_dict[EDGE_PP] = (
+                    pp_edge.edge_rbf,
+                    pp_edge.edge_unit_vectors,
+                )
+
         for block in self.blocks:
-            x_dict = block(x_dict, edge_index_dict, pos_dict)
+            x_dict = block(x_dict, edge_index_dict, pos_dict, cached_edge_attr_dict)
 
         return x_dict
 
@@ -211,21 +275,44 @@ class FlowWaterGVP(nn.Module):
         self,
         encoder: BaseProteinEncoder,
         hidden_dims: tuple[int, int] = (256, 32),
-        edge_scalar_dim: int = 32,
+        edge_scalar_dim: int = NUM_RBF,
         layers: int = 4,
-        drop_rate: float = 0.0,
+        drop_rate: float = 0.1,
+        n_message_gvps: int = 2,
+        n_update_gvps: int = 2,
         vector_gate: bool = True,
         k_pw: int = 12,
         k_ww: int = 8,
         k_wp: int = 8,
         water_input_dim: int = 16,  # 1 hot with oxygen, same as encoder
     ):
+        """
+        Initialize end-to-end flow model for water placement.
+
+        Args:
+            encoder: Protein encoder implementing BaseProteinEncoder interface
+            hidden_dims: (scalar_dim, vector_dim) hidden dimensions. Default: (256, 32)
+            edge_scalar_dim: Dimension of edge scalar features. Default: NUM_RBF (32)
+            layers: Number of heterogeneous GVP message passing layers. Default: 4
+            drop_rate: Dropout rate for regularization. Default: 0.1
+            n_message_gvps: Number of GVP modules in each edge-type's message function
+                (distinct from `layers` which controls message-passing iterations). Default: 2
+            n_update_gvps: Number of GVP modules in the node update function
+                (applied after aggregating messages from all edge types). Default: 2
+            vector_gate: Whether to use vector gating in GVP layers. Default: True
+            k_pw: K nearest neighbors for protein-water edges. Default: 12
+            k_ww: K nearest neighbors for water-water edges. Default: 8
+            k_wp: K nearest neighbors for water-protein edges. Default: 8
+            water_input_dim: Input dimension for water node features. Default: 16
+        """
         super().__init__()
         self.encoder = encoder
         self.hidden_dims = hidden_dims
         self.edge_scalar_dim = edge_scalar_dim
         self.layers = layers
         self.drop_rate = drop_rate
+        self.n_message_gvps = n_message_gvps
+        self.n_update_gvps = n_update_gvps
         self.vector_gate = vector_gate
         self.k_pw = k_pw
         self.k_ww = k_ww
@@ -261,6 +348,8 @@ class FlowWaterGVP(nn.Module):
             rbf_dim=edge_scalar_dim,
             layers=layers,
             drop_rate=drop_rate,
+            n_message_gvps=n_message_gvps,
+            n_update_gvps=n_update_gvps,
             vector_gate=vector_gate,
             aggr_edges="sum",
             use_dst_feats=True,
@@ -279,10 +368,13 @@ class FlowWaterGVP(nn.Module):
             nn.LayerNorm(s_h),
         )
 
-        # water vector field head: (s,v) -> (0,1) -> single vector channel
+        # Water vector field head: project (s_h, v_h) -> (s_h // 4, 1) -> single vector channel
+        # NOTE: vector_gate=True requires scalar input features. GVP gating works by
+        # computing gate values from scalars via a learned linear map, then applying
+        # sigmoid-gated element-wise multiplication to the output vectors.
         self.vfield_head = GVP(
             in_dims=hidden_dims,
-            out_dims=(0, 1),
+            out_dims=(s_h // 4, 1),
             vector_gate=True,
         )
 
@@ -290,23 +382,32 @@ class FlowWaterGVP(nn.Module):
         self,
         data: HeteroData,
         t: torch.Tensor,
-        sc: dict[str, torch.Tensor] | None = None,
+        self_cond: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """
-        data: HeteroData with node types 'protein' (may include mates), 'water'
-        t: (B,) diffusion time per complex
-        sc: optional dict with 'x1_pred' for score conditioning (same shape as water.pos)
+        Predict velocity field for water nodes given protein context and time.
+
+        Args:
+            data: HeteroData with:
+                - 'protein' nodes (may include symmetry mates):
+                    positions: (N_p, 3) Cartesian coordinates
+                    features: (N_p, feat_dim) element one-hot or encoder embeddings
+                - 'water' nodes:
+                    positions: (N_w, 3) Cartesian coordinates
+                    features: (N_w, 16) element one-hot encoding
+            t: (B,) flow time per complex in batch, values in [0, 1]
+            self_cond: Optional self-conditioning dict with 'x1_pred' key containing
+                previous prediction (N_w, 3) for iterative refinement
 
         Returns:
-            v_pred: (N_water, 3) vector field at each water node.
+            (N_w, 3) predicted velocity vector field at each water node
         """
         device = data["protein"].pos.device
 
-        # Single unified encoder call - works for ANY encoder type
-        s_all, v_all, _edge_attr = self.encoder(data)
+        # all encoders return (s, V, pp_edge_attr) where pp_edge_attr is None for SLAE/ESM
+        s_all, v_all, pp_edge_attr = self.encoder(data)
 
-        # Bridge encoder dims -> flow dims
-        # Pass tuple when encoder has vector outputs, tensor when scalar-only
+        # pass tuple when encoder has vector outputs, tensor when scalar-only
         encoder_input = (s_all, v_all) if self.encoder.output_dims[1] > 0 else s_all
         s_p_latent, v_p_latent = self.encoder_to_flow(encoder_input)
 
@@ -331,8 +432,12 @@ class FlowWaterGVP(nn.Module):
         )
 
         # self conditioning
-        if sc is not None and ("x1_pred" in sc) and sc["x1_pred"] is not None:
-            delta = sc["x1_pred"] - data["water"].pos
+        if (
+            self_cond is not None
+            and ("x1_pred" in self_cond)
+            and self_cond["x1_pred"] is not None
+        ):
+            delta = self_cond["x1_pred"] - data["water"].pos
             delta_vec = delta.unsqueeze(1)
 
             # vector conditioning (equivariant)
@@ -352,12 +457,14 @@ class FlowWaterGVP(nn.Module):
         }
 
         # hetero update (protein+water graph)
+        # Pass encoder edge features (None for SLAE/ESM, tuple for GVP)
         x_dict = self.updater(
             x_dict,
             data,
             k_pw=self.k_pw,
             k_ww=self.k_ww,
             k_wp=self.k_wp,
+            pp_edge_attr=pp_edge_attr,
         )
 
         # water vector field head
@@ -380,6 +487,18 @@ class FlowMatcher:
         sigma_distort: float = 0.5,
         loss_eps: float = 1e-3,
     ):
+        """
+        Initialize flow matcher for training and inference.
+
+        Args:
+            model: FlowWaterGVP model instance
+            p_self_cond: Probability of using self-conditioning during training
+            use_distortion: Whether to apply late-stage path distortion
+            p_distort: Probability of applying distortion per sample
+            t_distort: Time threshold after which distortion may be applied
+            sigma_distort: Standard deviation of distortion noise
+            loss_eps: Small constant for numerical stability in loss weighting
+        """
         self.model = model
         self.p_self_cond = p_self_cond
         self.use_distortion = use_distortion
@@ -390,7 +509,15 @@ class FlowMatcher:
 
     @staticmethod
     def compute_sigma(data: HeteroData) -> float:
-        """Compute sigma as std of protein coordinates."""
+        """
+        Compute noise scale sigma as standard deviation of protein coordinates.
+
+        Args:
+            data: HeteroData with protein node positions
+
+        Returns:
+            Scalar sigma value (standard deviation across all protein coordinates)
+        """
         pos = data["protein"].pos
         return float(pos.std().item())
 
@@ -418,15 +545,38 @@ class FlowMatcher:
     def training_step(
         self,
         batch: HeteroData,
-        optimizer: torch.optim.Optimizer,
-        grad_clip: float = 1.0,
         use_self_conditioning: bool = True,
-    ) -> dict[str, float | dict | None]:
+        accumulation_steps: int = 1,
+    ) -> dict[str, float | int | None | dict]:
         """
-        Single flow matching training step.
+        Single flow matching training step (forward + backward only).
 
-        Returns dict with 'loss', 'rmsd', 'sigma'.
+        The optimizer step is handled by the caller to support gradient accumulation.
+
+        Args:
+            batch: HeteroData batch
+            use_self_conditioning: Whether to use self-conditioning
+            accumulation_steps: Number of gradient accumulation steps (loss is scaled by 1/accumulation_steps)
+
+        Returns:
+            Dict with 'loss', 'rmsd', 'sigma', and optionally 'per_sample_info'.
+
+        Note:
+            This method only computes forward pass, loss, and backward(). The caller
+            is responsible for:
+            1. optimizer.zero_grad() before calling
+            2. Gradient clipping (e.g., torch.nn.utils.clip_grad_norm_)
+            3. optimizer.step() after accumulating gradients
+
+            For gradient accumulation, call this method N times, then step once.
+            The loss is automatically scaled by 1/accumulation_steps for correct
+            gradient magnitude. See scripts/train.py for reference implementation.
         """
+        if accumulation_steps < 1:
+            raise ValueError(
+                f"accumulation_steps must be >= 1, got {accumulation_steps}"
+            )
+
         self.model.train()
         device = batch["protein"].pos.device
 
@@ -454,17 +604,17 @@ class FlowMatcher:
                 x_t = x_t + indicator * mask * eps
 
         # self-conditioning
-        sc = None
+        self_cond = None
         if use_self_conditioning and torch.rand(1).item() < self.p_self_cond:
             with torch.no_grad():
                 batch["water"].pos = x_t
-                v_sc = self.model(batch, t, sc=None)
-                x1_sc = x_t + (1.0 - t_per_atom) * v_sc
-            sc = {"x1_pred": x1_sc}
+                v_pred_sc = self.model(batch, t, self_cond=None)
+                x1_pred_sc = x_t + (1.0 - t_per_atom) * v_pred_sc
+            self_cond = {"x1_pred": x1_pred_sc}
 
         # forward pass
         batch["water"].pos = x_t
-        v_pred = self.model(batch, t, sc=sc)
+        v_pred = self.model(batch, t, self_cond=self_cond)
 
         # target velocity
         v_target = x1_star - x0_star
@@ -487,15 +637,8 @@ class FlowMatcher:
                 per_sample_loss = numerator / (denominator + 1e-8)
                 per_sample_info = {"losses": per_sample_loss, "num_graphs": num_graphs}
 
-        # backward
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        if grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(
-                [p for p in self.model.parameters() if p.requires_grad],
-                max_norm=grad_clip,
-            )
-        optimizer.step()
+        # backward (scale loss for gradient accumulation)
+        (loss / accumulation_steps).backward()
 
         # training RMSD
         with torch.no_grad():
@@ -513,9 +656,22 @@ class FlowMatcher:
             "per_sample_info": per_sample_info,
         }
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def validation_step(self, batch: HeteroData) -> dict[str, float]:
-        """Single validation step (no gradient, no optimizer)."""
+        """
+        Run single validation step without gradients.
+
+        Args:
+            batch: HeteroData batch with protein and water nodes
+
+        Returns:
+            Dict with 'loss' and 'rmsd' metrics
+
+        Note:
+            This method is for inference only. It sets model.eval(), disables
+            gradients, and returns metrics. Training uses training_step() which
+            handles gradient computation and loss calculation.
+        """
         self.model.eval()
         device = batch["protein"].pos.device
 
@@ -533,7 +689,7 @@ class FlowMatcher:
         x_t = (1.0 - t_per_atom) * x0_star + t_per_atom * x1_star
 
         batch["water"].pos = x_t
-        v_pred = self.model(batch, t, sc=None)
+        v_pred = self.model(batch, t, self_cond=None)
         v_target = x1_star - x0_star
 
         w = 1.0 / (self.loss_eps + (1.0 - t_per_atom))
@@ -596,7 +752,7 @@ class FlowMatcher:
 
         return x, batch_w
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def euler_integrate(
         self,
         graphs: HeteroData | list[HeteroData],
@@ -605,7 +761,7 @@ class FlowMatcher:
         sc_ema_alpha: float = 0.2,
         device: str | torch.device = "cuda",
         water_ratio: float | None = None,
-    ) -> list[np.ndarray]:
+    ) -> list[dict[str, np.ndarray]]:
         """
         Euler integration from noise to final positions.
 
@@ -619,7 +775,11 @@ class FlowMatcher:
                         instead of using ground truth water count
 
         Returns:
-            List of (Nw_i, 3) predicted water positions for each input graph
+            List of dicts, one per input graph, each with keys:
+                'protein_pos': (Np, 3) - includes both ASU and mate atoms
+                'water_true': (Nw, 3) - None if water_ratio is used
+                'water_pred': (Nw, 3) final prediction
+                'pdb_id': PDB identifier
         """
         self.model.eval()
         device = torch.device(device if torch.cuda.is_available() else "cpu")
@@ -628,8 +788,17 @@ class FlowMatcher:
         if isinstance(graphs, HeteroData):
             graphs = [graphs]
 
+        # store original pdb_ids before batching
+        pdb_ids = [getattr(g, "pdb_id", None) for g in graphs]
+
         # batch graphs together
         g = Batch.from_data_list([copy.deepcopy(graph) for graph in graphs]).to(device)
+
+        batch_p = g["protein"].batch
+
+        # store ground truth water positions and batch indices before modifying
+        x1_true = g["water"].pos.clone()
+        batch_w_true = g["water"].batch.clone()
 
         if water_ratio is not None:
             # sample waters based on residue count
@@ -655,15 +824,15 @@ class FlowMatcher:
             t = t_scalar.expand(num_graphs)  # (num_graphs,) all same value
 
             g["water"].pos = x
-            sc = {"x1_pred": x1_pred_ema} if use_sc else None
-            v = self.model(g, t, sc=sc)
+            self_cond = {"x1_pred": x1_pred_ema} if use_sc else None
+            v = self.model(g, t, self_cond=self_cond)
             x = x + dt * v
 
             if use_sc:
                 t_next_scalar = ts[i + 1]
                 t_next = t_next_scalar.expand(num_graphs)
                 g["water"].pos = x
-                v_next = self.model(g, t_next, sc={"x1_pred": x1_pred_ema})
+                v_next = self.model(g, t_next, self_cond={"x1_pred": x1_pred_ema})
                 x1_pred_now = x + (1.0 - t_next_scalar) * v_next
                 x1_pred_ema = (
                     1.0 - sc_ema_alpha
@@ -671,14 +840,29 @@ class FlowMatcher:
 
         # split results by graph
         x_cpu = x.detach().cpu()
+        protein_pos_cpu = g["protein"].pos.detach().cpu()
+        x1_true_cpu = x1_true.detach().cpu()
+        batch_w_cpu = batch_w.cpu()
+        batch_w_true_cpu = batch_w_true.cpu()
+        batch_p_cpu = batch_p.cpu()
+
         results = []
         for i in range(num_graphs):
-            mask = batch_w.cpu() == i
-            results.append(x_cpu[mask].numpy())
+            mask_w = batch_w_cpu == i
+            mask_w_true = batch_w_true_cpu == i
+            mask_p = batch_p_cpu == i
+
+            result = {
+                "protein_pos": protein_pos_cpu[mask_p].numpy(),
+                "water_true": x1_true_cpu[mask_w_true].numpy(),
+                "water_pred": x_cpu[mask_w].numpy(),
+                "pdb_id": pdb_ids[i],
+            }
+            results.append(result)
 
         return results
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def rk4_integrate(
         self,
         graphs: HeteroData | list[HeteroData],
@@ -761,8 +945,8 @@ class FlowMatcher:
 
             def f(xpos, t_tensor):
                 g["water"].pos = xpos
-                sc = {"x1_pred": x1_pred_ema} if use_sc else None
-                return self.model(g, t_tensor, sc=sc)
+                self_cond = {"x1_pred": x1_pred_ema} if use_sc else None
+                return self.model(g, t_tensor, self_cond=self_cond)
 
             k1 = f(x, t0)
             k2 = f(x + 0.5 * dt * k1, (t0_scalar + 0.5 * dt).expand(num_graphs))
@@ -775,7 +959,7 @@ class FlowMatcher:
                 t1_scalar = ts[step + 1]
                 t1 = t1_scalar.expand(num_graphs)
                 g["water"].pos = x
-                v_next = self.model(g, t1, sc={"x1_pred": x1_pred_ema})
+                v_next = self.model(g, t1, self_cond={"x1_pred": x1_pred_ema})
                 x1_pred_now = x + (1.0 - t1_scalar) * v_next
                 x1_pred_ema = (
                     1.0 - sc_ema_alpha
@@ -841,6 +1025,7 @@ class FlowMatcher:
 
         if method == "euler":
             results = self.euler_integrate(graphs, num_steps, use_sc, device=device)
+            results = [r["water_pred"] for r in results]
         elif method == "rk4":
             results = self.rk4_integrate(
                 graphs, num_steps, use_sc, device=device, return_trajectory=False

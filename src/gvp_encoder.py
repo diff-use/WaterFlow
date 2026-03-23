@@ -21,7 +21,7 @@ from torch_scatter import scatter_add, scatter_max, scatter_mean
 from src.constants import EDGE_PP, NODE_FEATURE_DIM, NUM_RBF, RBF_CUTOFF
 from src.encoder_base import BaseProteinEncoder, register_encoder
 from src.gvp import EdgeUpdate, GVP, GVPConvLayer
-from src.utils import rbf
+from src.utils import compute_edge_geometry, rbf
 
 
 # Type aliases for GVP feature tuples
@@ -300,29 +300,10 @@ class ProteinGVPEncoder(nn.Module):
         )
         return (x_scalar, zeros)
 
-    def _compute_edge_attr(self, data: Batch):
-        """
-        Build edge attributes from positions or cached features.
-
-        If cached edge features (edge_rbf, edge_unit_vectors) are both available in data,
-        use them directly. Otherwise, compute from positions.
-
-        Args:
-            data: Batch with pos, edge_index, and optionally edge_rbf, edge_unit_vectors
-
-        Returns:
-            (s_edge, V_edge): Tuple of scalar and vector edge features
-            s_edge_raw: Raw RBF features (for distance conditioning)
-        """
-        # Use cached features if available
-        if hasattr(data, "edge_rbf") and hasattr(data, "edge_unit_vectors"):
-            s_edge_raw = data.edge_rbf
-            u = data.edge_unit_vectors
-        else:
-            # Fallback: compute from positions
-            rij, u = edge_vectors(data.pos, data.edge_index)
-            s_edge_raw = rbf(rij, num_gaussians=self.num_edge_rbf, cutoff=self.radius)
-
+    def _compute_edge_attr(self, pos: torch.Tensor, edge_index: torch.Tensor):
+        # d: (E,) edge distances, u: (E, 3) unit displacement vectors (source -> dest)
+        d, u = compute_edge_geometry(pos, edge_index)
+        s_edge_raw = rbf(d, num_gaussians=self.num_edge_rbf, cutoff=self.radius)
         s_edge = self.edge_in_proj(s_edge_raw)
         V_edge = u.unsqueeze(1)
         return (s_edge, V_edge), s_edge_raw
@@ -352,7 +333,7 @@ class ProteinGVPEncoder(nn.Module):
             node_features = (x_scalar, data.node_v.unsqueeze(1))
 
         x = self.input_gvp(node_features)
-        edge_attr, dist_feat = self._compute_edge_attr(data)
+        edge_attr, dist_feat = self._compute_edge_attr(data.pos, data.edge_index)
 
         for layer in self.layers:
             x = layer(x, data.edge_index, edge_attr)
