@@ -264,21 +264,6 @@ def compute_edge_features(
     return unit_vectors, rbf_features
 
 
-def _normalize_ins_code(value) -> str:
-    """Normalize insertion code values from PDB/CSV into a stable key token."""
-    if value is None:
-        return ""
-    try:
-        if np.isnan(value):
-            return ""
-    except TypeError:
-        pass
-    ins = str(value).strip()
-    if ins in {"", "?", "."}:
-        return ""
-    return ins
-
-
 def atom37_to_atoms(
     atom_tensor: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:

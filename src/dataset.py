@@ -31,8 +31,8 @@ from tqdm import tqdm
 
 from src.constants import EDGE_PP, ELEM_IDX, ELEMENT_VOCAB, NUM_RBF
 from src.utils import (
-    _normalize_ins_code,
     compute_edge_features,
+    normalize_ins_code,
 )
 
 
@@ -78,7 +78,9 @@ def parse_asu_with_biotite(
     return protein_atoms, water_atoms
 
 
-def get_crystal_contacts_pymol(pdb_path: str, cutoff: float = 5.0) -> dict:
+def get_crystal_contacts_pymol(
+    pdb_path: str, cutoff: float = 5.0
+) -> dict[str, np.ndarray | list]:
     """
     Extract ASU and symmetry mate atoms within crystal contact distance.
 
@@ -187,6 +189,89 @@ def _pad_atom_embeddings_for_mates(
         total_num_atoms - asu_embedding.size(0), asu_embedding.size(1)
     )
     return torch.cat([asu_embedding, pad], dim=0)
+
+
+def load_slae_embedding(
+    embedding_dir: Path,
+    cache_key: str,
+    num_asu_protein: int,
+    total_num_atoms: int,
+) -> torch.Tensor:
+    """
+    Load SLAE atom-level embeddings from cache.
+
+    This is a standalone function to allow reuse outside dataset context.
+
+    Args:
+        embedding_dir: Directory containing cached embedding files
+        cache_key: Identifier for the cached embedding file
+        num_asu_protein: Expected number of ASU protein atoms
+        total_num_atoms: Total protein atoms including symmetry mates
+
+    Returns:
+        (total_num_atoms, slae_dim) tensor with zeros padded for mate atoms
+
+    Raises:
+        FileNotFoundError: If SLAE cache file doesn't exist
+        ValueError: If atom count doesn't match expected ASU count
+    """
+    slae_cache_path = embedding_dir / f"{cache_key}.pt"
+    if not slae_cache_path.exists():
+        raise FileNotFoundError(
+            f"SLAE cache file not found: {slae_cache_path}. "
+            "Generate embeddings with scripts/generate_slae_embeddings.py."
+        )
+    slae_cached = torch.load(slae_cache_path, weights_only=False)
+    if "node_embeddings" not in slae_cached:
+        raise KeyError(f"Missing 'node_embeddings' in SLAE cache: {slae_cache_path}")
+    slae_emb = slae_cached["node_embeddings"]
+    if slae_emb.size(0) != num_asu_protein:
+        raise ValueError(
+            f"SLAE embedding atom count mismatch for {cache_key}: "
+            f"expected {num_asu_protein}, got {slae_emb.size(0)}"
+        )
+    return _pad_atom_embeddings_for_mates(slae_emb, total_num_atoms)
+
+
+def load_esm_embedding(
+    embedding_dir: Path,
+    cache_key: str,
+    num_protein_residues: int,
+) -> torch.Tensor:
+    """
+    Load ESM residue-level embeddings from cache.
+
+    This is a standalone function to allow reuse outside dataset context.
+    Returns raw residue embeddings; broadcasting to atom level is done separately.
+
+    Args:
+        embedding_dir: Directory containing cached embedding files
+        cache_key: Identifier for the cached embedding file
+        num_protein_residues: Expected number of unique residues
+
+    Returns:
+        (num_protein_residues, esm_dim) tensor of residue embeddings
+
+    Raises:
+        FileNotFoundError: If ESM cache file doesn't exist
+        ValueError: If residue count doesn't match expected count
+    """
+    esm_cache_path = embedding_dir / f"{cache_key}.pt"
+    if not esm_cache_path.exists():
+        raise FileNotFoundError(
+            f"ESM cache file not found: {esm_cache_path}. "
+            "Generate embeddings with scripts/generate_esm_embeddings.py."
+        )
+    esm_cached = torch.load(esm_cache_path, weights_only=False)
+    if "residue_embeddings" not in esm_cached:
+        raise KeyError(f"Missing 'residue_embeddings' in ESM cache: {esm_cache_path}")
+    residue_embeddings = esm_cached["residue_embeddings"]
+    if residue_embeddings.size(0) != num_protein_residues:
+        raise ValueError(
+            f"ESM residue count mismatch for {cache_key}: "
+            f"expected {num_protein_residues}, got {residue_embeddings.size(0)}"
+        )
+    return residue_embeddings
 
 
 def check_com_distance(
@@ -375,7 +460,7 @@ def load_edia_for_pdb(
         # build lookup dictionary: (chain_id, res_id, ins_code) -> EDIAm
         edia_lookup = {}
         for _, row in water_df.iterrows():
-            ins_code = _normalize_ins_code(row[ins_code_col]) if ins_code_col else ""
+            ins_code = normalize_ins_code(row[ins_code_col]) if ins_code_col else ""
             key = (str(row["pdb_strandID"]), int(row["pdb_seqNum"]), ins_code)
             edia_lookup[key] = float(row["EDIAm"])
 
@@ -427,7 +512,7 @@ def compute_normalized_bfactors(
         for i in range(len(water_atoms)):
             chain_id = str(water_atoms.chain_id[i])
             res_id = int(water_atoms.res_id[i])
-            ins_code = _normalize_ins_code(water_atoms.ins_code[i])
+            ins_code = normalize_ins_code(water_atoms.ins_code[i])
             key = (chain_id, res_id, ins_code)
 
             if key not in bfactor_lookup:
@@ -635,11 +720,13 @@ class ProteinWaterDataset(Dataset):
         # Directory-based separation: geometry/ vs geometry_mates/
         cache_suffix = "_mates" if include_mates else ""
         self.geometry_dir = self.cache_dir / f"{geometry_cache_name}{cache_suffix}"
-        self.slae_dir = self.cache_dir / "slae"
-        self.esm_dir = self.cache_dir / "esm"
         self.base_pdb_dir = Path(base_pdb_dir)
         self.cutoff = cutoff
         self.encoder_type = encoder_type
+        if self.encoder_type in ("slae", "esm"):
+            self.embedding_dir = self.cache_dir / self.encoder_type
+        else:
+            self.embedding_dir = None
         self.include_mates = include_mates
         self.duplicate_single_sample = duplicate_single_sample
 
@@ -657,16 +744,16 @@ class ProteinWaterDataset(Dataset):
         self.filter_by_edia = filter_by_edia
         self.filter_by_bfactor = filter_by_bfactor
 
-        self.entries = self._parse_pdb_list(pdb_list_file)
-
-        if preprocess:
-            self._preprocess_all()
-
         if self.encoder_type not in {"gvp", "slae", "esm"}:
             raise ValueError(
                 f"Unsupported encoder_type '{self.encoder_type}'. "
                 "Expected one of: gvp, slae, esm"
             )
+
+        self.entries = self._parse_pdb_list(pdb_list_file)
+
+        if preprocess:
+            self._preprocess_all()
 
         # if single sample and duplication requested, set effective length [this is for experiments to check if the model can memorize a sample]
         if len(self.entries) == 1 and duplicate_single_sample > 1:
@@ -790,7 +877,9 @@ class ProteinWaterDataset(Dataset):
 
         crystal_data = get_crystal_contacts_pymol(pdb_path, self.cutoff)
 
-        # filter water atoms to only those in ASU
+        # Ensure consistency between biotite and PyMOL parsing.
+        # Both parse the same ASU, but may differ in altloc selection, hydrogen
+        # handling, or edge cases. Keep only waters present in both representations.
         asu_water_indices = match_atoms_to_coords(
             water_atoms, crystal_data["asu_coords"]
         )
@@ -830,7 +919,7 @@ class ProteinWaterDataset(Dataset):
                     water_atoms.chain_id.astype(str),
                     water_atoms.res_id.astype(int),
                     np.array(
-                        [_normalize_ins_code(x) for x in water_atoms.ins_code],
+                        [normalize_ins_code(x) for x in water_atoms.ins_code],
                         dtype=object,
                     ),
                 )
@@ -888,7 +977,7 @@ class ProteinWaterDataset(Dataset):
         res_id = protein_atoms.res_id
         chain_id_arr = protein_atoms.chain_id
         ins_code_arr = np.array(
-            [_normalize_ins_code(x) for x in protein_atoms.ins_code], dtype=object
+            [normalize_ins_code(x) for x in protein_atoms.ins_code], dtype=object
         )
         residue_keys = list(zip(chain_id_arr, res_id, ins_code_arr))
         unique_res = {k: i for i, k in enumerate(dict.fromkeys(residue_keys))}
@@ -994,90 +1083,7 @@ class ProteinWaterDataset(Dataset):
     def __len__(self) -> int:
         return self._effective_length
 
-    def _load_slae_embedding(
-        self,
-        cache_key: str,
-        num_asu_protein: int,
-        total_num_atoms: int,
-    ) -> torch.Tensor:
-        """
-        Load SLAE atom-level embeddings from cache.
-
-        Args:
-            cache_key: Identifier for the cached embedding file
-            num_asu_protein: Expected number of ASU protein atoms
-            total_num_atoms: Total protein atoms including symmetry mates
-
-        Returns:
-            (total_num_atoms, slae_dim) tensor with zeros padded for mate atoms
-
-        Raises:
-            FileNotFoundError: If SLAE cache file doesn't exist
-            ValueError: If atom count doesn't match expected ASU count
-        """
-        slae_cache_path = self.slae_dir / f"{cache_key}.pt"
-        if not slae_cache_path.exists():
-            raise FileNotFoundError(
-                f"SLAE cache file not found: {slae_cache_path}. "
-                "Generate embeddings with scripts/generate_slae_embeddings.py."
-            )
-        slae_cached = torch.load(slae_cache_path, weights_only=False)
-        if "node_embeddings" not in slae_cached:
-            raise KeyError(
-                f"Missing 'node_embeddings' in SLAE cache: {slae_cache_path}"
-            )
-        slae_emb = slae_cached["node_embeddings"]
-        if slae_emb.size(0) != num_asu_protein:
-            raise ValueError(
-                f"SLAE embedding atom count mismatch for {cache_key}: "
-                f"expected {num_asu_protein}, got {slae_emb.size(0)}"
-            )
-        return _pad_atom_embeddings_for_mates(slae_emb, total_num_atoms)
-
-    def _load_esm_embedding(
-        self,
-        cache_key: str,
-        asu_protein_res_idx: torch.Tensor,
-        num_protein_residues: int,
-        total_num_atoms: int,
-    ) -> torch.Tensor:
-        """
-        Load ESM residue embeddings and broadcast to atom level.
-
-        Args:
-            cache_key: Identifier for the cached embedding file
-            asu_protein_res_idx: (N_asu,) residue index per ASU atom
-            num_protein_residues: Expected number of unique residues
-            total_num_atoms: Total protein atoms including symmetry mates
-
-        Returns:
-            (total_num_atoms, esm_dim) tensor with zeros padded for mate atoms
-
-        Raises:
-            FileNotFoundError: If ESM cache file doesn't exist
-            ValueError: If residue count doesn't match expected count
-        """
-        esm_cache_path = self.esm_dir / f"{cache_key}.pt"
-        if not esm_cache_path.exists():
-            raise FileNotFoundError(
-                f"ESM cache file not found: {esm_cache_path}. "
-                "Generate embeddings with scripts/generate_esm_embeddings.py."
-            )
-        esm_cached = torch.load(esm_cache_path, weights_only=False)
-        if "residue_embeddings" not in esm_cached:
-            raise KeyError(
-                f"Missing 'residue_embeddings' in ESM cache: {esm_cache_path}"
-            )
-        residue_embeddings = esm_cached["residue_embeddings"]
-        if residue_embeddings.size(0) != num_protein_residues:
-            raise ValueError(
-                f"ESM residue count mismatch for {cache_key}: "
-                f"expected {num_protein_residues}, got {residue_embeddings.size(0)}"
-            )
-        esm_atom_emb = residue_embeddings[asu_protein_res_idx]
-        return _pad_atom_embeddings_for_mates(esm_atom_emb, total_num_atoms)
-
-    def _load_encoder_embeddings(
+    def _annotate_data_with_embeddings(
         self,
         data: HeteroData,
         cache_key: str,
@@ -1089,7 +1095,9 @@ class ProteinWaterDataset(Dataset):
         Load encoder-specific embeddings and attach to data object.
 
         Only loads embeddings for the encoder type specified at dataset init.
-        GVP encoder doesn't require pre-computed embeddings.
+        GVP encoder doesn't require pre-computed embeddings. Embeddings are
+        stored using generic attribute names (embedding, embedding_type) for
+        consistent access regardless of encoder type.
 
         Args:
             data: HeteroData object to attach embeddings to (modified in-place)
@@ -1099,18 +1107,25 @@ class ProteinWaterDataset(Dataset):
             num_protein_residues: Number of unique protein residues
         """
         if self.encoder_type == "slae":
-            data["protein"].slae_embedding = self._load_slae_embedding(
+            data["protein"].embedding = load_slae_embedding(
+                embedding_dir=self.embedding_dir,
                 cache_key=cache_key,
                 num_asu_protein=num_asu_protein,
                 total_num_atoms=data["protein"].num_nodes,
             )
+            data["protein"].embedding_type = "slae"
         elif self.encoder_type == "esm":
-            data["protein"].esm_embedding = self._load_esm_embedding(
+            # Load residue embeddings and broadcast to atom level
+            residue_embeddings = load_esm_embedding(
+                embedding_dir=self.embedding_dir,
                 cache_key=cache_key,
-                asu_protein_res_idx=asu_protein_res_idx,
                 num_protein_residues=num_protein_residues,
-                total_num_atoms=data["protein"].num_nodes,
             )
+            esm_atom_emb = residue_embeddings[asu_protein_res_idx]
+            data["protein"].embedding = _pad_atom_embeddings_for_mates(
+                esm_atom_emb, data["protein"].num_nodes
+            )
+            data["protein"].embedding_type = "esm"
 
     def __getitem__(self, idx: int) -> HeteroData:
         """
@@ -1167,7 +1182,7 @@ class ProteinWaterDataset(Dataset):
         data["protein"].num_residues = num_residues
         data["protein"].num_protein_residues = num_protein_residues
 
-        self._load_encoder_embeddings(
+        self._annotate_data_with_embeddings(
             data=data,
             cache_key=entry["embedding_key"],  # use base key for embeddings
             asu_protein_res_idx=asu_protein_res_idx,

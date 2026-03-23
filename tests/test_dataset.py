@@ -40,52 +40,17 @@ from src.dataset import (
     get_crystal_contacts_pymol,
     get_dataloader,
     load_edia_for_pdb,
+    load_esm_embedding,
+    load_slae_embedding,
     match_atoms_to_coords,
     parse_asu_with_biotite,
     ProteinWaterDataset,
 )
 
 
-@pytest.fixture
-def pdb_base_dir():
-    """Base directory for PDB files."""
-    return Path("/sb/wankowicz_lab/data/srivasv/pdb_redo_data")
-
-
-@pytest.fixture
-def pdb_6eey(pdb_base_dir):
-    """Path to 6eey PDB file - should pass all quality checks."""
-    path = pdb_base_dir / "6eey" / "6eey_final.pdb"
-    if not path.exists():
-        pytest.skip(f"PDB file not found: {path}")
-    return str(path)
-
-
-@pytest.fixture
-def pdb_2b5w(pdb_base_dir):
-    """Path to 2b5w PDB file - should fail COM distance check."""
-    path = pdb_base_dir / "2b5w" / "2b5w_final.pdb"
-    if not path.exists():
-        pytest.skip(f"PDB file not found: {path}")
-    return str(path)
-
-
-@pytest.fixture
-def pdb_8dzt(pdb_base_dir):
-    """Path to 8dzt PDB file - should fail water clash check at 2% threshold."""
-    path = pdb_base_dir / "8dzt" / "8dzt_final.pdb"
-    if not path.exists():
-        pytest.skip(f"PDB file not found: {path}")
-    return str(path)
-
-
-@pytest.fixture
-def pdb_1deu(pdb_base_dir):
-    """Path to 1deu PDB file - has insertion codes (52 residues with ins_code='P')."""
-    path = pdb_base_dir / "1deu" / "1deu_final.pdb"
-    if not path.exists():
-        pytest.skip(f"PDB file not found: {path}")
-    return str(path)
+# PDB fixtures (pdb_base_dir, pdb_6eey, pdb_2b5w, pdb_8dzt, pdb_1deu) are
+# defined in conftest.py and use ENV_PDB_DIR env var with fallback to
+# tests/test_files/. See conftest.py for details.
 
 
 @pytest.fixture
@@ -1579,62 +1544,59 @@ class TestEncoderTypeValidation:
 
 @pytest.mark.unit
 class TestLoadSlaeEmbedding:
-    """Tests for SLAE embedding loading."""
+    """Tests for SLAE embedding loading (standalone function)."""
 
     @pytest.fixture
-    def mock_dataset(self, tmp_path, pdb_base_dir):
-        """Create a dataset instance for testing embedding loading."""
-        list_file = tmp_path / "list.txt"
-        list_file.write_text("6eey_final\n")
+    def embedding_dir(self, tmp_path):
+        """Create embedding directory for testing."""
+        emb_dir = tmp_path / "slae"
+        emb_dir.mkdir(parents=True, exist_ok=True)
+        return emb_dir
 
-        return ProteinWaterDataset(
-            pdb_list_file=str(list_file),
-            processed_dir=str(tmp_path / "processed"),
-            base_pdb_dir=str(pdb_base_dir),
-            encoder_type="slae",
-            preprocess=False,
-        )
-
-    def test_missing_cache_file_raises(self, mock_dataset):
+    def test_missing_cache_file_raises(self, embedding_dir):
         """Should raise FileNotFoundError for missing SLAE cache."""
         with pytest.raises(FileNotFoundError, match="SLAE cache file not found"):
-            mock_dataset._load_slae_embedding(
-                cache_key="nonexistent", num_asu_protein=100, total_num_atoms=100
+            load_slae_embedding(
+                embedding_dir=embedding_dir,
+                cache_key="nonexistent",
+                num_asu_protein=100,
+                total_num_atoms=100,
             )
 
-    def test_missing_node_embeddings_key_raises(self, mock_dataset, tmp_path):
+    def test_missing_node_embeddings_key_raises(self, embedding_dir):
         """Should raise KeyError if 'node_embeddings' key missing."""
         # Create cache file without node_embeddings
-        slae_dir = tmp_path / "processed" / "slae"
-        slae_dir.mkdir(parents=True, exist_ok=True)
-        torch.save({"other_key": torch.randn(10, 64)}, slae_dir / "test_final.pt")
+        torch.save({"other_key": torch.randn(10, 64)}, embedding_dir / "test_final.pt")
 
         with pytest.raises(KeyError, match="Missing 'node_embeddings'"):
-            mock_dataset._load_slae_embedding(
-                cache_key="test_final", num_asu_protein=10, total_num_atoms=10
+            load_slae_embedding(
+                embedding_dir=embedding_dir,
+                cache_key="test_final",
+                num_asu_protein=10,
+                total_num_atoms=10,
             )
 
-    def test_atom_count_mismatch_raises(self, mock_dataset, tmp_path):
+    def test_atom_count_mismatch_raises(self, embedding_dir):
         """Should raise ValueError if atom count doesn't match."""
-        slae_dir = tmp_path / "processed" / "slae"
-        slae_dir.mkdir(parents=True, exist_ok=True)
-        torch.save({"node_embeddings": torch.randn(50, 64)}, slae_dir / "test_final.pt")
+        torch.save(
+            {"node_embeddings": torch.randn(50, 64)}, embedding_dir / "test_final.pt"
+        )
 
         with pytest.raises(ValueError, match="atom count mismatch"):
-            mock_dataset._load_slae_embedding(
+            load_slae_embedding(
+                embedding_dir=embedding_dir,
                 cache_key="test_final",
                 num_asu_protein=100,  # Mismatch: expecting 100 but file has 50
                 total_num_atoms=100,
             )
 
-    def test_successful_load_with_padding(self, mock_dataset, tmp_path):
+    def test_successful_load_with_padding(self, embedding_dir):
         """Should load and pad embeddings correctly."""
-        slae_dir = tmp_path / "processed" / "slae"
-        slae_dir.mkdir(parents=True, exist_ok=True)
         original_emb = torch.randn(100, 64)
-        torch.save({"node_embeddings": original_emb}, slae_dir / "test_final.pt")
+        torch.save({"node_embeddings": original_emb}, embedding_dir / "test_final.pt")
 
-        result = mock_dataset._load_slae_embedding(
+        result = load_slae_embedding(
+            embedding_dir=embedding_dir,
             cache_key="test_final",
             num_asu_protein=100,
             total_num_atoms=150,  # Total with mates
@@ -1647,89 +1609,75 @@ class TestLoadSlaeEmbedding:
 
 @pytest.mark.unit
 class TestLoadEsmEmbedding:
-    """Tests for ESM embedding loading."""
+    """Tests for ESM embedding loading (standalone function).
+
+    Note: The standalone function returns raw residue-level embeddings.
+    Broadcasting to atom-level is done separately in _annotate_data_with_embeddings.
+    """
 
     @pytest.fixture
-    def mock_dataset(self, tmp_path, pdb_base_dir):
-        """Create a dataset instance for testing embedding loading."""
-        list_file = tmp_path / "list.txt"
-        list_file.write_text("6eey_final\n")
+    def embedding_dir(self, tmp_path):
+        """Create embedding directory for testing."""
+        emb_dir = tmp_path / "esm"
+        emb_dir.mkdir(parents=True, exist_ok=True)
+        return emb_dir
 
-        return ProteinWaterDataset(
-            pdb_list_file=str(list_file),
-            processed_dir=str(tmp_path / "processed"),
-            base_pdb_dir=str(pdb_base_dir),
-            encoder_type="esm",
-            preprocess=False,
-        )
-
-    def test_missing_cache_file_raises(self, mock_dataset):
+    def test_missing_cache_file_raises(self, embedding_dir):
         """Should raise FileNotFoundError for missing ESM cache."""
         with pytest.raises(FileNotFoundError, match="ESM cache file not found"):
-            mock_dataset._load_esm_embedding(
+            load_esm_embedding(
+                embedding_dir=embedding_dir,
                 cache_key="nonexistent",
-                asu_protein_res_idx=torch.tensor([0, 0, 1, 1]),
                 num_protein_residues=2,
-                total_num_atoms=4,
             )
 
-    def test_missing_residue_embeddings_key_raises(self, mock_dataset, tmp_path):
+    def test_missing_residue_embeddings_key_raises(self, embedding_dir):
         """Should raise KeyError if 'residue_embeddings' key missing."""
-        esm_dir = tmp_path / "processed" / "esm"
-        esm_dir.mkdir(parents=True, exist_ok=True)
-        torch.save({"other_key": torch.randn(10, 1280)}, esm_dir / "test_final.pt")
+        torch.save({"other_key": torch.randn(10, 1280)}, embedding_dir / "test_final.pt")
 
         with pytest.raises(KeyError, match="Missing 'residue_embeddings'"):
-            mock_dataset._load_esm_embedding(
+            load_esm_embedding(
+                embedding_dir=embedding_dir,
                 cache_key="test_final",
-                asu_protein_res_idx=torch.tensor([0, 0, 1, 1]),
                 num_protein_residues=2,
-                total_num_atoms=4,
             )
 
-    def test_residue_count_mismatch_raises(self, mock_dataset, tmp_path):
+    def test_residue_count_mismatch_raises(self, embedding_dir):
         """Should raise ValueError if residue count doesn't match."""
-        esm_dir = tmp_path / "processed" / "esm"
-        esm_dir.mkdir(parents=True, exist_ok=True)
         torch.save(
-            {"residue_embeddings": torch.randn(5, 1280)}, esm_dir / "test_final.pt"
+            {"residue_embeddings": torch.randn(5, 1280)}, embedding_dir / "test_final.pt"
         )
 
         with pytest.raises(ValueError, match="residue count mismatch"):
-            mock_dataset._load_esm_embedding(
+            load_esm_embedding(
+                embedding_dir=embedding_dir,
                 cache_key="test_final",
-                asu_protein_res_idx=torch.tensor([0, 0, 1, 1]),
                 num_protein_residues=10,  # Mismatch: expecting 10 but file has 5
-                total_num_atoms=4,
             )
 
-    def test_broadcasts_to_atom_level(self, mock_dataset, tmp_path):
-        """Should broadcast residue embeddings to atom level."""
-        esm_dir = tmp_path / "processed" / "esm"
-        esm_dir.mkdir(parents=True, exist_ok=True)
+    def test_returns_residue_embeddings(self, embedding_dir):
+        """Should return raw residue-level embeddings."""
         residue_emb = torch.randn(3, 64)  # 3 residues
-        torch.save({"residue_embeddings": residue_emb}, esm_dir / "test_final.pt")
+        torch.save({"residue_embeddings": residue_emb}, embedding_dir / "test_final.pt")
 
-        # 6 atoms: first 2 atoms -> residue 0, next 2 -> residue 1, last 2 -> residue 2
-        asu_res_idx = torch.tensor([0, 0, 1, 1, 2, 2])
-
-        result = mock_dataset._load_esm_embedding(
+        result = load_esm_embedding(
+            embedding_dir=embedding_dir,
             cache_key="test_final",
-            asu_protein_res_idx=asu_res_idx,
             num_protein_residues=3,
-            total_num_atoms=6,
         )
 
-        assert result.shape == (6, 64)
-        # Check broadcast: atoms with same residue should have same embedding
-        assert torch.equal(result[0], result[1])  # Both residue 0
-        assert torch.equal(result[2], result[3])  # Both residue 1
-        assert torch.equal(result[4], result[5])  # Both residue 2
+        # Returns raw residue embeddings (not broadcast to atoms)
+        assert result.shape == (3, 64)
+        assert torch.equal(result, residue_emb)
 
 
 @pytest.mark.unit
 class TestLoadEncoderEmbeddings:
-    """Tests for _load_encoder_embeddings dispatch logic."""
+    """Tests for _annotate_data_with_embeddings dispatch logic.
+
+    Embeddings are stored using generic attribute names (embedding, embedding_type)
+    for consistent access regardless of encoder type.
+    """
 
     def test_gvp_encoder_no_embeddings(self, tmp_path, pdb_base_dir):
         """GVP encoder should not load any embeddings."""
@@ -1750,7 +1698,7 @@ class TestLoadEncoderEmbeddings:
         data["protein"].num_nodes = 100
 
         # Should not raise (GVP doesn't need embeddings)
-        dataset._load_encoder_embeddings(
+        dataset._annotate_data_with_embeddings(
             data=data,
             cache_key="test",
             asu_protein_res_idx=torch.tensor([0]),
@@ -1759,11 +1707,11 @@ class TestLoadEncoderEmbeddings:
         )
 
         # Should not have added any embedding attributes
-        assert not hasattr(data["protein"], "slae_embedding")
-        assert not hasattr(data["protein"], "esm_embedding")
+        assert not hasattr(data["protein"], "embedding")
+        assert not hasattr(data["protein"], "embedding_type")
 
     def test_slae_encoder_loads_slae(self, tmp_path, pdb_base_dir):
-        """SLAE encoder should load SLAE embeddings."""
+        """SLAE encoder should load embeddings with type 'slae'."""
         list_file = tmp_path / "list.txt"
         list_file.write_text("6eey_final\n")
 
@@ -1787,7 +1735,7 @@ class TestLoadEncoderEmbeddings:
         data = HeteroData()
         data["protein"].num_nodes = 100
 
-        dataset._load_encoder_embeddings(
+        dataset._annotate_data_with_embeddings(
             data=data,
             cache_key="test_final",
             asu_protein_res_idx=torch.tensor([0]),
@@ -1795,11 +1743,12 @@ class TestLoadEncoderEmbeddings:
             num_protein_residues=50,
         )
 
-        assert hasattr(data["protein"], "slae_embedding")
-        assert data["protein"].slae_embedding.shape == (100, 64)
+        assert hasattr(data["protein"], "embedding")
+        assert data["protein"].embedding.shape == (100, 64)
+        assert data["protein"].embedding_type == "slae"
 
     def test_esm_encoder_loads_esm(self, tmp_path, pdb_base_dir):
-        """ESM encoder should load ESM embeddings."""
+        """ESM encoder should load embeddings with type 'esm'."""
         list_file = tmp_path / "list.txt"
         list_file.write_text("6eey_final\n")
 
@@ -1826,7 +1775,7 @@ class TestLoadEncoderEmbeddings:
         # 50 atoms belonging to 10 residues
         asu_res_idx = torch.tensor([i // 5 for i in range(50)])
 
-        dataset._load_encoder_embeddings(
+        dataset._annotate_data_with_embeddings(
             data=data,
             cache_key="test_final",
             asu_protein_res_idx=asu_res_idx,
@@ -1834,8 +1783,9 @@ class TestLoadEncoderEmbeddings:
             num_protein_residues=10,
         )
 
-        assert hasattr(data["protein"], "esm_embedding")
-        assert data["protein"].esm_embedding.shape == (50, 1280)
+        assert hasattr(data["protein"], "embedding")
+        assert data["protein"].embedding.shape == (50, 1280)
+        assert data["protein"].embedding_type == "esm"
 
 
 # ============== Tests for caching behavior ==============

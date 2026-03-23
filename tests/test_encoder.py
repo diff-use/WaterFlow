@@ -63,13 +63,14 @@ def sample_hetero_data(device):
 
 
 @pytest.fixture
-def sample_hetero_data_with_slae(sample_hetero_data):
-    """Sample HeteroData with SLAE embeddings."""
+def sample_hetero_data_with_embedding(sample_hetero_data):
+    """Sample HeteroData with embeddings using the generic 'embedding' key."""
     data = sample_hetero_data
     num_protein = data["protein"].num_nodes
-    data["protein"].slae_embedding = torch.randn(
+    data["protein"].embedding = torch.randn(
         num_protein, 128, device=data["protein"].pos.device
     )
+    data["protein"].embedding_type = "slae"
     return data
 
 
@@ -192,20 +193,20 @@ class TestBaseEncoderInterface:
         assert pp_edge_attr is not None or encoder.encoder.edge_update is None
 
     def test_cached_embedding_implements_interface(
-        self, device, sample_hetero_data_with_slae
+        self, device, sample_hetero_data_with_embedding
     ):
         """CachedEmbeddingEncoder should implement all required interface methods."""
         encoder = CachedEmbeddingEncoder(
-            embedding_key="slae_embedding", encoder_type="slae"
+            embedding_key="embedding", encoder_type="slae"
         ).to(device)
 
         assert isinstance(encoder.encoder_type, str)
 
         # Check forward returns (s, V, pp_edge_attr) tuple
-        s, V, pp_edge_attr = encoder(sample_hetero_data_with_slae)
-        assert s.shape[0] == sample_hetero_data_with_slae["protein"].num_nodes
+        s, V, pp_edge_attr = encoder(sample_hetero_data_with_embedding)
+        assert s.shape[0] == sample_hetero_data_with_embedding["protein"].num_nodes
         assert s.shape[1] == 128
-        assert V.shape == (sample_hetero_data_with_slae["protein"].num_nodes, 0, 3)
+        assert V.shape == (sample_hetero_data_with_embedding["protein"].num_nodes, 0, 3)
         # Cached embedding encoder should return None for edge features
         assert pp_edge_attr is None
 
@@ -382,18 +383,18 @@ class TestCachedEmbeddingEncoder:
     def test_output_dims_before_forward_raises(self, device):
         """output_dims should raise RuntimeError before forward pass."""
         encoder = CachedEmbeddingEncoder(
-            embedding_key="slae_embedding", encoder_type="slae"
+            embedding_key="embedding", encoder_type="slae"
         ).to(device)
         with pytest.raises(RuntimeError, match="dimension not yet known"):
             _ = encoder.output_dims
 
-    def test_esm_output_dims_after_forward(self, device, sample_hetero_data):
-        """ESM encoder should infer output_dims from data."""
+    def test_output_dims_after_forward(self, device, sample_hetero_data):
+        """Encoder should infer output_dims from data after forward pass."""
         encoder = CachedEmbeddingEncoder(
-            embedding_key="esm_embedding", encoder_type="esm"
+            embedding_key="embedding", encoder_type="esm"
         ).to(device)
         n_atoms = sample_hetero_data["protein"].num_nodes
-        sample_hetero_data["protein"].esm_embedding = torch.randn(
+        sample_hetero_data["protein"].embedding = torch.randn(
             n_atoms, 1536, device=device
         )
         encoder(sample_hetero_data)
@@ -402,42 +403,42 @@ class TestCachedEmbeddingEncoder:
     def test_slae_encoder_type(self, device):
         """SLAE encoder should return 'slae' as encoder_type."""
         encoder = CachedEmbeddingEncoder(
-            embedding_key="slae_embedding", encoder_type="slae"
+            embedding_key="embedding", encoder_type="slae"
         ).to(device)
         assert encoder.encoder_type == "slae"
 
     def test_esm_encoder_type(self, device):
         """ESM encoder should return 'esm' as encoder_type."""
         encoder = CachedEmbeddingEncoder(
-            embedding_key="esm_embedding", encoder_type="esm"
+            embedding_key="embedding", encoder_type="esm"
         ).to(device)
         assert encoder.encoder_type == "esm"
 
-    def test_slae_forward(self, device, sample_hetero_data_with_slae):
+    def test_slae_forward(self, device, sample_hetero_data_with_embedding):
         """SLAE forward pass should return (s, V, None) tuple with raw embeddings."""
         encoder = CachedEmbeddingEncoder(
-            embedding_key="slae_embedding", encoder_type="slae"
+            embedding_key="embedding", encoder_type="slae"
         ).to(device)
 
-        s, V, pp_edge_attr = encoder(sample_hetero_data_with_slae)
+        s, V, pp_edge_attr = encoder(sample_hetero_data_with_embedding)
 
-        n_atoms = sample_hetero_data_with_slae["protein"].num_nodes
+        n_atoms = sample_hetero_data_with_embedding["protein"].num_nodes
         assert s.shape == (n_atoms, 128)
         assert V.shape == (n_atoms, 0, 3)
         # Raw embeddings should be identical to input
-        assert torch.allclose(s, sample_hetero_data_with_slae["protein"].slae_embedding)
+        assert torch.allclose(s, sample_hetero_data_with_embedding["protein"].embedding)
         # Cached embedding encoder doesn't return edge features
         assert pp_edge_attr is None
 
     def test_esm_forward(self, device, sample_hetero_data):
         """ESM forward pass should return (s, V, None) tuple with raw embeddings."""
         encoder = CachedEmbeddingEncoder(
-            embedding_key="esm_embedding", encoder_type="esm"
+            embedding_key="embedding", encoder_type="esm"
         ).to(device)
 
-        # Add mock ESM embeddings
+        # Add mock ESM embeddings using generic key
         n_atoms = sample_hetero_data["protein"].num_nodes
-        sample_hetero_data["protein"].esm_embedding = torch.randn(
+        sample_hetero_data["protein"].embedding = torch.randn(
             n_atoms, 1536, device=device
         )
 
@@ -446,37 +447,27 @@ class TestCachedEmbeddingEncoder:
         assert s.shape == (n_atoms, 1536)
         assert V.shape == (n_atoms, 0, 3)
         # Raw embeddings should be identical to input
-        assert torch.allclose(s, sample_hetero_data["protein"].esm_embedding)
+        assert torch.allclose(s, sample_hetero_data["protein"].embedding)
         # Cached embedding encoder doesn't return edge features
         assert pp_edge_attr is None
 
-    def test_slae_missing_embeddings_error(self, device, sample_hetero_data):
-        """Should raise KeyError when SLAE embeddings are missing."""
+    def test_missing_embeddings_error(self, device, sample_hetero_data):
+        """Should raise KeyError when embeddings are missing."""
         encoder = CachedEmbeddingEncoder(
-            embedding_key="slae_embedding", encoder_type="slae"
+            embedding_key="embedding", encoder_type="slae"
         ).to(device)
 
-        # sample_hetero_data does NOT have slae_embedding
+        # sample_hetero_data does NOT have embedding attribute
         with pytest.raises(KeyError, match="requires cached embeddings"):
             encoder(sample_hetero_data)
 
-    def test_esm_missing_embeddings_error(self, device, sample_hetero_data):
-        """Should raise KeyError when ESM embeddings are missing."""
-        encoder = CachedEmbeddingEncoder(
-            embedding_key="esm_embedding", encoder_type="esm"
-        ).to(device)
-
-        # sample_hetero_data does NOT have esm_embedding
-        with pytest.raises(KeyError, match="requires cached embeddings"):
-            encoder(sample_hetero_data)
-
-    def test_encoder_no_nans(self, device, sample_hetero_data_with_slae):
+    def test_encoder_no_nans(self, device, sample_hetero_data_with_embedding):
         """Output should not contain NaNs or Infs."""
         encoder = CachedEmbeddingEncoder(
-            embedding_key="slae_embedding", encoder_type="slae"
+            embedding_key="embedding", encoder_type="slae"
         ).to(device)
 
-        s, V, _ = encoder(sample_hetero_data_with_slae)
+        s, V, _ = encoder(sample_hetero_data_with_embedding)
 
         assert not torch.isnan(s).any(), "Scalar output contains NaNs"
         assert not torch.isinf(s).any(), "Scalar output contains Infs"
@@ -484,19 +475,19 @@ class TestCachedEmbeddingEncoder:
     def test_encoder_no_learnable_params(self, device):
         """Cached embedding encoder should have no learnable parameters."""
         encoder = CachedEmbeddingEncoder(
-            embedding_key="slae_embedding", encoder_type="slae"
+            embedding_key="embedding", encoder_type="slae"
         ).to(device)
         assert sum(p.numel() for p in encoder.parameters()) == 0
 
     def test_device_placement(self, device, sample_hetero_data):
         """Verify tensors are on the correct device."""
         encoder = CachedEmbeddingEncoder(
-            embedding_key="esm_embedding", encoder_type="esm"
+            embedding_key="embedding", encoder_type="esm"
         ).to(device)
 
-        # Add mock ESM embeddings on correct device
+        # Add mock embeddings on correct device
         n_atoms = sample_hetero_data["protein"].num_nodes
-        sample_hetero_data["protein"].esm_embedding = torch.randn(
+        sample_hetero_data["protein"].embedding = torch.randn(
             n_atoms, 1536, device=device
         )
 
@@ -517,7 +508,7 @@ class TestCachedEmbeddingEncoder:
 class TestEncoderInteroperability:
     """Tests that both encoders work interchangeably with flow model."""
 
-    def test_both_encoders_work_with_flow(self, device, sample_hetero_data_with_slae):
+    def test_both_encoders_work_with_flow(self, device, sample_hetero_data_with_embedding):
         """Both encoders should work with FlowWaterGVP."""
         from src.flow import FlowWaterGVP
 
@@ -535,9 +526,9 @@ class TestEncoderInteroperability:
         )
 
         # SLAE encoder via CachedEmbeddingEncoder
-        # embedding_dim=128 matches the fixture's slae_embedding shape
+        # embedding_dim=128 matches the fixture's embedding shape
         slae_encoder = CachedEmbeddingEncoder(
-            embedding_key="slae_embedding", encoder_type="slae", embedding_dim=128
+            embedding_key="embedding", encoder_type="slae", embedding_dim=128
         ).to(device)
 
         # Create flow models with each encoder
@@ -556,8 +547,8 @@ class TestEncoderInteroperability:
         t = torch.tensor([0.5], device=device)
 
         # Both should run without errors
-        v_gvp = flow_gvp(sample_hetero_data_with_slae, t)
-        v_slae = flow_slae(sample_hetero_data_with_slae, t)
+        v_gvp = flow_gvp(sample_hetero_data_with_embedding, t)
+        v_slae = flow_slae(sample_hetero_data_with_embedding, t)
 
         # Both should have same output shape
         assert v_gvp.shape == v_slae.shape
