@@ -11,24 +11,21 @@ WaterFlow/
 │   ├── flow.py             # FlowMatcher and FlowWaterGVP model
 │   ├── gvp.py              # Geometric Vector Perceptron layers
 │   ├── gvp_encoder.py      # GVP-based protein encoder
-│   ├── esm_encoder.py      # ESM embedding encoder
-│   ├── slae_encoder.py     # SLAE embedding encoder
-│   ├── encoder_base.py     # Encoder registry and factory
+│   ├── encoder_base.py     # Encoder registry and factory (includes ESM/SLAE)
 │   ├── constants.py        # Shared constants (RBF bins, etc.)
 │   └── utils.py            # Metrics, plotting, logging utilities
 ├── scripts/                # Executable scripts
 │   ├── train.py            # Training pipeline
 │   ├── inference.py        # Run inference on trained models
 │   ├── generate_esm_embeddings.py   # Precompute ESM embeddings
-│   ├── generate_slae_embeddings.py  # Precompute SLAE embeddings
-│   ├── qc_waters.py        # Quality control for water molecules 
-│   └── qc_symmetry_mates.py        # Quality control for crystal mates
+│   └── generate_slae_embeddings.py  # Precompute SLAE embeddings
 ├── tests/                  # Test suite
 │   ├── test_dataset.py     # Dataset and preprocessing tests
 │   ├── test_flow.py        # Flow matching tests
 │   ├── test_encoder.py     # Encoder tests
 │   ├── test_forward.py     # End-to-end forward pass tests
 │   ├── test_gvp.py         # GVP layer tests
+│   ├── test_train_config.py # Training configuration tests
 │   └── test_utils.py       # Utility function tests
 └── splits/                 # Train/val/test split files
     ├── train_list_0.95.txt # Training set (95% of data)
@@ -261,7 +258,7 @@ These checks determine whether a structure is included in training:
 | `--max_com_dist` | `25.0` | Max protein-water center-of-mass distance (A) |
 | `--max_clash_fraction` | `0.05` | Max fraction of waters clashing with protein |
 | `--clash_dist` | `2.0` | Distance threshold for clash detection (A) |
-| `--min_water_residue_ratio` | `0.8` | Minimum waters per residue ratio |
+| `--min_water_residue_ratio` | `0.6` | Minimum waters per residue ratio |
 
 ### Per-Water Quality Filters
 
@@ -269,7 +266,7 @@ These filters remove individual low-quality waters (can be toggled):
 
 | Parameter | Default | Toggle Flag | Description |
 |-----------|---------|-------------|-------------|
-| `--max_protein_dist` | `6.0` | `--no_filter_by_distance` | Remove waters far from protein |
+| `--max_protein_dist` | `5.0` | `--no_filter_by_distance` | Remove waters far from protein |
 | `--min_edia` | `0.4` | `--no_filter_by_edia` | Remove waters with low EDIA scores |
 | `--max_bfactor_zscore` | `1.5` | `--no_filter_by_bfactor` | Remove waters with high B-factor |
 
