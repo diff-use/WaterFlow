@@ -21,6 +21,7 @@ Usage:
 import argparse
 import json
 from datetime import datetime
+from typing import cast
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -549,8 +550,8 @@ def build_model(
         encoder=encoder,
         hidden_dims=(args.hidden_s, args.hidden_v),
         layers=args.flow_layers,
-        n_message_gvps=args.n_message_gvps,  # ty: ignore[unknown-argument]
-        n_update_gvps=args.n_update_gvps,  # ty: ignore[unknown-argument]
+        n_message_gvps=args.n_message_gvps,
+        n_update_gvps=args.n_update_gvps,
         drop_rate=args.drop_rate,
         k_pw=args.k_pw,
         k_ww=args.k_ww,
@@ -672,12 +673,13 @@ def train_epoch(
         metrics = flow_matcher.training_step(
             batch,
             use_self_conditioning=args.use_self_cond,
-            accumulation_steps=args.grad_accum_steps,  # ty: ignore[unknown-argument]
+            accumulation_steps=args.grad_accum_steps,
         )
 
-        if metrics["per_sample_info"] is not None:
-            per_sample_losses = metrics["per_sample_info"]["losses"].cpu()  # ty: ignore[not-subscriptable]
-            num_graphs = metrics["per_sample_info"]["num_graphs"]  # ty: ignore[not-subscriptable]
+        per_sample_info = metrics["per_sample_info"]
+        if per_sample_info is not None and isinstance(per_sample_info, dict):
+            per_sample_losses = per_sample_info["losses"].cpu()
+            num_graphs = per_sample_info["num_graphs"] 
 
             if hasattr(batch, "pdb_id"):
                 pdb_ids = (
@@ -693,8 +695,8 @@ def train_epoch(
                 logger.warning("=" * 60)
 
         processed_batches += 1
-        total_loss += metrics["loss"]  # ty: ignore[unsupported-operator]
-        total_rmsd += metrics["rmsd"]  # ty: ignore[unsupported-operator]
+        total_loss += cast(float, metrics["loss"])
+        total_rmsd += cast(float, metrics["rmsd"]) 
 
         # Step optimizer every grad_accum_steps
         if (step + 1) % args.grad_accum_steps == 0:

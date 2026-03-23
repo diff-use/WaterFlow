@@ -271,8 +271,8 @@ def build_model_from_config(config: dict, device: torch.device) -> nn.Module:
         edge_scalar_dim=config.get("edge_scalar_dim") or NUM_RBF,
         layers=config.get("flow_layers") or 3,
         drop_rate=config.get("drop_rate", 0.1),
-        n_message_gvps=config.get("n_message_gvps", 2),  # ty: ignore[unknown-argument]
-        n_update_gvps=config.get("n_update_gvps", 2),  # ty: ignore[unknown-argument]
+        n_message_gvps=config.get("n_message_gvps", 2),
+        n_update_gvps=config.get("n_update_gvps", 2),
         k_pw=config.get("k_pw") or 16,
         k_ww=config.get("k_ww") or 16,
     ).to(device)
@@ -452,9 +452,9 @@ def main():
         pdb_list_file=args.pdb_list,
         processed_dir=args.processed_dir,
         base_pdb_dir=args.base_pdb_dir,
-        encoder_type=encoder_type,  # ty: ignore[unknown-argument]
+        encoder_type=encoder_type,
         include_mates=include_mates,
-        geometry_cache_name=geometry_cache_name,  # ty: ignore[unknown-argument]
+        geometry_cache_name=geometry_cache_name,
         preprocess=True,
         **filter_config,
     )
