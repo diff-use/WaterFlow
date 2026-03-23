@@ -434,9 +434,9 @@ def main():
         pdb_list_file=args.pdb_list,
         processed_dir=args.processed_dir,
         base_pdb_dir=args.base_pdb_dir,
-        encoder_type=encoder_type,
+        encoder_type=encoder_type,  # ty: ignore[unknown-argument]
         include_mates=include_mates,
-        geometry_cache_name=geometry_cache_name,
+        geometry_cache_name=geometry_cache_name,  # ty: ignore[unknown-argument]
         preprocess=True,
     )
 
