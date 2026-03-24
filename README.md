@@ -110,12 +110,12 @@ Preprocessed data is cached under `--processed_dir` in a three-layer architectur
 ├── geometry/              # Graph structures (or geometry_mates/ when include_mates=True)
 │   └── <pdb_id>_final.pt
 │       - protein_pos: centered protein coordinates (N, 3)
-│       - protein_x: element one-hot encoding (N, 16)
+│       - protein_feat: element one-hot encoding (N, 16)
 │       - protein_res_idx: residue indices for grouping
-│       - water_pos, water_x: water coordinates and features
+│       - water_pos, water_feat: water coordinates and features
 │       - num_asu_protein: ASU atom count (mate boundary metadata)
 │       # Note: When include_mates=True, mate atoms are concatenated into
-│       # protein_pos/protein_x. Recover boundaries via:
+│       # protein_pos/protein_feat. Recover boundaries via:
 │       #   ASU atoms = protein_pos[:num_asu_protein]
 │       #   Mate atoms = protein_pos[num_asu_protein:]
 ├── esm/                   # ESM embeddings (per-residue)

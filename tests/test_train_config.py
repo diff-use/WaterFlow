@@ -1,6 +1,6 @@
 import pytest
 import torch
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import OmegaConf
 from torch_geometric.data import HeteroData
 
 from scripts.inference import build_model_from_config

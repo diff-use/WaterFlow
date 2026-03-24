@@ -175,7 +175,7 @@ def main() -> None:
     parser.add_argument(
         "--base_pdb_dir",
         type=Path,
-        default=Path("/sb/wankowicz_lab/data/srivasv/pdb_redo_data"),
+        required=True,
         help="Base directory containing PDB subdirectories",
     )
     parser.add_argument(
