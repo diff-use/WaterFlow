@@ -61,7 +61,9 @@ def load_config(run_dir: Path) -> dict:
 
     from omegaconf import OmegaConf
 
-    config = cast(dict, OmegaConf.to_container(OmegaConf.load(config_path), resolve=True))
+    config = cast(
+        dict, OmegaConf.to_container(OmegaConf.load(config_path), resolve=True)
+    )
 
     return config
 
@@ -414,7 +416,10 @@ def main(cfg: DictConfig) -> None:
             save_plot(result, pdb_id, plot_path, metrics)
 
             # save GIF if requested and trajectory available
-            if cfg.inference.visualization.save_gifs and result.get("trajectory") is not None:
+            if (
+                cfg.inference.visualization.save_gifs
+                and result.get("trajectory") is not None
+            ):
                 gif_path = output_dir / "gifs" / f"{pdb_id}.gif"
                 # Use water_true only if available
                 gif_water_true = water_true if has_ground_truth else None
