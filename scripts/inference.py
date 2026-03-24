@@ -45,20 +45,23 @@ def load_config(run_dir: Path) -> dict:
     Load training configuration from run directory.
 
     Args:
-        run_dir: Path to training run directory containing config.json
+        run_dir: Path to training run directory containing config.yaml
 
     Returns:
         Dict with training configuration parameters
 
     Raises:
-        FileNotFoundError: If config.json doesn't exist in run_dir
+        FileNotFoundError: If config.yaml doesn't exist in run_dir
     """
-    config_path = run_dir / "config.json"
+    config_path = run_dir / "config.yaml"
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
 
-    with open(config_path, "r") as f:
-        config = json.load(f)
+    from typing import cast
+
+    from omegaconf import OmegaConf
+
+    config = cast(dict, OmegaConf.to_container(OmegaConf.load(config_path), resolve=True))
 
     return config
 
@@ -168,7 +171,7 @@ def run_inference_batch(
     num_steps: int,
     use_sc: bool,
     device: str,
-    water_ratio: float = None,
+    water_ratio: float | None = None,
 ) -> list:
     """
     Run inference on a batch of graphs.

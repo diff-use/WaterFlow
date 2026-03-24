@@ -16,6 +16,7 @@ Usage:
 
 from datetime import datetime
 from pathlib import Path
+from typing import cast
 
 import hydra
 import matplotlib.pyplot as plt
@@ -409,8 +410,9 @@ def train_epoch(
         )
 
         if metrics["per_sample_info"] is not None:
-            per_sample_losses = metrics["per_sample_info"]["losses"].cpu()
-            num_graphs = metrics["per_sample_info"]["num_graphs"]
+            per_sample_info = cast(dict, metrics["per_sample_info"])
+            per_sample_losses = per_sample_info["losses"].cpu()
+            num_graphs = per_sample_info["num_graphs"]
 
             if hasattr(batch, "pdb_id"):
                 pdb_ids = (
@@ -426,8 +428,8 @@ def train_epoch(
                 logger.warning("=" * 60)
 
         processed_batches += 1
-        total_loss += metrics["loss"]
-        total_rmsd += metrics["rmsd"]
+        total_loss += cast(float, metrics["loss"])
+        total_rmsd += cast(float, metrics["rmsd"])
 
         # Step optimizer every grad_accum_steps
         if (step + 1) % cfg.training.optimizer.grad_accum_steps == 0:
@@ -721,7 +723,7 @@ def main(cfg: DictConfig) -> None:
     )
 
     # Create config dict for wandb logging
-    config_dict = OmegaConf.to_container(cfg, resolve=True)
+    config_dict = cast(dict, OmegaConf.to_container(cfg, resolve=True))
     config_dict["active_water_filters"] = {
         "distance": cfg.data.water_filter.filter_by_distance,
         "edia": cfg.data.water_filter.filter_by_edia,
