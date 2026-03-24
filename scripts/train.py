@@ -397,6 +397,7 @@ def _log_dataset_filter_config(args, quality_kwargs: dict):
     if ignored:
         logger.info(f"Ignored water-filter thresholds (disabled): {ignored}")
 
+
 def _required_embedding_field(encoder_type: str) -> str | None:
     """
     Get the required embedding field name for a given encoder type.

@@ -12,12 +12,11 @@ This module provides:
 from __future__ import annotations
 
 import itertools
+import json
 from pathlib import Path
 
 import biotite.structure as bts
-import json
 import numpy as np
-import pandas as pd
 import pymol2
 import torch
 import torch.nn.functional as F
@@ -443,24 +442,23 @@ def load_edia_for_pdb(
         return None
 
     try:
-        with open(json_path, 'r') as f:
+        with open(json_path, "r") as f:
             data = json.load(f)
 
         edia_lookup = {}
         for entry in data:
             # Filter for water molecules only
             if entry.get("compID") in ["HOH", "WAT"]:
-                
                 # The identifying information is nested inside the "pdb" key in the JSON
                 pdb_info = entry.get("pdb", {})
-                
+
                 chain_id = str(pdb_info.get("strandID", ""))
                 res_id = int(pdb_info.get("seqNum", 0))
-                
+
                 # Extract and normalize insertion code, defaulting to an empty string
                 raw_ins_code = pdb_info.get("insCode", "")
                 ins_code = normalize_ins_code(raw_ins_code) if raw_ins_code else ""
-                
+
                 # Build the lookup key and extract the EDIAm score
                 key = (chain_id, res_id, ins_code)
                 edia_lookup[key] = float(entry.get("EDIAm", 0.0))
@@ -895,7 +893,7 @@ class ProteinWaterDataset(Dataset):
 
         # Per-water filtering is optional; structure-level quality checks below always run.
         use_distance_filter = self.filter_by_distance
-        use_edia_filter = self.filter_by_edia 
+        use_edia_filter = self.filter_by_edia
         use_bfactor_filter = self.filter_by_bfactor
         any_filter_enabled = (
             use_distance_filter or use_edia_filter or use_bfactor_filter
@@ -905,7 +903,7 @@ class ProteinWaterDataset(Dataset):
             # load EDIA data only when the EDIA filter is active
             edia_lookup = None
             if use_edia_filter:
-                edia_lookup = load_edia_for_pdb(pdb_path.replace('.pdb','.json'))
+                edia_lookup = load_edia_for_pdb(pdb_path.replace(".pdb", ".json"))
                 if edia_lookup is None:
                     logger.warning(
                         f"Warning: EDIA file not found for {entry['pdb_id']}, skipping EDIA filtering"
