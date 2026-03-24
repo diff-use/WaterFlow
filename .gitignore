@@ -16,3 +16,4 @@ build/
 .venv/
 venv/
 notebooks/
+figures/
