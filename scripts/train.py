@@ -320,7 +320,9 @@ def run_eval_sampling(
 
         # compute metrics
         final_metrics = compute_placement_metrics(
-            pred=out["water_pred"], true=out["water_true"], threshold=cfg.logging.threshold
+            pred=out["water_pred"],
+            true=out["water_true"],
+            threshold=cfg.logging.threshold,
         )
 
         final_rmsd = compute_rmsd(out["water_pred"], out["water_true"])
@@ -476,7 +478,10 @@ def train_epoch(
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
         optimizer_step_count += 1
-        if warmup_scheduler is not None and optimizer_step_count <= cfg.training.scheduler.warmup_steps:
+        if (
+            warmup_scheduler is not None
+            and optimizer_step_count <= cfg.training.scheduler.warmup_steps
+        ):
             warmup_scheduler.step()
 
     final_global_step = (epoch - 1) * len(train_loader) + len(train_loader) - 1
@@ -649,7 +654,9 @@ def main(cfg: DictConfig) -> None:
     (run_dir / "plots").mkdir(exist_ok=True)
     (run_dir / "gifs").mkdir(exist_ok=True)
 
-    log_file = Path(cfg.logging.log_file) if cfg.logging.log_file else run_dir / "train.log"
+    log_file = (
+        Path(cfg.logging.log_file) if cfg.logging.log_file else run_dir / "train.log"
+    )
     setup_logging_for_tqdm(level=cfg.logging.log_level, log_file=str(log_file))
 
     logger.info("=" * 60)
@@ -729,7 +736,9 @@ def main(cfg: DictConfig) -> None:
         "edia": cfg.data.water_filter.filter_by_edia,
         "bfactor": cfg.data.water_filter.filter_by_bfactor,
     }
-    config_dict["ignored_water_filter_thresholds"] = _ignored_water_filter_thresholds(cfg)
+    config_dict["ignored_water_filter_thresholds"] = _ignored_water_filter_thresholds(
+        cfg
+    )
     config_dict["node_scalar_in"] = node_scalar_in
     config_dict["resolved_encoder_config"] = encoder_config
 
@@ -799,7 +808,10 @@ def main(cfg: DictConfig) -> None:
         wandb.log(val_metrics, step=global_step)
 
         # Step main scheduler per epoch (after warmup completes)
-        if main_scheduler is not None and optimizer_step_count >= cfg.training.scheduler.warmup_steps:
+        if (
+            main_scheduler is not None
+            and optimizer_step_count >= cfg.training.scheduler.warmup_steps
+        ):
             main_scheduler.step()
 
         logger.info(

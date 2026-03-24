@@ -59,16 +59,18 @@ def test_resolve_embedding_dim_raises_on_embedding_type_mismatch(
 
 
 def test_resolve_encoder_config_uses_embedding_dim(sample_cached_embedding_data):
-    cfg = OmegaConf.create({
-        "model": {
-            "encoder_type": "slae",
-            "hidden_s": 256,
-            "hidden_v": 64,
-            "freeze_encoder": False,
-            "encoder_ckpt": None,
-            "embedding_dim": None,
+    cfg = OmegaConf.create(
+        {
+            "model": {
+                "encoder_type": "slae",
+                "hidden_s": 256,
+                "hidden_v": 64,
+                "freeze_encoder": False,
+                "encoder_ckpt": None,
+                "embedding_dim": None,
+            }
         }
-    })
+    )
 
     config = resolve_encoder_config(cfg, sample_cached_embedding_data, 16)
 
@@ -80,16 +82,18 @@ def test_resolve_encoder_config_uses_embedding_dim(sample_cached_embedding_data)
 def test_resolve_encoder_config_applies_embedding_override(
     sample_cached_embedding_data,
 ):
-    cfg = OmegaConf.create({
-        "model": {
-            "encoder_type": "slae",
-            "hidden_s": 256,
-            "hidden_v": 64,
-            "freeze_encoder": False,
-            "encoder_ckpt": None,
-            "embedding_dim": 128,
+    cfg = OmegaConf.create(
+        {
+            "model": {
+                "encoder_type": "slae",
+                "hidden_s": 256,
+                "hidden_v": 64,
+                "freeze_encoder": False,
+                "encoder_ckpt": None,
+                "embedding_dim": 128,
+            }
         }
-    })
+    )
 
     config = resolve_encoder_config(cfg, sample_cached_embedding_data, 16)
 
@@ -99,16 +103,18 @@ def test_resolve_encoder_config_applies_embedding_override(
 def test_cached_encoder_model_construction_succeeds(
     sample_cached_embedding_data, device
 ):
-    cfg = OmegaConf.create({
-        "model": {
-            "encoder_type": "slae",
-            "hidden_s": 256,
-            "hidden_v": 64,
-            "freeze_encoder": False,
-            "encoder_ckpt": None,
-            "embedding_dim": None,
+    cfg = OmegaConf.create(
+        {
+            "model": {
+                "encoder_type": "slae",
+                "hidden_s": 256,
+                "hidden_v": 64,
+                "freeze_encoder": False,
+                "encoder_ckpt": None,
+                "embedding_dim": None,
+            }
         }
-    })
+    )
 
     encoder_config = resolve_encoder_config(cfg, sample_cached_embedding_data, 16)
     encoder = build_encoder(encoder_config, device)
