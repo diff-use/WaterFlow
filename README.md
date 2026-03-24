@@ -58,8 +58,10 @@ WaterFlow processes PDB files through several stages to create training-ready gr
 
 **PDB Parsing**
 - Uses Biotite to extract protein atoms and water molecules (HOH residues)
-- Modified residues are mapped to standard amino acids (MSE→M, SEC→U)
-- Hydrogen atoms are excluded; only the first model is used
+- Modified residues are retained during structure parsing and geometry preprocessing
+- When generating ESM embeddings, modified residues are mapped to encoder-compatible amino acid identities (e.g., MSE→M/MET, SEC→U/SEC)
+- Hydrogen atoms are excluded
+- Only the first model is used
 - For atoms with alternate conformations, the highest-occupancy conformer is selected
 
 **Crystal Contact Detection**
