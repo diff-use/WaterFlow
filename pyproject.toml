@@ -21,6 +21,8 @@ dependencies = [
   "tqdm",
   "wandb",
   "jaxtyping",
+  "hydra-core",
+  "omegaconf",
 ]
 
 [dependency-groups]
