@@ -7,24 +7,20 @@ Takes a text file of PDB paths, runs trajectory integration (euler/rk4),
 and outputs plots, gifs, and metrics for each PDB.
 
 Usage:
-    python scripts/inference.py \
-        --run_dir /path/to/run_directory \
-        --pdb_list /path/to/pdb_list.txt \
-        --output_dir /path/to/output \
-        --method rk4 \
-        --num_steps 100 \
-        --save_gifs
+    python scripts/inference.py run_dir=... pdb_list=... output_dir=...
+    python scripts/inference.py run_dir=... pdb_list=... output_dir=... integration.method=euler
 """
 
-import argparse
 import json
 from pathlib import Path
 
+import hydra
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
 from loguru import logger
+from omegaconf import DictConfig
 from tqdm import tqdm
 
 from src.constants import NUM_RBF
@@ -42,147 +38,6 @@ from src.utils import (
 
 # Configure logging to work with tqdm progress bars
 setup_logging_for_tqdm()
-
-
-def parse_args():
-    """
-    Parse command-line arguments for inference configuration.
-
-    Returns:
-        argparse.Namespace with inference parameters and paths
-    """
-    # TODO: Add support for loading configuration from YAML/JSON config files.
-    # This would simplify inference invocation and ensure reproducibility.
-    # Example: --config config.yaml would load inference settings.
-
-    # TODO: Remove hardcoded default paths. These should be required arguments
-    # or loaded from environment variables / config files for portability.
-    # Current hardcoded paths:
-    #   - processed_dir: /home/srivasv/flow_cache/
-    #   - base_pdb_dir: /sb/wankowicz_lab/data/srivasv/pdb_redo_data
-    p = argparse.ArgumentParser(description="Run WaterFlow inference on PDB files")
-
-    p.add_argument(
-        "--run_dir",
-        type=str,
-        required=True,
-        help="Path to training run directory (contains config.json and checkpoints/)",
-    )
-    p.add_argument(
-        "--pdb_list",
-        type=str,
-        required=True,
-        help="Text file with PDB entries (one per line, format: pdb_id_final or pdb_id_final_chainID)",
-    )
-    p.add_argument(
-        "--output_dir",
-        type=str,
-        required=True,
-        help="Directory to save inference outputs",
-    )
-
-    # data arguments
-    p.add_argument(
-        "--processed_dir",
-        type=str,
-        default="/home/srivasv/flow_cache/",
-        help="Parent directory containing all cached preprocessed data. This directory holds "
-        "protein graphs, embeddings, and geometry subdirectories (e.g., processed_dir/geometry/). "
-        "Each PDB's preprocessed data is stored in subdirectories organized by cache type.",
-    )
-    p.add_argument(
-        "--base_pdb_dir",
-        type=str,
-        default="/sb/wankowicz_lab/data/srivasv/pdb_redo_data",
-        help="Base directory containing PDB subdirectories for dataset creation",
-    )
-    p.add_argument(
-        "--include_mates",
-        action="store_true",
-        help="Include symmetry mate atoms as protein nodes",
-    )
-    p.add_argument(
-        "--geometry_cache",
-        type=str,
-        default=None,
-        help="Subdirectory name within processed_dir specifying which water coordinate set to use. "
-        "Options include 'geometry' (filtered waters meeting quality criteria) or "
-        "'geometry_unfiltered' (all crystallographic waters). Overrides the model's config if specified.",
-    )
-
-    # checkpoint arguments
-    p.add_argument(
-        "--checkpoint",
-        type=str,
-        default="best.pt",
-        help="Checkpoint filename within run_dir/checkpoints/ (default: best.pt)",
-    )
-
-    # integration arguments
-    p.add_argument(
-        "--method",
-        type=str,
-        default="rk4",
-        choices=["euler", "rk4"],
-        help="Integration method (default: rk4)",
-    )
-    p.add_argument(
-        "--num_steps",
-        type=int,
-        default=100,
-        help="Number of integration steps (default: 100)",
-    )
-    p.add_argument(
-        "--use_sc",
-        action="store_true",
-        help="Use self-conditioning during integration",
-    )
-
-    p.add_argument(
-        "--save_gifs",
-        action="store_true",
-        help="Save trajectory GIFs (slower but useful for visualization)",
-    )
-    p.add_argument(
-        "--threshold",
-        type=float,
-        default=1.0,
-        help="Distance threshold in Angstroms for precision/recall (default: 1.0)",
-    )
-
-    p.add_argument(
-        "--device",
-        type=str,
-        default="cuda",
-        help="Device to run inference on (default: cuda)",
-    )
-
-    p.add_argument(
-        "--batch_size",
-        type=int,
-        default=8,
-        help="Number of proteins to process in parallel (default: 8)",
-    )
-
-    p.add_argument(
-        "--water_ratio",
-        type=float,
-        default=None,
-        help="Sample num_residues * water_ratio waters instead of using ground truth count. "
-        "E.g., --water_ratio 0.5 samples 50 waters for a 100-residue protein.",
-    )
-
-    p.add_argument(
-        "--skip_metrics",
-        action="store_true",
-        help="Skip metrics computation (precision, recall, RMSD) that require ground truth. "
-        "Use when running inference on structures without ground truth waters. "
-        "Automatically enabled when --water_ratio is specified.",
-    )
-
-    args = p.parse_args()
-
-    return args
 
 
 def load_config(run_dir: Path) -> dict:
@@ -400,22 +255,24 @@ def save_plot(
     plt.close()
 
 
-def main():
+@hydra.main(version_base=None, config_path="../configs", config_name="inference")
+def main(cfg: DictConfig) -> None:
     """Run inference pipeline on a list of PDB structures."""
     setup_logging_for_tqdm()
-    args = parse_args()
 
     # setup paths
-    run_dir = Path(args.run_dir)
-    output_root = Path(args.output_dir)
+    run_dir = Path(cfg.run_dir)
+    output_root = Path(cfg.output_dir)
     output_dir = output_root / run_dir.name
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "plots").mkdir(exist_ok=True)
-    if args.save_gifs:
+    if cfg.inference.visualization.save_gifs:
         (output_dir / "gifs").mkdir(exist_ok=True)
 
     # Device
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    device = torch.device(
+        cfg.inference.hardware.device if torch.cuda.is_available() else "cpu"
+    )
     logger.info(f"Using device: {device}")
 
     # load config and build model
@@ -424,7 +281,7 @@ def main():
     model = build_model_from_config(config, device)
 
     # load checkpoint
-    checkpoint_path = run_dir / "checkpoints" / args.checkpoint
+    checkpoint_path = run_dir / "checkpoints" / cfg.inference.checkpoint
     epoch = load_checkpoint(model, checkpoint_path, device)
     logger.info(f"Loaded checkpoint: {checkpoint_path} (epoch {epoch})")
 
@@ -435,14 +292,14 @@ def main():
     )
 
     # Load dataset
-    logger.info(f"Loading PDBs from: {args.pdb_list}")
+    logger.info(f"Loading PDBs from: {cfg.pdb_list}")
 
-    # Determine include_mates from args or config
-    include_mates = args.include_mates or config.get("include_mates", False)
+    # Determine include_mates from cfg or training config
+    include_mates = cfg.inference.include_mates or config.get("include_mates", False)
     encoder_type = config.get("encoder_type", "gvp")
 
-    # Use --geometry_cache if provided, otherwise use config's geometry_cache_name
-    geometry_cache_name = args.geometry_cache or config.get(
+    # Use geometry_cache if provided, otherwise use config's geometry_cache_name
+    geometry_cache_name = cfg.inference.geometry_cache or config.get(
         "geometry_cache_name", "geometry"
     )
 
@@ -450,9 +307,9 @@ def main():
     filter_config = _extract_dataset_filter_config(config)
 
     dataset = ProteinWaterDataset(
-        pdb_list_file=args.pdb_list,
-        processed_dir=args.processed_dir,
-        base_pdb_dir=args.base_pdb_dir,
+        pdb_list_file=cfg.pdb_list,
+        processed_dir=cfg.processed_dir,
+        base_pdb_dir=cfg.base_pdb_dir,
         encoder_type=encoder_type,
         include_mates=include_mates,
         geometry_cache_name=geometry_cache_name,
@@ -464,18 +321,25 @@ def main():
     logger.info(f"Using geometry cache: {geometry_cache_name}")
 
     # run inference
-    logger.info(f"Running inference with method={args.method}, steps={args.num_steps}")
-    logger.info(f"Self-conditioning: {args.use_sc}")
-    logger.info(f"Threshold for metrics: {args.threshold}Å")
-    logger.info(f"Batch size: {args.batch_size}")
+    method = cfg.inference.integration.method
+    num_steps = cfg.inference.integration.num_steps
+    use_sc = cfg.inference.integration.use_sc
+    threshold = cfg.inference.evaluation.threshold
+    batch_size = cfg.inference.hardware.batch_size
+    water_ratio = cfg.inference.water.water_ratio
+
+    logger.info(f"Running inference with method={method}, steps={num_steps}")
+    logger.info(f"Self-conditioning: {use_sc}")
+    logger.info(f"Threshold for metrics: {threshold}Å")
+    logger.info(f"Batch size: {batch_size}")
 
     # Determine if metrics should be skipped
     # Skip metrics when explicitly requested or when using water_ratio (no ground truth count)
-    skip_metrics = args.skip_metrics or args.water_ratio is not None
+    skip_metrics = cfg.inference.evaluation.skip_metrics or water_ratio is not None
 
-    if args.water_ratio is not None:
+    if water_ratio is not None:
         logger.info(
-            f"Water ratio: {args.water_ratio} (sampling num_residues × {args.water_ratio} waters)"
+            f"Water ratio: {water_ratio} (sampling num_residues × {water_ratio} waters)"
         )
     else:
         logger.info("Water ratio: None (using ground truth water count)")
@@ -502,22 +366,22 @@ def main():
         logger.info(f"Skipping {len(skipped_pdbs)} PDBs with no water molecules")
 
     # process in batches
-    num_batches = (len(valid_graphs) + args.batch_size - 1) // args.batch_size
+    num_batches = (len(valid_graphs) + batch_size - 1) // batch_size
 
     for batch_idx in tqdm(range(num_batches), desc="Processing batches"):
-        start_idx = batch_idx * args.batch_size
-        end_idx = min(start_idx + args.batch_size, len(valid_graphs))
+        start_idx = batch_idx * batch_size
+        end_idx = min(start_idx + batch_size, len(valid_graphs))
         batch_graphs = valid_graphs[start_idx:end_idx]
 
         # run batched inference
         batch_results = run_inference_batch(
             flow_matcher,
             batch_graphs,
-            method=args.method,
-            num_steps=args.num_steps,
-            use_sc=args.use_sc,
-            device=args.device,
-            water_ratio=args.water_ratio,
+            method=method,
+            num_steps=num_steps,
+            use_sc=use_sc,
+            device=cfg.inference.hardware.device,
+            water_ratio=water_ratio,
         )
 
         # process each result in the batch
@@ -532,7 +396,7 @@ def main():
                 metrics = compute_placement_metrics(
                     pred=water_pred,
                     true=water_true,
-                    threshold=args.threshold,
+                    threshold=threshold,
                 )
                 metrics["rmsd"] = compute_rmsd(water_pred, water_true)
                 metrics["pdb_id"] = pdb_id
@@ -547,7 +411,7 @@ def main():
             save_plot(result, pdb_id, plot_path, metrics)
 
             # save GIF if requested and trajectory available
-            if args.save_gifs and result.get("trajectory") is not None:
+            if cfg.inference.visualization.save_gifs and result.get("trajectory") is not None:
                 gif_path = output_dir / "gifs" / f"{pdb_id}.gif"
                 # Use water_true only if available
                 gif_water_true = water_true if has_ground_truth else None
@@ -613,13 +477,13 @@ def main():
                     "per_sample": all_metrics,
                     "config": {
                         "run_dir": str(run_dir),
-                        "checkpoint": args.checkpoint,
-                        "method": args.method,
-                        "num_steps": args.num_steps,
-                        "use_sc": args.use_sc,
-                        "threshold": args.threshold,
+                        "checkpoint": cfg.inference.checkpoint,
+                        "method": method,
+                        "num_steps": num_steps,
+                        "use_sc": use_sc,
+                        "threshold": threshold,
                         "include_mates": include_mates,
-                        "water_ratio": args.water_ratio,
+                        "water_ratio": water_ratio,
                         "geometry_cache": geometry_cache_name,
                     },
                 },
@@ -635,7 +499,7 @@ def main():
             logger.warning("No valid samples processed.")
 
     logger.info(f"Plots saved to: {output_dir / 'plots'}")
-    if args.save_gifs:
+    if cfg.inference.visualization.save_gifs:
         logger.info(f"GIFs saved to: {output_dir / 'gifs'}")
 
     logger.info("Inference complete.")

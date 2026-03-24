@@ -1,7 +1,6 @@
-from argparse import Namespace
-
 import pytest
 import torch
+from omegaconf import DictConfig, OmegaConf
 from torch_geometric.data import HeteroData
 
 from scripts.inference import build_model_from_config
@@ -9,7 +8,6 @@ from scripts.train import (
     _required_embedding_field,
     _resolve_embedding_dim,
     _uses_cached_embeddings,
-    parse_args,
     resolve_encoder_config,
 )
 from src.encoder_base import build_encoder
@@ -61,16 +59,18 @@ def test_resolve_embedding_dim_raises_on_embedding_type_mismatch(
 
 
 def test_resolve_encoder_config_uses_embedding_dim(sample_cached_embedding_data):
-    args = Namespace(
-        encoder_type="slae",
-        hidden_s=256,
-        hidden_v=64,
-        freeze_encoder=False,
-        encoder_ckpt=None,
-        embedding_dim=None,
-    )
+    cfg = OmegaConf.create({
+        "model": {
+            "encoder_type": "slae",
+            "hidden_s": 256,
+            "hidden_v": 64,
+            "freeze_encoder": False,
+            "encoder_ckpt": None,
+            "embedding_dim": None,
+        }
+    })
 
-    config = resolve_encoder_config(args, sample_cached_embedding_data, 16)
+    config = resolve_encoder_config(cfg, sample_cached_embedding_data, 16)
 
     assert config["embedding_key"] == "embedding"
     assert config["embedding_dim"] == 128
@@ -80,16 +80,18 @@ def test_resolve_encoder_config_uses_embedding_dim(sample_cached_embedding_data)
 def test_resolve_encoder_config_applies_embedding_override(
     sample_cached_embedding_data,
 ):
-    args = Namespace(
-        encoder_type="slae",
-        hidden_s=256,
-        hidden_v=64,
-        freeze_encoder=False,
-        encoder_ckpt=None,
-        embedding_dim=128,
-    )
+    cfg = OmegaConf.create({
+        "model": {
+            "encoder_type": "slae",
+            "hidden_s": 256,
+            "hidden_v": 64,
+            "freeze_encoder": False,
+            "encoder_ckpt": None,
+            "embedding_dim": 128,
+        }
+    })
 
-    config = resolve_encoder_config(args, sample_cached_embedding_data, 16)
+    config = resolve_encoder_config(cfg, sample_cached_embedding_data, 16)
 
     assert config["embedding_dim"] == 128
 
@@ -97,16 +99,18 @@ def test_resolve_encoder_config_applies_embedding_override(
 def test_cached_encoder_model_construction_succeeds(
     sample_cached_embedding_data, device
 ):
-    args = Namespace(
-        encoder_type="slae",
-        hidden_s=256,
-        hidden_v=64,
-        freeze_encoder=False,
-        encoder_ckpt=None,
-        embedding_dim=None,
-    )
+    cfg = OmegaConf.create({
+        "model": {
+            "encoder_type": "slae",
+            "hidden_s": 256,
+            "hidden_v": 64,
+            "freeze_encoder": False,
+            "encoder_ckpt": None,
+            "embedding_dim": None,
+        }
+    })
 
-    encoder_config = resolve_encoder_config(args, sample_cached_embedding_data, 16)
+    encoder_config = resolve_encoder_config(cfg, sample_cached_embedding_data, 16)
     encoder = build_encoder(encoder_config, device)
     model = FlowWaterGVP(encoder=encoder)
 
@@ -128,49 +132,6 @@ def test_inference_build_model_from_config_uses_embedding_dim(device):
     model = build_model_from_config(config, device)
 
     assert model.encoder.output_dims == (128, 0)
-
-
-def test_parse_args_rejects_embedding_dim_for_gvp(monkeypatch):
-    monkeypatch.setattr(
-        "sys.argv",
-        [
-            "train.py",
-            "--train_list",
-            "train.txt",
-            "--val_list",
-            "val.txt",
-            "--encoder_type",
-            "gvp",
-            "--embedding_dim",
-            "128",
-        ],
-    )
-
-    with pytest.raises(SystemExit):
-        parse_args()
-
-
-def test_dataset_defaults_match_train_defaults(monkeypatch):
-    """Verify dataset.py defaults match train.py argparse defaults."""
-    import inspect
-
-    from src.dataset import ProteinWaterDataset
-
-    monkeypatch.setattr(
-        "sys.argv", ["train.py", "--train_list", "t.txt", "--val_list", "v.txt"]
-    )
-    args = parse_args()
-
-    sig = inspect.signature(ProteinWaterDataset.__init__)
-    dataset_defaults = {
-        k: v.default
-        for k, v in sig.parameters.items()
-        if v.default is not inspect.Parameter.empty
-    }
-
-    assert args.min_water_residue_ratio == dataset_defaults["min_water_residue_ratio"]
-    assert args.max_protein_dist == dataset_defaults["max_protein_dist"]
-    assert args.max_com_dist == dataset_defaults["max_com_dist"]
 
 
 def test_inference_extracts_filter_config_from_training_config():
