@@ -16,6 +16,3 @@ build/
 .venv/
 venv/
 notebooks/
-
-# User-specific config (use config.example.yaml as template)
-config.yaml
