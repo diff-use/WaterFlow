@@ -426,18 +426,19 @@ def check_water_residue_ratio(
 
 
 def load_edia_for_pdb(
-    json_path: str,
+    json_path: str | Path,
 ) -> dict[tuple[str, int, str], float] | None:
     """
     Load EDIA scores for water molecules from a JSON file.
 
     Args:
-        json_path: Path to json file containing EDIA scores for the structure
+        json_path: Path to JSON file containing EDIA scores for the structure
 
     Returns:
         Dictionary mapping (chain_id, res_id, ins_code) -> EDIA score for waters,
         or None if file not found or error
     """
+    json_path = Path(json_path)
     if not json_path.exists():
         return None
 
@@ -903,7 +904,7 @@ class ProteinWaterDataset(Dataset):
             # load EDIA data only when the EDIA filter is active
             edia_lookup = None
             if use_edia_filter:
-                edia_lookup = load_edia_for_pdb(pdb_path.replace(".pdb", ".json"))
+                edia_lookup = load_edia_for_pdb(Path(pdb_path).with_suffix(".json"))
                 if edia_lookup is None:
                     logger.warning(
                         f"Warning: EDIA file not found for {entry['pdb_id']}, skipping EDIA filtering"

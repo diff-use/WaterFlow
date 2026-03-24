@@ -19,6 +19,8 @@ Integration tests use real PDB files:
 All test cases created with assistance from Claude Code.
 """
 
+import json
+
 import numpy as np
 import pytest
 import torch
@@ -1011,29 +1013,44 @@ class TestDatasetEdgeCases:
 
 @pytest.mark.unit
 class TestLoadEdiaForPdb:
-    """Tests for EDIA data loading from CSV files."""
+    """Tests for EDIA data loading from JSON files."""
 
     def test_returns_none_for_missing_file(self, tmp_path):
         """Should return None if EDIA file doesn't exist."""
-        result = load_edia_for_pdb(tmp_path, "nonexistent_pdb")
+        result = load_edia_for_pdb(tmp_path / "nonexistent.json")
         assert result is None
 
     def test_loads_water_edia_scores(self, tmp_path):
         """Should load EDIA scores for water molecules."""
-        # Create mock EDIA CSV
-        pdb_id = "test_pdb"
-        pdb_dir = tmp_path / pdb_id
-        pdb_dir.mkdir()
+        json_path = tmp_path / "test_pdb.json"
+        json_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "compID": "HOH",
+                        "EDIAm": 0.85,
+                        "pdb": {"strandID": "A", "seqNum": 101},
+                    },
+                    {
+                        "compID": "HOH",
+                        "EDIAm": 0.45,
+                        "pdb": {"strandID": "A", "seqNum": 102},
+                    },
+                    {
+                        "compID": "HOH",
+                        "EDIAm": 0.72,
+                        "pdb": {"strandID": "B", "seqNum": 201},
+                    },
+                    {
+                        "compID": "ALA",
+                        "EDIAm": 0.95,
+                        "pdb": {"strandID": "A", "seqNum": 1},
+                    },
+                ]
+            )
+        )
 
-        csv_content = """compID,pdb_strandID,pdb_seqNum,EDIAm,RSCCS
-HOH,A,101,0.85,0.92
-HOH,A,102,0.45,0.88
-HOH,B,201,0.72,0.90
-ALA,A,1,0.95,0.98
-"""
-        (pdb_dir / f"{pdb_id}_residue_stats.csv").write_text(csv_content)
-
-        result = load_edia_for_pdb(tmp_path, pdb_id)
+        result = load_edia_for_pdb(json_path)
 
         assert result is not None
         assert len(result) == 3  # Only waters, not ALA
@@ -1042,18 +1059,26 @@ ALA,A,1,0.95,0.98
         assert result[("B", 201, "")] == pytest.approx(0.72)
 
     def test_returns_empty_dict_for_no_waters(self, tmp_path):
-        """Should return empty dict if no water molecules in CSV."""
-        pdb_id = "test_pdb"
-        pdb_dir = tmp_path / pdb_id
-        pdb_dir.mkdir()
+        """Should return empty dict if no water molecules are in the JSON."""
+        json_path = tmp_path / "test_pdb.json"
+        json_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "compID": "ALA",
+                        "EDIAm": 0.95,
+                        "pdb": {"strandID": "A", "seqNum": 1},
+                    },
+                    {
+                        "compID": "GLY",
+                        "EDIAm": 0.90,
+                        "pdb": {"strandID": "A", "seqNum": 2},
+                    },
+                ]
+            )
+        )
 
-        csv_content = """compID,pdb_strandID,pdb_seqNum,EDIAm,RSCCS
-ALA,A,1,0.95,0.98
-GLY,A,2,0.90,0.95
-"""
-        (pdb_dir / f"{pdb_id}_residue_stats.csv").write_text(csv_content)
-
-        result = load_edia_for_pdb(tmp_path, pdb_id)
+        result = load_edia_for_pdb(json_path)
 
         assert result == {}
 
@@ -1907,18 +1932,30 @@ class TestEdiaInsertionCodes:
 
     def test_edia_with_insertion_codes(self, tmp_path):
         """Should handle EDIA data with insertion codes."""
-        pdb_id = "test_pdb"
-        pdb_dir = tmp_path / pdb_id
-        pdb_dir.mkdir()
+        json_path = tmp_path / "test_pdb.json"
+        json_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "compID": "HOH",
+                        "EDIAm": 0.85,
+                        "pdb": {"strandID": "A", "seqNum": 52, "insCode": ""},
+                    },
+                    {
+                        "compID": "HOH",
+                        "EDIAm": 0.75,
+                        "pdb": {"strandID": "A", "seqNum": 52, "insCode": "A"},
+                    },
+                    {
+                        "compID": "HOH",
+                        "EDIAm": 0.65,
+                        "pdb": {"strandID": "A", "seqNum": 52, "insCode": "B"},
+                    },
+                ]
+            )
+        )
 
-        csv_content = """compID,pdb_strandID,pdb_seqNum,pdb_insCode,EDIAm,RSCCS
-HOH,A,52,,0.85,0.92
-HOH,A,52,A,0.75,0.88
-HOH,A,52,B,0.65,0.90
-"""
-        (pdb_dir / f"{pdb_id}_residue_stats.csv").write_text(csv_content)
-
-        result = load_edia_for_pdb(tmp_path, pdb_id)
+        result = load_edia_for_pdb(json_path)
 
         assert result is not None
         assert len(result) == 3
@@ -1928,17 +1965,20 @@ HOH,A,52,B,0.65,0.90
 
     def test_edia_normalizes_insertion_codes(self, tmp_path):
         """Should normalize insertion codes (spaces to empty string)."""
-        pdb_id = "test_pdb"
-        pdb_dir = tmp_path / pdb_id
-        pdb_dir.mkdir()
+        json_path = tmp_path / "test_pdb.json"
+        json_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "compID": "HOH",
+                        "EDIAm": 0.85,
+                        "pdb": {"strandID": "A", "seqNum": 101, "insCode": " "},
+                    }
+                ]
+            )
+        )
 
-        # CSV with space as insertion code (should normalize to "")
-        csv_content = """compID,pdb_strandID,pdb_seqNum,pdb_insCode,EDIAm,RSCCS
-HOH,A,101, ,0.85,0.92
-"""
-        (pdb_dir / f"{pdb_id}_residue_stats.csv").write_text(csv_content)
-
-        result = load_edia_for_pdb(tmp_path, pdb_id)
+        result = load_edia_for_pdb(json_path)
 
         assert result is not None
         # Space should be normalized to empty string
