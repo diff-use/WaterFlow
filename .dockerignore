@@ -1,0 +1,88 @@
+# =============================================================================
+# WaterFlow Docker Ignore
+# Exclude files that shouldn't be in the Docker build context
+# =============================================================================
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv
+venv
+ENV
+env
+.eggs
+*.egg-info
+*.egg
+.mypy_cache
+.pytest_cache
+.ruff_cache
+.coverage
+htmlcov
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# Jupyter
+.ipynb_checkpoints
+notebooks/
+*.ipynb
+
+# Data and model files (mount these as volumes instead)
+data/
+*.pt
+*.ckpt
+*.pth
+*.safetensors
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+
+# W&B
+wandb/
+*.wandb
+
+# Logs
+logs/
+*.log
+
+# Docker
+Dockerfile*
+docker-compose*.yml
+.docker
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# Tests (not needed in production image)
+tests/
+test_*.py
+*_test.py
+conftest.py
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+.travis.yml
+Makefile
+
+# Misc
+.DS_Store
+Thumbs.db
+*.bak
+*.tmp
+*.temp

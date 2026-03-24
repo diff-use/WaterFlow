@@ -72,7 +72,6 @@ def parse_args():
     # Current hardcoded paths:
     #   - processed_dir: /home/srivasv/flow_cache/
     #   - base_pdb_dir: /sb/wankowicz_lab/data/srivasv/pdb_redo_data
-    #   - edia_dir: /sb/wankowicz_lab/data/srivasv/edia_results
     #   - save_dir: /home/srivasv/flow_checkpoints
     #   - wandb_dir: /home/srivasv/wandb_logs
     p = argparse.ArgumentParser()
@@ -110,15 +109,6 @@ def parse_args():
         type=int,
         default=1,
         help="If training on single sample, duplicate it N times for more gradient updates per epoch",
-    )
-    p.add_argument(
-        "--edia_dir",
-        type=str,
-        default="/sb/wankowicz_lab/data/srivasv/edia_results",
-        help=(
-            "Water filter: EDIA root directory "
-            "({edia_dir}/{pdb_id}/{pdb_id}_residue_stats.csv)."
-        ),
     )
 
     # dataset quality checks (always on)
@@ -332,7 +322,6 @@ def _extract_quality_config(args: argparse.Namespace) -> dict:
 def _extract_water_filter_config(args: argparse.Namespace) -> dict:
     """Extract per-water filtering parameters (toggleable)."""
     return {
-        "edia_dir": args.edia_dir,
         "max_protein_dist": args.max_protein_dist,
         "min_edia": args.min_edia,
         "max_bfactor_zscore": args.max_bfactor_zscore,
@@ -407,12 +396,6 @@ def _log_dataset_filter_config(args, quality_kwargs: dict):
     ignored = _ignored_water_filter_thresholds(args)
     if ignored:
         logger.info(f"Ignored water-filter thresholds (disabled): {ignored}")
-
-    if args.filter_by_edia and args.edia_dir is None:
-        logger.info(
-            "EDIA filter enabled but --edia_dir is not set; EDIA filtering will be skipped."
-        )
-
 
 def _required_embedding_field(encoder_type: str) -> str | None:
     """

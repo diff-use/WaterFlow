@@ -15,6 +15,7 @@ import itertools
 from pathlib import Path
 
 import biotite.structure as bts
+import json
 import numpy as np
 import pandas as pd
 import pymol2
@@ -426,48 +427,51 @@ def check_water_residue_ratio(
 
 
 def load_edia_for_pdb(
-    edia_dir: Path,
-    pdb_id: str,
+    json_path: str,
 ) -> dict[tuple[str, int, str], float] | None:
     """
-    Load EDIA scores for water molecules from CSV file.
+    Load EDIA scores for water molecules from a JSON file.
 
     Args:
-        edia_dir: Directory containing EDIA results
-        pdb_id: PDB ID to load
+        json_path: Path to json file containing EDIA scores for the structure
 
     Returns:
         Dictionary mapping (chain_id, res_id, ins_code) -> EDIA score for waters,
         or None if file not found or error
     """
-    csv_path = edia_dir / pdb_id / f"{pdb_id}_residue_stats.csv"
-
-    if not csv_path.exists():
+    if not json_path.exists():
         return None
 
     try:
-        df = pd.read_csv(csv_path)
+        with open(json_path, 'r') as f:
+            data = json.load(f)
 
-        # filter for water molecules only
-        water_df = df[df["compID"].isin(["HOH", "WAT"])]
-
-        if water_df.empty:
-            return {}
-
-        # Optional insertion-code column in EDIA outputs.
-        ins_code_col = "pdb_insCode" if "pdb_insCode" in water_df.columns else None
-
-        # build lookup dictionary: (chain_id, res_id, ins_code) -> EDIAm
         edia_lookup = {}
-        for _, row in water_df.iterrows():
-            ins_code = normalize_ins_code(row[ins_code_col]) if ins_code_col else ""
-            key = (str(row["pdb_strandID"]), int(row["pdb_seqNum"]), ins_code)
-            edia_lookup[key] = float(row["EDIAm"])
+        for entry in data:
+            # Filter for water molecules only
+            if entry.get("compID") in ["HOH", "WAT"]:
+                
+                # The identifying information is nested inside the "pdb" key in the JSON
+                pdb_info = entry.get("pdb", {})
+                
+                chain_id = str(pdb_info.get("strandID", ""))
+                res_id = int(pdb_info.get("seqNum", 0))
+                
+                # Extract and normalize insertion code, defaulting to an empty string
+                raw_ins_code = pdb_info.get("insCode", "")
+                ins_code = normalize_ins_code(raw_ins_code) if raw_ins_code else ""
+                
+                # Build the lookup key and extract the EDIAm score
+                key = (chain_id, res_id, ins_code)
+                edia_lookup[key] = float(entry.get("EDIAm", 0.0))
+
+        if not edia_lookup:
+            return {}
 
         return edia_lookup
 
     except Exception as e:
-        logger.warning(f"Warning: Could not load EDIA data for {pdb_id}: {e}")
+        logger.warning(f"Warning: Could not load EDIA JSON data for {json_path}: {e}")
         return None
 
 
@@ -670,7 +674,6 @@ class ProteinWaterDataset(Dataset):
         clash_dist: float = 2.0,
         interface_dist_threshold: float = 4.0,
         min_water_residue_ratio: float = 0.6,
-        edia_dir: str | None = None,
         max_protein_dist: float = 5.0,
         min_edia: float = 0.4,
         max_bfactor_zscore: float = 1.5,
@@ -708,7 +711,6 @@ class ProteinWaterDataset(Dataset):
                                      Structures below this are filtered (poor solvent modeling).
 
             Per-water filtering (toggleable):
-            edia_dir: Directory containing EDIA CSV files. Structure: {edia_dir}/{pdb_id}/{pdb_id}_residue_stats.csv
             max_protein_dist: Remove waters farther than this from nearest protein atom (Angstroms).
             min_edia: Remove waters with EDIA score below this threshold.
             max_bfactor_zscore: Remove waters with normalized B-factor (z-score) above this.
@@ -738,7 +740,6 @@ class ProteinWaterDataset(Dataset):
         self.interface_dist_threshold = interface_dist_threshold
         self.min_water_residue_ratio = min_water_residue_ratio
 
-        self.edia_dir = Path(edia_dir) if edia_dir is not None else None
         self.max_protein_dist = max_protein_dist
         self.min_edia = min_edia
         self.max_bfactor_zscore = max_bfactor_zscore
@@ -894,7 +895,7 @@ class ProteinWaterDataset(Dataset):
 
         # Per-water filtering is optional; structure-level quality checks below always run.
         use_distance_filter = self.filter_by_distance
-        use_edia_filter = self.filter_by_edia and self.edia_dir is not None
+        use_edia_filter = self.filter_by_edia 
         use_bfactor_filter = self.filter_by_bfactor
         any_filter_enabled = (
             use_distance_filter or use_edia_filter or use_bfactor_filter
@@ -904,7 +905,7 @@ class ProteinWaterDataset(Dataset):
             # load EDIA data only when the EDIA filter is active
             edia_lookup = None
             if use_edia_filter:
-                edia_lookup = load_edia_for_pdb(self.edia_dir, entry["pdb_id"])
+                edia_lookup = load_edia_for_pdb(pdb_path.replace('.pdb','.json'))
                 if edia_lookup is None:
                     logger.warning(
                         f"Warning: EDIA file not found for {entry['pdb_id']}, skipping EDIA filtering"

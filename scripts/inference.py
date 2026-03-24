@@ -216,7 +216,6 @@ def _extract_dataset_filter_config(config: dict) -> dict:
         "clash_dist": config.get("clash_dist", 2.0),
         "interface_dist_threshold": config.get("interface_dist_threshold", 4.0),
         "min_water_residue_ratio": config.get("min_water_residue_ratio", 0.6),
-        "edia_dir": config.get("edia_dir"),
         "max_protein_dist": config.get("max_protein_dist", 5.0),
         "min_edia": config.get("min_edia", 0.4),
         "max_bfactor_zscore": config.get("max_bfactor_zscore", 1.5),
