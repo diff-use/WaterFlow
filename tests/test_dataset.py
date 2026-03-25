@@ -1377,9 +1377,10 @@ class TestWaterFilteringIntegration:
         list_file.write_text("2b5w_final\n")
 
         # Create dataset with EDIA filtering enabled
+        processed_dir = tmp_path / "edia_test"
         dataset = ProteinWaterDataset(
             pdb_list_file=str(list_file),
-            processed_dir=str(tmp_path / "edia_test"),
+            processed_dir=str(processed_dir),
             base_pdb_dir=str(Path(pdb_2b5w).parent.parent),
             filter_by_edia=True,  # EDIA filtering enabled
             filter_by_distance=False,
@@ -1387,8 +1388,16 @@ class TestWaterFilteringIntegration:
             preprocess=True,
         )
 
-        # Dataset should be empty since the only PDB was skipped
+        # Dataset should be empty since the only PDB was skipped due to missing EDIA
         assert len(dataset) == 0
+
+        # Failure should be logged to preprocessing_failures.log
+        # Default include_mates=True uses geometry_mates directory
+        failure_log = processed_dir / "geometry_mates" / "preprocessing_failures.log"
+        assert failure_log.exists(), "Missing EDIA should be logged to preprocessing_failures.log"
+        log_content = failure_log.read_text()
+        assert "2b5w" in log_content
+        assert "EDIA" in log_content
 
 
 # ============== Tests for check_water_residue_ratio ==============

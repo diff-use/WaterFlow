@@ -26,8 +26,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
 
-# Install uv package manager
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+# Install uv package manager (pinned for reproducible builds)
+COPY --from=ghcr.io/astral-sh/uv:0.7.3 /uv /usr/local/bin/uv
 
 # Set working directory
 WORKDIR /app

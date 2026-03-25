@@ -907,12 +907,10 @@ class ProteinWaterDataset(Dataset):
                 edia_json_path = Path(pdb_path).with_suffix(".json")
                 edia_lookup = load_edia_for_pdb(edia_json_path)
                 if edia_lookup is None:
-                    logger.error(
+                    raise ValueError(
                         f"EDIA filtering enabled but JSON file missing for {entry['pdb_id']}. "
-                        f"Expected file: {edia_json_path.name} in the same directory as the PDB. "
-                        f"Skipping this PDB."
+                        f"Expected file: {edia_json_path.name} in the same directory as the PDB."
                     )
-                    return None
 
             # compute normalized B-factors only when the B-factor filter is active
             bfactor_lookup = None
