@@ -1,13 +1,14 @@
 # =============================================================================
-# Multi-stage build for WaterFlow GPU workflows (CUDA 12.6 runtime)
+# WaterFlow Docker image for GPU workflows (CUDA 12.6)
 # =============================================================================
 
-FROM nvidia/cuda:12.6.3-devel-ubuntu22.04 AS builder
+FROM nvidia/cuda:12.6.3-devel-ubuntu22.04
 
 # Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install system dependencies
+# Note: rm -rf /var/lib/apt/lists/* removes apt cache to reduce image size (~30MB savings)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     software-properties-common \
     curl \
@@ -58,41 +59,16 @@ print('ESM3 model downloaded successfully')"
 RUN . .venv/bin/activate && python -m compileall -q src/ scripts/
 
 # Verify core GPU and preprocessing imports work
-RUN . .venv/bin/activate && python -c "\
-import torch; \
-print(f'PyTorch {torch.__version__}, CUDA {torch.version.cuda}'); \
-from torch_scatter import scatter_add; print('torch-scatter OK'); \
-from torch_cluster import radius_graph; print('torch-cluster OK'); \
-import pymol2; print('pymol2 OK')"
-
-# -----------------------------------------------------------------------------
-# Stage 2: Runtime
-# Minimal image with only runtime dependencies
-# -----------------------------------------------------------------------------
-FROM nvidia/cuda:12.6.3-runtime-ubuntu22.04 AS runtime
-
-ENV DEBIAN_FRONTEND=noninteractive
-
-# Install minimal runtime dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    software-properties-common \
-    && add-apt-repository ppa:deadsnakes/ppa \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends \
-    python3.12 \
-    python3.12-venv \
-    libgomp1 \
-    && rm -rf /var/lib/apt/lists/* \
-    && update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 \
-    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
-
-WORKDIR /app
-
-# Copy virtual environment and source from builder
-COPY --from=builder /app/.venv /app/.venv
-COPY --from=builder /app/src /app/src
-COPY --from=builder /app/scripts /app/scripts
-COPY --from=builder /app/.cache/huggingface /app/.cache/huggingface
+RUN . .venv/bin/activate && python <<'EOF'
+import torch
+print(f'PyTorch {torch.__version__}, CUDA {torch.version.cuda}')
+from torch_scatter import scatter_add
+print('torch-scatter OK')
+from torch_cluster import radius_graph
+print('torch-cluster OK')
+import pymol2
+print('pymol2 OK')
+EOF
 
 # Copy entrypoint script
 COPY docker/entrypoint.sh /app/entrypoint.sh
@@ -111,9 +87,6 @@ ENV PYTHONUNBUFFERED=1
 # CUDA configuration for H100 GPUs
 ENV CUDA_HOME=/usr/local/cuda
 ENV TORCH_CUDA_ARCH_LIST="9.0"
-
-# HuggingFace cache location (pre-downloaded ESM3 model)
-ENV HF_HOME=/app/.cache/huggingface
 
 # Default data paths (can be overridden via docker run -e)
 ENV WATERFLOW_PDB_DIR=/data/pdb

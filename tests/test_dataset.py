@@ -20,6 +20,7 @@ All test cases created with assistance from Claude Code.
 """
 
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -1054,9 +1055,39 @@ class TestLoadEdiaForPdb:
 
         assert result is not None
         assert len(result) == 3  # Only waters, not ALA
+
+        # Verify all returned residues have correct chain_id and res_id
+        assert ("A", 101, "") in result
+        assert ("A", 102, "") in result
+        assert ("B", 201, "") in result
+
+        # Verify non-water residue (ALA) was filtered out
+        assert ("A", 1, "") not in result
+
+        # Verify EDIA scores are correct
         assert result[("A", 101, "")] == pytest.approx(0.85)
         assert result[("A", 102, "")] == pytest.approx(0.45)
         assert result[("B", 201, "")] == pytest.approx(0.72)
+
+    def test_loads_real_edia_file(self, edia_6eey):
+        """Should load EDIA scores from real PDB-REDO JSON file."""
+        result = load_edia_for_pdb(edia_6eey)
+
+        assert result is not None
+        assert len(result) > 0  # Should have water molecules
+
+        # All keys should be 3-tuples of (chain_id, res_id, ins_code)
+        for key in result:
+            assert len(key) == 3
+            chain_id, res_id, ins_code = key
+            assert isinstance(chain_id, str)
+            assert isinstance(res_id, int)
+            assert isinstance(ins_code, str)
+
+        # All values should be valid EDIA scores (0.0 to ~1.0, possibly higher)
+        for score in result.values():
+            assert isinstance(score, float)
+            assert score >= 0.0
 
     def test_returns_empty_dict_for_no_waters(self, tmp_path):
         """Should return empty dict if no water molecules are in the JSON."""
@@ -1337,6 +1368,27 @@ class TestWaterFilteringIntegration:
         data = dataset[0]
         # Should have water nodes
         assert data["water"].num_nodes >= 0
+
+    def test_skips_pdb_when_edia_enabled_but_file_missing(self, tmp_path, pdb_2b5w):
+        """Dataset should skip PDB when filter_by_edia=True but JSON file is missing."""
+        # 2b5w has a PDB file but no EDIA JSON file in test_files
+        # Create a list file with just this PDB
+        list_file = tmp_path / "missing_edia.txt"
+        list_file.write_text("2b5w_final\n")
+
+        # Create dataset with EDIA filtering enabled
+        dataset = ProteinWaterDataset(
+            pdb_list_file=str(list_file),
+            processed_dir=str(tmp_path / "edia_test"),
+            base_pdb_dir=str(Path(pdb_2b5w).parent.parent),
+            filter_by_edia=True,  # EDIA filtering enabled
+            filter_by_distance=False,
+            filter_by_bfactor=False,
+            preprocess=True,
+        )
+
+        # Dataset should be empty since the only PDB was skipped
+        assert len(dataset) == 0
 
 
 # ============== Tests for check_water_residue_ratio ==============

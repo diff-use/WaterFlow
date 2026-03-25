@@ -18,8 +18,9 @@ Commands:
   inference       Run inference on PDB files
   generate-esm    Generate ESM3 embeddings for PDB files
   python          Run arbitrary Python script or command
-  bash            Start interactive bash shell
   --help          Show this help message
+
+For interactive shell: docker run --entrypoint /bin/bash -it waterflow
 
 Examples:
   # Training
@@ -39,9 +40,6 @@ Examples:
       --pdb_list /data/splits/test.txt \\
       --output_dir /data/outputs
 
-  # Interactive shell
-  docker run --gpus all -it -v /path/to/data:/data waterflow bash
-
 Environment Variables:
   WATERFLOW_PDB_DIR         Base directory for PDB files (default: /data/pdb)
   WATERFLOW_CACHE_DIR       Cache directory for embeddings (default: /data/cache)
@@ -49,8 +47,8 @@ Environment Variables:
   WATERFLOW_OUTPUT_DIR      Output directory (default: /data/outputs)
   WATERFLOW_LOG_DIR         Log directory (default: /data/logs)
   WATERFLOW_SPLITS_DIR      Split/list files directory (default: /data/splits)
-  WANDB_API_KEY             Weights & Biases API key for logging
-  WANDB_PROJECT             W&B project name
+  WANDB_API_KEY             Weights & Biases API key (set via -e or docker-compose)
+  WANDB_PROJECT             W&B project name (set via -e or docker-compose)
 
 EOF
 }
@@ -74,6 +72,7 @@ case "$COMMAND" in
         exec python /app/scripts/inference.py \
             --base_pdb_dir "${WATERFLOW_PDB_DIR}" \
             --processed_dir "${WATERFLOW_CACHE_DIR}" \
+            --output_dir "${WATERFLOW_OUTPUT_DIR}" \
             "$@"
         ;;
 
@@ -88,10 +87,6 @@ case "$COMMAND" in
     python)
         shift
         exec python "$@"
-        ;;
-
-    bash)
-        exec /bin/bash
         ;;
 
     --help|-h|help)

@@ -29,10 +29,24 @@ def _resolve_pdb_path(pdb_id):
     return str(path)
 
 
+def _resolve_edia_path(pdb_id):
+    """Resolves an EDIA JSON path, skipping if missing."""
+    path = PDB_BASE_DIR / pdb_id / f"{pdb_id}_final.json"
+    if not path.exists():
+        pytest.skip(f"EDIA JSON file not found: {path}")
+    return str(path)
+
+
 @pytest.fixture
 def pdb_6eey():
     """6eey - standard PDB that passes all quality checks."""
     return _resolve_pdb_path("6eey")
+
+
+@pytest.fixture
+def edia_6eey():
+    """6eey EDIA JSON file with water quality scores from PDB-REDO."""
+    return _resolve_edia_path("6eey")
 
 
 @pytest.fixture
