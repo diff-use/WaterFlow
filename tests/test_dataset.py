@@ -1394,7 +1394,9 @@ class TestWaterFilteringIntegration:
         # Failure should be logged to preprocessing_failures.log
         # Default include_mates=True uses geometry_mates directory
         failure_log = processed_dir / "geometry_mates" / "preprocessing_failures.log"
-        assert failure_log.exists(), "Missing EDIA should be logged to preprocessing_failures.log"
+        assert failure_log.exists(), (
+            "Missing EDIA should be logged to preprocessing_failures.log"
+        )
         log_content = failure_log.read_text()
         assert "2b5w" in log_content
         assert "EDIA" in log_content
