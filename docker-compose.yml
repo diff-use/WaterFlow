@@ -62,10 +62,3 @@ services:
       # Mount source for live development
       - ./src:/app/src:ro
       - ./scripts:/app/scripts:ro
-      # Data volumes
-      - ${PDB_DIR:-./data/pdb}:/data/pdb:ro
-      - ${CACHE_DIR:-./data/cache}:/data/cache
-      - ${CHECKPOINT_DIR:-./data/checkpoints}:/data/checkpoints
-      - ${OUTPUT_DIR:-./data/outputs}:/data/outputs
-      - ${LOG_DIR:-./data/logs}:/data/logs
-      - ${SPLITS_DIR:-./splits}:/data/splits:ro
