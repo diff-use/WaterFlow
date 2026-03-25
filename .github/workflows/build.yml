@@ -16,6 +16,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    environment: testing
     strategy:
       matrix:
         python-version: [3.12]
