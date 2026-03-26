@@ -22,18 +22,18 @@ def pdb_base_dir():
 
 
 def _resolve_pdb_path(pdb_id):
-    """Resolves a PDB path, skipping if missing."""
+    """Resolves a PDB path, raising an error if missing."""
     path = PDB_BASE_DIR / pdb_id / f"{pdb_id}_final.pdb"
     if not path.exists():
-        pytest.skip(f"PDB file not found: {path}")
+        raise FileNotFoundError(f"PDB file not found: {path}")
     return str(path)
 
 
 def _resolve_edia_path(pdb_id):
-    """Resolves an EDIA JSON path, skipping if missing."""
+    """Resolves an EDIA JSON path, raising an error if missing."""
     path = PDB_BASE_DIR / pdb_id / f"{pdb_id}_final.json"
     if not path.exists():
-        pytest.skip(f"EDIA JSON file not found: {path}")
+        raise FileNotFoundError(f"EDIA JSON file not found: {path}")
     return str(path)
 
 
