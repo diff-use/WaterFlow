@@ -17,10 +17,6 @@ jobs:
   build:
     runs-on: ubuntu-latest
     environment: testing
-    strategy:
-      matrix:
-        python-version: [3.12]
-
     # Skip CI if 'skip ci' is in the latest commit message (only relevant for push/pull_request triggers)
     # if: "!contains(github.event.head_commit.message, 'skip ci')"
     # Will add back on skipping for draft PRs too.
@@ -31,11 +27,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Setup UV and python version
+      - name: Setup UV
         uses: astral-sh/setup-uv@v7
         with:
           version: "0.10.6"
-          python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
         run: uv sync --group dev
