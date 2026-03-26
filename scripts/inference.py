@@ -440,9 +440,12 @@ def main():
     include_mates = args.include_mates or config.get("include_mates", False)
     encoder_type = config.get("encoder_type", "gvp")
 
-    # Use --geometry_cache_name if provided, otherwise use config's geometry_cache_name
-    geometry_cache_name = args.geometry_cache_name or config.get(
-        "geometry_cache_name", "geometry"
+    # Use --geometry_cache_name if provided, otherwise use config's geometry_cache_name.
+    # Fall back to old "geometry_cache" key for backward compat with pre-rename run configs.
+    geometry_cache_name = (
+        args.geometry_cache_name
+        or config.get("geometry_cache_name")
+        or config.get("geometry_cache", "geometry")
     )
 
     # Extract dataset filter config from training config for consistency
@@ -615,11 +618,11 @@ def main():
                         "checkpoint": args.checkpoint,
                         "method": args.method,
                         "num_steps": args.num_steps,
-                        "use_sc": args.use_self_cond,
+                        "use_self_cond": args.use_self_cond,
                         "threshold": args.threshold,
                         "include_mates": include_mates,
                         "water_ratio": args.water_ratio,
-                        "geometry_cache": geometry_cache_name,
+                        "geometry_cache_name": geometry_cache_name,
                     },
                 },
                 f,
