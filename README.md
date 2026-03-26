@@ -301,11 +301,9 @@ These filters remove individual low-quality waters (toggleable via config):
 EDIA measures how well an atom's position is supported by the experimental electron density map. Higher EDIA scores indicate more reliable atomic positions.
 
 **Configuration:**
-- EDIA filtering is enabled by default but only activates if `data.edia_dir` is provided
-- If `data.edia_dir` is not set, EDIA filtering is skipped (with a warning logged)
-- Set `data.water_filter.filter_by_edia=false` to explicitly disable EDIA filtering
-
-**Directory structure:** `{edia_dir}/{pdb_id}/{pdb_id}_residue_stats.csv`
+- EDIA filtering is enabled by default 
+- The EDIA data lives in the `json` file of the format `<pdb_id>_final.json` in the same directory as the `pdb` file, and is obtained from PDB-REDO.
+- Use `--no_filter_by_edia` to explicitly disable EDIA filtering
 
 </details>
 
