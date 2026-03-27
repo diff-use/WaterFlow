@@ -1,0 +1,39 @@
+# WaterFlow Inference Configuration
+# Usage: python scripts/inference.py run_dir=... pdb_list=... output_dir=...
+
+defaults:
+  - _self_
+
+# Required - must be set via CLI or override
+run_dir: ???
+pdb_list: ???
+output_dir: ???
+
+# Data directories
+processed_dir: null
+base_pdb_dir: null
+
+# Inference settings
+inference:
+  include_mates: false
+  geometry_cache: null
+  checkpoint: best.pt
+
+  integration:
+    method: rk4  # euler, rk4
+    num_steps: 100
+    use_sc: false
+
+  water:
+    water_ratio: null  # If set, sample num_residues * ratio waters
+
+  evaluation:
+    skip_metrics: false
+    threshold: 1.0
+
+  visualization:
+    save_gifs: false
+
+  hardware:
+    device: cuda
+    batch_size: 8

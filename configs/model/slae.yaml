@@ -1,0 +1,16 @@
+# SLAE encoder model configuration
+
+encoder_type: slae
+encoder_ckpt: null
+freeze_encoder: false
+embedding_dim: null  # Inferred from cached embeddings if not set
+
+# Flow model architecture
+hidden_s: 256
+hidden_v: 64
+flow_layers: 3
+n_message_gvps: 2
+n_update_gvps: 2
+drop_rate: 0.1
+k_pw: 16
+k_ww: 16

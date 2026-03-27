@@ -1,0 +1,37 @@
+# WaterFlow Training Configuration
+# Usage: python scripts/train.py train_list=... val_list=...
+
+defaults:
+  - data: default
+  - model: gvp
+  - flow: default
+  - logging: default
+  - _self_
+
+# Required - must be set via CLI or override
+train_list: ???
+val_list: ???
+
+# Training configuration
+training:
+  epochs: 200
+  batch_size: 4
+
+  optimizer:
+    lr: 1e-3
+    weight_decay: 1e-4
+    grad_clip: 1.0
+    grad_accum_steps: 1
+
+  scheduler:
+    type: cosine  # cosine, step, none
+    warmup_steps: 0
+    eta_min_factor: 0.001
+    step_size: 50
+    step_gamma: 0.5
+
+  dataloader:
+    num_workers: 8
+    prefetch_factor: 4
+    pin_memory: false
+    persistent_workers: false

@@ -662,7 +662,7 @@ class ProteinWaterDataset(Dataset):
         pdb_list_file: str,
         processed_dir: str,
         encoder_type: str = "gvp",
-        base_pdb_dir: str = "/sb/wankowicz_lab/data/srivasv/pdb_redo_data",
+        base_pdb_dir: str | None = None,
         cutoff: float = 8.0,
         include_mates: bool = True,
         geometry_cache_name: str = "geometry",
@@ -723,6 +723,8 @@ class ProteinWaterDataset(Dataset):
         # Directory-based separation: geometry/ vs geometry_mates/
         cache_suffix = "_mates" if include_mates else ""
         self.geometry_dir = self.cache_dir / f"{geometry_cache_name}{cache_suffix}"
+        if base_pdb_dir is None:
+            raise ValueError("base_pdb_dir is required")
         self.base_pdb_dir = Path(base_pdb_dir)
         self.cutoff = cutoff
         self.encoder_type = encoder_type
@@ -975,7 +977,7 @@ class ProteinWaterDataset(Dataset):
         protein_pos = protein_pos - center
 
         protein_elements = [str(e).upper() for e in protein_atoms.element]
-        protein_x = element_onehot(protein_elements)
+        protein_feat = element_onehot(protein_elements)
 
         # compute residue indices (including ins_code to match ESM/SLAE residue counting)
         res_id = protein_atoms.res_id
@@ -1004,17 +1006,17 @@ class ProteinWaterDataset(Dataset):
         if water_atoms:
             water_pos = torch.tensor(water_atoms.coord, dtype=torch.float32) - center
             water_elements = [str(e).upper() for e in water_atoms.element]
-            water_x = element_onehot(water_elements)
+            water_feat = element_onehot(water_elements)
         else:
             water_pos = torch.zeros((0, 3), dtype=torch.float32)
-            water_x = torch.zeros((0, len(ELEMENT_VOCAB) + 1), dtype=torch.float32)
+            water_feat = torch.zeros((0, len(ELEMENT_VOCAB) + 1), dtype=torch.float32)
 
         # process symmetry mate atoms
         mate_coords = crystal_data["mate_coords"]
         if mate_coords.shape[0] > 0:
             mate_pos = torch.tensor(mate_coords, dtype=torch.float32) - center
             mate_elements = [a.symbol.upper() for a in crystal_data["mate_atoms"]]
-            mate_x = element_onehot(mate_elements)
+            mate_feat = element_onehot(mate_elements)
 
             # compute mate residue indices (group atoms by actual residue)
             mate_residue_keys = [(a.chain, a.resi) for a in crystal_data["mate_atoms"]]
@@ -1025,14 +1027,14 @@ class ProteinWaterDataset(Dataset):
             )
         else:
             mate_pos = torch.zeros((0, 3), dtype=torch.float32)
-            mate_x = torch.zeros((0, len(ELEMENT_VOCAB) + 1), dtype=torch.float32)
+            mate_feat = torch.zeros((0, len(ELEMENT_VOCAB) + 1), dtype=torch.float32)
             mate_res_idx = torch.empty(0, dtype=torch.long)
 
         # Compute final protein data based on include_mates flag
         num_asu_protein = protein_pos.size(0)
         if self.include_mates and mate_pos.size(0) > 0:
             final_protein_pos = torch.cat([protein_pos, mate_pos], dim=0)
-            final_protein_x = torch.cat([protein_x, mate_x], dim=0)
+            final_protein_feat = torch.cat([protein_feat, mate_feat], dim=0)
             # Offset mate residue indices by max protein residue index
             max_res_idx = (
                 protein_res_idx.max().item() if protein_res_idx.numel() > 0 else -1
@@ -1043,7 +1045,7 @@ class ProteinWaterDataset(Dataset):
             )
         else:
             final_protein_pos = protein_pos
-            final_protein_x = protein_x
+            final_protein_feat = protein_feat
             final_protein_res_idx = protein_res_idx
 
         # Compute PP edges and features
@@ -1069,10 +1071,10 @@ class ProteinWaterDataset(Dataset):
         torch.save(
             {
                 "protein_pos": final_protein_pos,
-                "protein_x": final_protein_x,
+                "protein_feat": final_protein_feat,
                 "protein_res_idx": final_protein_res_idx,
                 "water_pos": water_pos,
-                "water_x": water_x,
+                "water_feat": water_feat,
                 # PP topology and features (precomputed)
                 "pp_edge_index": pp_edge_index,
                 "pp_edge_unit_vectors": pp_edge_unit_vectors,
@@ -1162,7 +1164,7 @@ class ProteinWaterDataset(Dataset):
 
         # load all data directly from cache (already includes mates if applicable)
         protein_pos = cached["protein_pos"]
-        protein_x = cached["protein_x"]
+        protein_feat = cached["protein_feat"]
         protein_res_idx = cached["protein_res_idx"]
         pp_edge_index = cached["pp_edge_index"]
         pp_edge_unit_vectors = cached["pp_edge_unit_vectors"]
@@ -1170,7 +1172,7 @@ class ProteinWaterDataset(Dataset):
         num_asu_protein = cached["num_asu_protein"]
         num_protein_residues = cached["num_protein_residues"]
         water_pos = cached["water_pos"]
-        water_x = cached["water_x"]
+        water_feat = cached["water_feat"]
 
         # extract ASU protein residue indices for embedding loading
         asu_protein_res_idx = protein_res_idx[:num_asu_protein]
@@ -1182,7 +1184,7 @@ class ProteinWaterDataset(Dataset):
             int(protein_res_idx.max().item() + 1) if protein_res_idx.numel() > 0 else 0
         )
 
-        data["protein"].x = protein_x
+        data["protein"].x = protein_feat
         data["protein"].pos = protein_pos
         data["protein"].residue_index = protein_res_idx
         data["protein"].num_nodes = protein_pos.size(0)
@@ -1197,7 +1199,7 @@ class ProteinWaterDataset(Dataset):
             num_protein_residues=num_protein_residues,
         )
 
-        data["water"].x = water_x
+        data["water"].x = water_feat
         data["water"].pos = water_pos
         data["water"].num_nodes = water_pos.size(0)
 
