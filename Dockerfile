@@ -54,9 +54,9 @@ RUN uv sync --frozen
 #   docker build --secret id=hf_token,env=HF_TOKEN .
 ENV HF_HOME=/app/.cache/huggingface
 RUN --mount=type=secret,id=hf_token \
-    export HF_TOKEN=$(cat /run/secrets/hf_token) && \
+    export HF_TOKEN=$(cat /run/secrets/hf_token 2>/dev/null || true) && \
+    [ -n "$HF_TOKEN" ] || { echo "ERROR: hf_token secret is empty or not provided. Pass --secret id=hf_token,env=HF_TOKEN at build time." >&2; exit 1; } && \
     export HUGGING_FACE_HUB_TOKEN=$HF_TOKEN && \
-    echo "Token length: ${#HF_TOKEN}" && \
     . .venv/bin/activate && \
     python -c "\
 from esm.models.esm3 import ESM3; \
