@@ -14,6 +14,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     git \
     build-essential \
+    libgl1 \
+    libglib2.0-0 \
     && add-apt-repository ppa:deadsnakes/ppa \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -48,9 +50,15 @@ COPY scripts/ ./scripts/
 RUN uv sync --frozen
 
 # Pre-download ESM3 model to bake it into the image.
-# The generate script loads esm3-open without authentication, so no HF token is needed.
+# The repo is gated — pass your HuggingFace token at build time via:
+#   docker build --secret id=hf_token,env=HF_TOKEN .
 ENV HF_HOME=/app/.cache/huggingface
-RUN . .venv/bin/activate && python -c "\
+RUN --mount=type=secret,id=hf_token \
+    export HF_TOKEN=$(cat /run/secrets/hf_token) && \
+    export HUGGING_FACE_HUB_TOKEN=$HF_TOKEN && \
+    echo "Token length: ${#HF_TOKEN}" && \
+    . .venv/bin/activate && \
+    python -c "\
 from esm.models.esm3 import ESM3; \
 ESM3.from_pretrained('esm3-open'); \
 print('ESM3 model downloaded successfully')"
