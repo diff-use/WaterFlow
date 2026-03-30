@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 
+from src.constants import NODE_FEATURE_DIM
 
 if TYPE_CHECKING:
     from torch_geometric.data import HeteroData
@@ -177,6 +178,15 @@ class CachedEmbeddingEncoder(BaseProteinEncoder):
         self._embedding_dim: int | None = embedding_dim
         self._embedding_key = embedding_key
         self._encoder_type = encoder_type
+        # Learnable projection for ligand atoms (element one-hot → embedding space).
+        # Ligands have no ESM/SLAE embeddings; this replaces zero-padding with a
+        # learned representation parameterized only by element type.
+        # Lazily initialized on first forward when embedding_dim becomes known.
+        self.ligand_embed: nn.Linear | None = (
+            nn.Linear(NODE_FEATURE_DIM, embedding_dim, bias=False)
+            if embedding_dim is not None
+            else None
+        )
 
     @property
     def output_dims(self) -> tuple[int, int]:
@@ -203,13 +213,15 @@ class CachedEmbeddingEncoder(BaseProteinEncoder):
         """
         Read cached embeddings and return (s, V, None).
 
-        On first call, infers embedding dimension from the data.
+        On first call, infers embedding dimension from the data. If ligand atoms
+        are present (data['protein'].is_ligand), their zero-padded embedding rows
+        are replaced with a learned projection from element one-hot features.
 
         Args:
             data: HeteroData with cached embeddings in data['protein']
 
         Returns:
-            s: (N, embedding_dim) — raw embeddings
+            s: (N, embedding_dim) — embeddings (ligand rows via learned projection)
             V: (N, 0, 3)         — empty vector features
             pp_edge_attr: None   — cached embedding encoders don't process edges
         """
@@ -221,9 +233,20 @@ class CachedEmbeddingEncoder(BaseProteinEncoder):
 
         embeddings = data["protein"][self._embedding_key]
 
-        # Infer dimension on first forward
+        # Infer dimension on first forward and lazily init ligand head
         if self._embedding_dim is None:
             self._embedding_dim = embeddings.size(-1)
+            self.ligand_embed = nn.Linear(
+                NODE_FEATURE_DIM, self._embedding_dim, bias=False
+            ).to(embeddings.device)
+
+        # Replace zero-padded ligand rows with learned element projection
+        lig_mask = getattr(data["protein"], "is_ligand", None)
+        if lig_mask is not None and lig_mask.any():
+            embeddings = embeddings.clone()
+            embeddings[lig_mask] = self.ligand_embed(
+                data["protein"].x[lig_mask].to(embeddings.device)
+            )
 
         V = embeddings.new_empty(embeddings.size(0), 0, 3)
         return embeddings, V, None

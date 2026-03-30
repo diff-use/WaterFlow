@@ -477,30 +477,215 @@ class TestParseAsuWithBiotite:
     """Tests for PDB parsing with biotite."""
 
     def test_parse_returns_protein_and_water(self, pdb_6eey):
-        """Should return protein and water atom arrays."""
-        protein_atoms, water_atoms = parse_asu_with_biotite(pdb_6eey)
+        """Should return protein, water, and ligand atom arrays."""
+        protein_atoms, water_atoms, ligand_atoms = parse_asu_with_biotite(pdb_6eey)
 
         assert protein_atoms is not None
         assert water_atoms is not None
+        assert ligand_atoms is not None
         assert len(protein_atoms) > 0
 
     def test_hydrogen_removed(self, pdb_6eey):
-        """Hydrogens should be removed from output."""
-        protein_atoms, water_atoms = parse_asu_with_biotite(pdb_6eey)
+        """Hydrogens should be removed from all returned arrays."""
+        protein_atoms, water_atoms, ligand_atoms = parse_asu_with_biotite(pdb_6eey)
 
         protein_elements = set(protein_atoms.element)
         water_elements = set(water_atoms.element) if len(water_atoms) > 0 else set()
+        ligand_elements = set(ligand_atoms.element) if len(ligand_atoms) > 0 else set()
 
         assert "H" not in protein_elements
         assert "H" not in water_elements
+        assert "H" not in ligand_elements
 
     def test_water_residue_names(self, pdb_6eey):
         """Water atoms should have HOH or WAT residue names."""
-        _, water_atoms = parse_asu_with_biotite(pdb_6eey)
+        _protein, water_atoms, _ligands = parse_asu_with_biotite(pdb_6eey)
 
         if len(water_atoms) > 0:
             water_res_names = set(water_atoms.res_name)
             assert water_res_names.issubset({"HOH", "WAT"})
+
+
+@pytest.mark.integration
+class TestLigandParsing:
+    """Tests for ligand (non-water HETATM) parsing via parse_asu_with_biotite."""
+
+    def test_returns_three_arrays(self, pdb_4h0b):
+        """parse_asu_with_biotite should return (protein, water, ligand) 3-tuple."""
+        result = parse_asu_with_biotite(pdb_4h0b)
+        assert len(result) == 3
+        protein_atoms, water_atoms, ligand_atoms = result
+        assert protein_atoms is not None
+        assert water_atoms is not None
+        assert ligand_atoms is not None
+
+    def test_4h0b_has_ligands(self, pdb_4h0b):
+        """4h0b contains non-water HETATMs and should yield non-empty ligand array."""
+        _protein, _water, ligand_atoms = parse_asu_with_biotite(pdb_4h0b)
+        assert len(ligand_atoms) > 0, "4h0b should have non-water HETATM ligand atoms"
+
+    def test_ligand_not_water(self, pdb_4h0b):
+        """Ligand atoms must not be water (HOH/WAT)."""
+        _protein, _water, ligand_atoms = parse_asu_with_biotite(pdb_4h0b)
+        if len(ligand_atoms) > 0:
+            ligand_res_names = set(ligand_atoms.res_name)
+            assert "HOH" not in ligand_res_names
+            assert "WAT" not in ligand_res_names
+
+    def test_ligand_no_hydrogen(self, pdb_4h0b):
+        """Ligand atoms must not include hydrogen."""
+        _protein, _water, ligand_atoms = parse_asu_with_biotite(pdb_4h0b)
+        if len(ligand_atoms) > 0:
+            assert "H" not in set(ligand_atoms.element)
+
+    def test_partition_is_exhaustive(self, pdb_4h0b):
+        """protein + water + ligand should account for all non-H atoms."""
+        import biotite.structure as bts
+        from biotite.structure.io.pdb import PDBFile, get_structure
+
+        pdb_file = PDBFile.read(pdb_4h0b)
+        all_atoms = get_structure(pdb_file, model=1, altloc="occupancy")
+        all_atoms = all_atoms[all_atoms.element != "H"]
+        total = len(all_atoms)
+
+        protein_atoms, water_atoms, ligand_atoms = parse_asu_with_biotite(pdb_4h0b)
+        assert len(protein_atoms) + len(water_atoms) + len(ligand_atoms) == total
+
+    def test_ligand_element_onehot(self, pdb_4h0b):
+        """element_onehot should run without error on ligand elements."""
+        _protein, _water, ligand_atoms = parse_asu_with_biotite(pdb_4h0b)
+        if len(ligand_atoms) > 0:
+            elements = [str(e).upper() for e in ligand_atoms.element]
+            feat = element_onehot(elements)
+            assert feat.shape == (len(ligand_atoms), len(ELEMENT_VOCAB) + 1)
+            assert feat.sum(dim=1).allclose(torch.ones(len(ligand_atoms)))
+
+
+@pytest.mark.integration
+class TestLigandNodeIntegration:
+    """Tests for ligand atoms folded into protein nodes (include_ligands=True)."""
+
+    def test_include_ligands_flag_off_by_default(self, pdb_4h0b, tmp_path):
+        """include_ligands defaults to False; ligand atoms must not appear in protein nodes."""
+        list_file = tmp_path / "list.txt"
+        list_file.write_text("4h0b_final\n")
+        from pathlib import Path
+        ds = ProteinWaterDataset(
+            pdb_list_file=str(list_file),
+            processed_dir=str(tmp_path / "processed"),
+            base_pdb_dir=str(Path(pdb_4h0b).parent.parent),
+            encoder_type="gvp",
+            include_mates=False,
+            include_ligands=False,
+            preprocess=True,
+            filter_by_distance=False,
+            filter_by_edia=False,
+            filter_by_bfactor=False,
+        )
+        data = ds[0]
+        assert not data["protein"].is_ligand.any(), "No ligand atoms expected when include_ligands=False"
+
+    def test_include_ligands_adds_nodes(self, pdb_4h0b, tmp_path):
+        """include_ligands=True should add ligand atoms to protein nodes."""
+        list_file = tmp_path / "list.txt"
+        list_file.write_text("4h0b_final\n")
+        from pathlib import Path
+        base_dir = str(Path(pdb_4h0b).parent.parent)
+
+        ds_no_lig = ProteinWaterDataset(
+            pdb_list_file=str(list_file),
+            processed_dir=str(tmp_path / "processed_no_lig"),
+            base_pdb_dir=base_dir,
+            encoder_type="gvp",
+            include_mates=False,
+            include_ligands=False,
+            preprocess=True,
+            filter_by_distance=False,
+            filter_by_edia=False,
+            filter_by_bfactor=False,
+        )
+        ds_lig = ProteinWaterDataset(
+            pdb_list_file=str(list_file),
+            processed_dir=str(tmp_path / "processed_lig"),
+            base_pdb_dir=base_dir,
+            encoder_type="gvp",
+            include_mates=False,
+            include_ligands=True,
+            preprocess=True,
+            filter_by_distance=False,
+            filter_by_edia=False,
+            filter_by_bfactor=False,
+        )
+
+        data_no_lig = ds_no_lig[0]
+        data_lig = ds_lig[0]
+
+        assert data_lig["protein"].num_nodes > data_no_lig["protein"].num_nodes
+        assert data_lig["protein"].is_ligand.any()
+        assert not data_no_lig["protein"].is_ligand.any()
+
+    def test_is_ligand_mask_shape(self, pdb_4h0b, tmp_path):
+        """is_ligand mask must have same length as protein node count."""
+        list_file = tmp_path / "list.txt"
+        list_file.write_text("4h0b_final\n")
+        from pathlib import Path
+        ds = ProteinWaterDataset(
+            pdb_list_file=str(list_file),
+            processed_dir=str(tmp_path / "processed"),
+            base_pdb_dir=str(Path(pdb_4h0b).parent.parent),
+            encoder_type="gvp",
+            include_mates=False,
+            include_ligands=True,
+            preprocess=True,
+            filter_by_distance=False,
+            filter_by_edia=False,
+            filter_by_bfactor=False,
+        )
+        data = ds[0]
+        assert data["protein"].is_ligand.shape == (data["protein"].num_nodes,)
+        assert data["protein"].is_ligand.dtype == torch.bool
+
+    def test_protein_x_dim_unchanged(self, pdb_4h0b, tmp_path):
+        """protein.x should still be 16-dim one-hot for both protein and ligand atoms."""
+        list_file = tmp_path / "list.txt"
+        list_file.write_text("4h0b_final\n")
+        from pathlib import Path
+        ds = ProteinWaterDataset(
+            pdb_list_file=str(list_file),
+            processed_dir=str(tmp_path / "processed"),
+            base_pdb_dir=str(Path(pdb_4h0b).parent.parent),
+            encoder_type="gvp",
+            include_mates=False,
+            include_ligands=True,
+            preprocess=True,
+            filter_by_distance=False,
+            filter_by_edia=False,
+            filter_by_bfactor=False,
+        )
+        data = ds[0]
+        assert data["protein"].x.shape[1] == len(ELEMENT_VOCAB) + 1
+
+    def test_ligand_residue_index_is_sentinel(self, pdb_4h0b, tmp_path):
+        """Ligand atoms should have residue_index == -1."""
+        list_file = tmp_path / "list.txt"
+        list_file.write_text("4h0b_final\n")
+        from pathlib import Path
+        ds = ProteinWaterDataset(
+            pdb_list_file=str(list_file),
+            processed_dir=str(tmp_path / "processed"),
+            base_pdb_dir=str(Path(pdb_4h0b).parent.parent),
+            encoder_type="gvp",
+            include_mates=False,
+            include_ligands=True,
+            preprocess=True,
+            filter_by_distance=False,
+            filter_by_edia=False,
+            filter_by_bfactor=False,
+        )
+        data = ds[0]
+        lig_mask = data["protein"].is_ligand
+        assert (data["protein"].residue_index[lig_mask] == -1).all()
+        assert (data["protein"].residue_index[~lig_mask] >= 0).all()
 
 
 @pytest.mark.integration
@@ -679,7 +864,7 @@ class TestQualityFiltersWithRealPDBs:
 
     def test_6eey_passes_com_check(self, pdb_6eey):
         """6eey should pass COM distance check."""
-        protein_atoms, water_atoms = parse_asu_with_biotite(pdb_6eey)
+        protein_atoms, water_atoms, _ligands = parse_asu_with_biotite(pdb_6eey)
 
         protein_pos = torch.tensor(protein_atoms.coord, dtype=torch.float32)
         water_pos = torch.tensor(water_atoms.coord, dtype=torch.float32)
@@ -690,7 +875,7 @@ class TestQualityFiltersWithRealPDBs:
 
     def test_6eey_passes_clash_check(self, pdb_6eey):
         """6eey should pass water clash check."""
-        protein_atoms, water_atoms = parse_asu_with_biotite(pdb_6eey)
+        protein_atoms, water_atoms, _ligands = parse_asu_with_biotite(pdb_6eey)
 
         protein_pos = torch.tensor(protein_atoms.coord, dtype=torch.float32)
         water_pos = torch.tensor(water_atoms.coord, dtype=torch.float32)
@@ -703,7 +888,7 @@ class TestQualityFiltersWithRealPDBs:
 
     def test_2b5w_fails_com_check(self, pdb_2b5w):
         """2b5w should fail COM distance check."""
-        protein_atoms, water_atoms = parse_asu_with_biotite(pdb_2b5w)
+        protein_atoms, water_atoms, _ligands = parse_asu_with_biotite(pdb_2b5w)
 
         protein_pos = torch.tensor(protein_atoms.coord, dtype=torch.float32)
         water_pos = torch.tensor(water_atoms.coord, dtype=torch.float32)
@@ -715,7 +900,7 @@ class TestQualityFiltersWithRealPDBs:
 
     def test_8dzt_fails_clash_check_at_2_percent(self, pdb_8dzt):
         """8dzt should fail water clash check at 2% threshold with 2A distance."""
-        protein_atoms, water_atoms = parse_asu_with_biotite(pdb_8dzt)
+        protein_atoms, water_atoms, _ligands = parse_asu_with_biotite(pdb_8dzt)
 
         protein_pos = torch.tensor(protein_atoms.coord, dtype=torch.float32)
         water_pos = torch.tensor(water_atoms.coord, dtype=torch.float32)
@@ -729,7 +914,7 @@ class TestQualityFiltersWithRealPDBs:
 
     def test_8dzt_passes_clash_check_at_5_percent(self, pdb_8dzt):
         """8dzt should pass water clash check at 5% threshold (default)."""
-        protein_atoms, water_atoms = parse_asu_with_biotite(pdb_8dzt)
+        protein_atoms, water_atoms, _ligands = parse_asu_with_biotite(pdb_8dzt)
 
         protein_pos = torch.tensor(protein_atoms.coord, dtype=torch.float32)
         water_pos = torch.tensor(water_atoms.coord, dtype=torch.float32)
@@ -1267,7 +1452,7 @@ class TestWaterFilteringIntegration:
 
     def test_filtering_with_real_pdb(self, pdb_6eey):
         """Should filter waters from real PDB file."""
-        protein_atoms, water_atoms = parse_asu_with_biotite(pdb_6eey)
+        protein_atoms, water_atoms, _ligands = parse_asu_with_biotite(pdb_6eey)
 
         if len(water_atoms) == 0:
             pytest.skip("No water molecules in 6eey")

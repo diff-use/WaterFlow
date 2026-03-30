@@ -11,16 +11,18 @@ dependencies = [
   "e3nn",
   "esm",
   "biotite",
-  "pymol-open-source",
+  "pymol-open-source-whl>=3.1.0.4",
   "scipy",
   "pandas",
   "numpy",
+  "rdkit",
   "matplotlib",
   "pillow",
   "loguru",
   "tqdm",
   "wandb",
   "jaxtyping",
+  "rdkit>=2025.9.6",
 ]
 
 [dependency-groups]
