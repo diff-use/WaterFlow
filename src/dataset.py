@@ -698,7 +698,6 @@ class ProteinWaterDataset(Dataset):
             include_ligands: If True, include non-water het atoms (ligands, ions,
                              cofactors) as protein nodes. They are appended after
                              protein (and mate) atoms with a boolean is_ligand mask.
-                             Uses a separate geometry cache to preserve backward compat.
             geometry_cache_name: Base name for geometry cache directory. When
                                  include_mates=True, "_mates" is appended automatically.
                                  When include_ligands=True, "_lig" is appended.

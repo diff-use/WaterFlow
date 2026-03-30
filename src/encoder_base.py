@@ -178,7 +178,7 @@ class CachedEmbeddingEncoder(BaseProteinEncoder):
         self._embedding_dim: int | None = embedding_dim
         self._embedding_key = embedding_key
         self._encoder_type = encoder_type
-        # Learnable projection for ligand atoms (element one-hot → embedding space).
+        # Learnable projection for ligand atoms (element one-hot -> embedding space).
         # Ligands have no ESM/SLAE embeddings; this replaces zero-padding with a
         # learned representation parameterized only by element type.
         # Lazily initialized on first forward when embedding_dim becomes known.
