@@ -17,6 +17,7 @@ import torch.nn as nn
 
 from src.constants import NODE_FEATURE_DIM
 
+
 if TYPE_CHECKING:
     from torch_geometric.data import HeteroData
 

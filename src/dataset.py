@@ -1068,12 +1068,12 @@ class ProteinWaterDataset(Dataset):
             final_protein_pos = torch.cat([final_protein_pos, ligand_pos], dim=0)
             final_protein_x = torch.cat([final_protein_x, ligand_x], dim=0)
             # Ligand atoms get residue_index = -1 (sentinel; no residue embedding)
-            ligand_res_idx = torch.full(
-                (len(ligand_atoms),), -1, dtype=torch.long
+            ligand_res_idx = torch.full((len(ligand_atoms),), -1, dtype=torch.long)
+            final_protein_res_idx = torch.cat(
+                [final_protein_res_idx, ligand_res_idx], dim=0
             )
-            final_protein_res_idx = torch.cat([final_protein_res_idx, ligand_res_idx], dim=0)
             is_ligand = torch.zeros(final_protein_pos.size(0), dtype=torch.bool)
-            is_ligand[-len(ligand_atoms):] = True
+            is_ligand[-len(ligand_atoms) :] = True
         else:
             is_ligand = torch.zeros(final_protein_pos.size(0), dtype=torch.bool)
 

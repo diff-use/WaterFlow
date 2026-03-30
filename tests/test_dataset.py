@@ -543,8 +543,7 @@ class TestLigandParsing:
 
     def test_partition_is_exhaustive(self, pdb_4h0b):
         """protein + water + ligand should account for all non-H atoms."""
-        import biotite.structure as bts
-        from biotite.structure.io.pdb import PDBFile, get_structure
+        from biotite.structure.io.pdb import get_structure, PDBFile
 
         pdb_file = PDBFile.read(pdb_4h0b)
         all_atoms = get_structure(pdb_file, model=1, altloc="occupancy")
@@ -573,6 +572,7 @@ class TestLigandNodeIntegration:
         list_file = tmp_path / "list.txt"
         list_file.write_text("4h0b_final\n")
         from pathlib import Path
+
         ds = ProteinWaterDataset(
             pdb_list_file=str(list_file),
             processed_dir=str(tmp_path / "processed"),
@@ -586,13 +586,16 @@ class TestLigandNodeIntegration:
             filter_by_bfactor=False,
         )
         data = ds[0]
-        assert not data["protein"].is_ligand.any(), "No ligand atoms expected when include_ligands=False"
+        assert not data["protein"].is_ligand.any(), (
+            "No ligand atoms expected when include_ligands=False"
+        )
 
     def test_include_ligands_adds_nodes(self, pdb_4h0b, tmp_path):
         """include_ligands=True should add ligand atoms to protein nodes."""
         list_file = tmp_path / "list.txt"
         list_file.write_text("4h0b_final\n")
         from pathlib import Path
+
         base_dir = str(Path(pdb_4h0b).parent.parent)
 
         ds_no_lig = ProteinWaterDataset(
@@ -632,6 +635,7 @@ class TestLigandNodeIntegration:
         list_file = tmp_path / "list.txt"
         list_file.write_text("4h0b_final\n")
         from pathlib import Path
+
         ds = ProteinWaterDataset(
             pdb_list_file=str(list_file),
             processed_dir=str(tmp_path / "processed"),
@@ -653,6 +657,7 @@ class TestLigandNodeIntegration:
         list_file = tmp_path / "list.txt"
         list_file.write_text("4h0b_final\n")
         from pathlib import Path
+
         ds = ProteinWaterDataset(
             pdb_list_file=str(list_file),
             processed_dir=str(tmp_path / "processed"),
@@ -673,6 +678,7 @@ class TestLigandNodeIntegration:
         list_file = tmp_path / "list.txt"
         list_file.write_text("4h0b_final\n")
         from pathlib import Path
+
         ds = ProteinWaterDataset(
             pdb_list_file=str(list_file),
             processed_dir=str(tmp_path / "processed"),
