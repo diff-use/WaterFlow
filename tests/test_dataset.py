@@ -19,6 +19,9 @@ Integration tests use real PDB files:
 All test cases created with assistance from Claude Code.
 """
 
+import json
+from pathlib import Path
+
 import numpy as np
 import pytest
 import torch
@@ -1196,49 +1199,102 @@ class TestDatasetEdgeCases:
 
 @pytest.mark.unit
 class TestLoadEdiaForPdb:
-    """Tests for EDIA data loading from CSV files."""
+    """Tests for EDIA data loading from JSON files."""
 
     def test_returns_none_for_missing_file(self, tmp_path):
         """Should return None if EDIA file doesn't exist."""
-        result = load_edia_for_pdb(tmp_path, "nonexistent_pdb")
+        result = load_edia_for_pdb(tmp_path / "nonexistent.json")
         assert result is None
 
     def test_loads_water_edia_scores(self, tmp_path):
         """Should load EDIA scores for water molecules."""
-        # Create mock EDIA CSV
-        pdb_id = "test_pdb"
-        pdb_dir = tmp_path / pdb_id
-        pdb_dir.mkdir()
+        json_path = tmp_path / "test_pdb.json"
+        json_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "compID": "HOH",
+                        "EDIAm": 0.85,
+                        "pdb": {"strandID": "A", "seqNum": 101},
+                    },
+                    {
+                        "compID": "HOH",
+                        "EDIAm": 0.45,
+                        "pdb": {"strandID": "A", "seqNum": 102},
+                    },
+                    {
+                        "compID": "HOH",
+                        "EDIAm": 0.72,
+                        "pdb": {"strandID": "B", "seqNum": 201},
+                    },
+                    {
+                        "compID": "ALA",
+                        "EDIAm": 0.95,
+                        "pdb": {"strandID": "A", "seqNum": 1},
+                    },
+                ]
+            )
+        )
 
-        csv_content = """compID,pdb_strandID,pdb_seqNum,EDIAm,RSCCS
-HOH,A,101,0.85,0.92
-HOH,A,102,0.45,0.88
-HOH,B,201,0.72,0.90
-ALA,A,1,0.95,0.98
-"""
-        (pdb_dir / f"{pdb_id}_residue_stats.csv").write_text(csv_content)
-
-        result = load_edia_for_pdb(tmp_path, pdb_id)
+        result = load_edia_for_pdb(json_path)
 
         assert result is not None
         assert len(result) == 3  # Only waters, not ALA
+
+        # Verify all returned residues have correct chain_id and res_id
+        assert ("A", 101, "") in result
+        assert ("A", 102, "") in result
+        assert ("B", 201, "") in result
+
+        # Verify non-water residue (ALA) was filtered out
+        assert ("A", 1, "") not in result
+
+        # Verify EDIA scores are correct
         assert result[("A", 101, "")] == pytest.approx(0.85)
         assert result[("A", 102, "")] == pytest.approx(0.45)
         assert result[("B", 201, "")] == pytest.approx(0.72)
 
+    def test_loads_real_edia_file(self, edia_6eey):
+        """Should load EDIA scores from real PDB-REDO JSON file."""
+        result = load_edia_for_pdb(edia_6eey)
+
+        assert result is not None
+        assert len(result) > 0  # Should have water molecules
+
+        # All keys should be 3-tuples of (chain_id, res_id, ins_code)
+        for key in result:
+            assert len(key) == 3
+            chain_id, res_id, ins_code = key
+            assert isinstance(chain_id, str)
+            assert isinstance(res_id, int)
+            assert isinstance(ins_code, str)
+
+        # All values should be valid EDIA scores (0.0 to ~1.0, possibly higher)
+        for score in result.values():
+            assert isinstance(score, float)
+            assert score >= 0.0
+
     def test_returns_empty_dict_for_no_waters(self, tmp_path):
-        """Should return empty dict if no water molecules in CSV."""
-        pdb_id = "test_pdb"
-        pdb_dir = tmp_path / pdb_id
-        pdb_dir.mkdir()
+        """Should return empty dict if no water molecules are in the JSON."""
+        json_path = tmp_path / "test_pdb.json"
+        json_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "compID": "ALA",
+                        "EDIAm": 0.95,
+                        "pdb": {"strandID": "A", "seqNum": 1},
+                    },
+                    {
+                        "compID": "GLY",
+                        "EDIAm": 0.90,
+                        "pdb": {"strandID": "A", "seqNum": 2},
+                    },
+                ]
+            )
+        )
 
-        csv_content = """compID,pdb_strandID,pdb_seqNum,EDIAm,RSCCS
-ALA,A,1,0.95,0.98
-GLY,A,2,0.90,0.95
-"""
-        (pdb_dir / f"{pdb_id}_residue_stats.csv").write_text(csv_content)
-
-        result = load_edia_for_pdb(tmp_path, pdb_id)
+        result = load_edia_for_pdb(json_path)
 
         assert result == {}
 
@@ -1497,6 +1553,38 @@ class TestWaterFilteringIntegration:
         data = dataset[0]
         # Should have water nodes
         assert data["water"].num_nodes >= 0
+
+    def test_skips_pdb_when_edia_enabled_but_file_missing(self, tmp_path, pdb_2b5w):
+        """Dataset should skip PDB when filter_by_edia=True but JSON file is missing."""
+        # 2b5w has a PDB file but no EDIA JSON file in test_files
+        # Create a list file with just this PDB
+        list_file = tmp_path / "missing_edia.txt"
+        list_file.write_text("2b5w_final\n")
+
+        # Create dataset with EDIA filtering enabled
+        processed_dir = tmp_path / "edia_test"
+        dataset = ProteinWaterDataset(
+            pdb_list_file=str(list_file),
+            processed_dir=str(processed_dir),
+            base_pdb_dir=str(Path(pdb_2b5w).parent.parent),
+            filter_by_edia=True,  # EDIA filtering enabled
+            filter_by_distance=False,
+            filter_by_bfactor=False,
+            preprocess=True,
+        )
+
+        # Dataset should be empty since the only PDB was skipped due to missing EDIA
+        assert len(dataset) == 0
+
+        # Failure should be logged to preprocessing_failures.log
+        # Default include_mates=True uses geometry_mates directory
+        failure_log = processed_dir / "geometry_mates" / "preprocessing_failures.log"
+        assert failure_log.exists(), (
+            "Missing EDIA should be logged to preprocessing_failures.log"
+        )
+        log_content = failure_log.read_text()
+        assert "2b5w" in log_content
+        assert "EDIA" in log_content
 
 
 # ============== Tests for check_water_residue_ratio ==============
@@ -2092,18 +2180,30 @@ class TestEdiaInsertionCodes:
 
     def test_edia_with_insertion_codes(self, tmp_path):
         """Should handle EDIA data with insertion codes."""
-        pdb_id = "test_pdb"
-        pdb_dir = tmp_path / pdb_id
-        pdb_dir.mkdir()
+        json_path = tmp_path / "test_pdb.json"
+        json_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "compID": "HOH",
+                        "EDIAm": 0.85,
+                        "pdb": {"strandID": "A", "seqNum": 52, "insCode": ""},
+                    },
+                    {
+                        "compID": "HOH",
+                        "EDIAm": 0.75,
+                        "pdb": {"strandID": "A", "seqNum": 52, "insCode": "A"},
+                    },
+                    {
+                        "compID": "HOH",
+                        "EDIAm": 0.65,
+                        "pdb": {"strandID": "A", "seqNum": 52, "insCode": "B"},
+                    },
+                ]
+            )
+        )
 
-        csv_content = """compID,pdb_strandID,pdb_seqNum,pdb_insCode,EDIAm,RSCCS
-HOH,A,52,,0.85,0.92
-HOH,A,52,A,0.75,0.88
-HOH,A,52,B,0.65,0.90
-"""
-        (pdb_dir / f"{pdb_id}_residue_stats.csv").write_text(csv_content)
-
-        result = load_edia_for_pdb(tmp_path, pdb_id)
+        result = load_edia_for_pdb(json_path)
 
         assert result is not None
         assert len(result) == 3
@@ -2113,17 +2213,20 @@ HOH,A,52,B,0.65,0.90
 
     def test_edia_normalizes_insertion_codes(self, tmp_path):
         """Should normalize insertion codes (spaces to empty string)."""
-        pdb_id = "test_pdb"
-        pdb_dir = tmp_path / pdb_id
-        pdb_dir.mkdir()
+        json_path = tmp_path / "test_pdb.json"
+        json_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "compID": "HOH",
+                        "EDIAm": 0.85,
+                        "pdb": {"strandID": "A", "seqNum": 101, "insCode": " "},
+                    }
+                ]
+            )
+        )
 
-        # CSV with space as insertion code (should normalize to "")
-        csv_content = """compID,pdb_strandID,pdb_seqNum,pdb_insCode,EDIAm,RSCCS
-HOH,A,101, ,0.85,0.92
-"""
-        (pdb_dir / f"{pdb_id}_residue_stats.csv").write_text(csv_content)
-
-        result = load_edia_for_pdb(tmp_path, pdb_id)
+        result = load_edia_for_pdb(json_path)
 
         assert result is not None
         # Space should be normalized to empty string

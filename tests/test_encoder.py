@@ -258,17 +258,19 @@ class TestProteinGVPEncoder:
     def test_encoder_forward_with_pooling(
         self, simple_encoder, sample_homogeneous_data
     ):
-        """Test forward pass with residue pooling."""
-        output, edge_attr = simple_encoder(sample_homogeneous_data)
-        assert output.shape == (
+        """Test forward pass with residue pooling returns (s, V, edge_attr)."""
+        s, V, edge_attr = simple_encoder(sample_homogeneous_data)
+        assert s.shape == (
             sample_homogeneous_data.num_residues,
             simple_encoder.pooled_dim,
         )
+        # Pooling mode returns empty V tensor (N, 0, 3) to match flat 3-tuple signature
+        assert V.shape == (sample_homogeneous_data.num_residues, 0, 3)
         # Pooling mode returns None for edge features
         assert edge_attr is None
 
     def test_encoder_forward_no_pooling(self, sample_homogeneous_data):
-        """Test encoder without residue pooling returns ((s, V), edge_attr) tuple."""
+        """Test encoder without residue pooling returns (s, V, edge_attr) tuple."""
         encoder = ProteinGVPEncoder(
             node_scalar_in=16,
             hidden_dims=(64, 16),
@@ -278,7 +280,7 @@ class TestProteinGVPEncoder:
             num_edge_rbf=16,
         )
 
-        (s, v), edge_attr = encoder(sample_homogeneous_data)
+        s, v, edge_attr = encoder(sample_homogeneous_data)
 
         assert s.shape == (sample_homogeneous_data.num_nodes, 64)
         assert v.shape == (sample_homogeneous_data.num_nodes, 16, 3)
@@ -303,8 +305,10 @@ class TestProteinGVPEncoder:
             num_residues=0,
         )
 
-        output, edge_attr = simple_encoder(data)
-        assert output.shape == (0, simple_encoder.pooled_dim)
+        s, V, edge_attr = simple_encoder(data)
+        assert s.shape == (0, simple_encoder.pooled_dim)
+        # Pooling mode returns empty V tensor (N, 0, 3) to match flat 3-tuple signature
+        assert V.shape == (0, 0, 3)
         # Pooling mode returns None for edge features
         assert edge_attr is None
 

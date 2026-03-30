@@ -241,7 +241,6 @@ To resume training from a checkpoint, you can load the model weights and optimiz
 | `--save_dir` | `../flow_checkpoints` | Directory to save checkpoints |
 | `--save_every` | `10` | Save checkpoint every N epochs |
 | `--eval_every` | `5` | Run evaluation every N epochs |
-| `--edia_dir` | (none) | Root directory for EDIA CSV files |
 | `--min_edia` | `0.4` | Minimum EDIA score threshold for waters |
 | `--no_filter_by_edia` | - | Disable EDIA-based water filtering |
 
@@ -286,11 +285,9 @@ These filters remove individual low-quality waters (can be toggled):
 EDIA measures how well an atom's position is supported by the experimental electron density map. Higher EDIA scores indicate more reliable atomic positions.
 
 **Configuration:**
-- EDIA filtering is enabled by default but only activates if `--edia_dir` is provided
-- If `--edia_dir` is not set, EDIA filtering is skipped (with a warning logged)
+- EDIA filtering is enabled by default 
+- The EDIA data lives in the `json` file of the format `<pdb_id>_final.json` in the same directory as the `pdb` file, and is obtained from PDB-REDO.
 - Use `--no_filter_by_edia` to explicitly disable EDIA filtering
-
-**Directory structure:** `{edia_dir}/{pdb_id}/{pdb_id}_residue_stats.csv`
 
 </details>
 
