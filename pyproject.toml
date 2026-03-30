@@ -22,7 +22,6 @@ dependencies = [
   "tqdm",
   "wandb",
   "jaxtyping",
-  "rdkit>=2025.9.6",
 ]
 
 [dependency-groups]

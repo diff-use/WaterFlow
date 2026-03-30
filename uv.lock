@@ -1995,7 +1995,6 @@ requires-dist = [
     { name = "pyg-lib", index = "https://data.pyg.org/whl/torch-2.8.0+cu126.html" },
     { name = "pymol-open-source-whl", specifier = ">=3.1.0.4" },
     { name = "rdkit" },
-    { name = "rdkit", specifier = ">=2025.9.6" },
     { name = "scipy" },
     { name = "torch", specifier = "==2.8.0", index = "https://download.pytorch.org/whl/cu126" },
     { name = "torch-cluster", index = "https://data.pyg.org/whl/torch-2.8.0+cu126.html" },
