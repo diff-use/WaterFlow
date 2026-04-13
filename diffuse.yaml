@@ -1,0 +1,173 @@
+# diffuse.yaml -- the contract between WaterFlow and Diffuse.
+#
+# Apply with: diffuse apply
+# Run with:   diffuse run start --profile waterflow-train-gvp
+#
+# Idempotent -- safe to apply repeatedly.
+
+version: 1
+
+type: waterflow
+name: WaterFlow
+description: >
+  Protein water structure prediction via flow matching.
+  Predicts water molecule positions around proteins using
+  continuous normalizing flows with GVP, ESM, or SLAE encoders.
+
+profiles:
+  - slug: waterflow-train-gvp
+    name: WaterFlow Train (GVP)
+    description: Train flow matching model with GVP encoder
+    container:
+      image: diffuseproject/waterflow
+      tag: latest
+      gpus:
+        min: 1
+    entrypoint: train
+    input_schema:
+      inputs:
+        - key: encoder_type
+          type: enum
+          required: true
+          allowed_values: [gvp]
+          default: gvp
+        - key: epochs
+          type: int
+          default: "200"
+        - key: batch_size
+          type: int
+          default: "4"
+        - key: lr
+          type: number
+          default: "1e-4"
+        - key: run_name
+          type: text
+        - key: train_list
+          type: text
+          default: /data/splits/train_list_0.95.txt
+        - key: val_list
+          type: text
+          default: /data/splits/valid_list_0.05.txt
+
+  - slug: waterflow-train-esm
+    name: WaterFlow Train (ESM)
+    description: Train flow matching model with ESM encoder
+    container:
+      image: diffuseproject/waterflow
+      tag: latest
+      gpus:
+        min: 1
+    entrypoint: train
+    input_schema:
+      inputs:
+        - key: encoder_type
+          type: enum
+          required: true
+          allowed_values: [esm]
+          default: esm
+        - key: epochs
+          type: int
+          default: "200"
+        - key: batch_size
+          type: int
+          default: "4"
+        - key: lr
+          type: number
+          default: "1e-4"
+        - key: run_name
+          type: text
+        - key: train_list
+          type: text
+          default: /data/splits/train_list_0.95.txt
+        - key: val_list
+          type: text
+          default: /data/splits/valid_list_0.05.txt
+
+  - slug: waterflow-train-slae
+    name: WaterFlow Train (SLAE)
+    description: Train flow matching model with SLAE encoder
+    container:
+      image: diffuseproject/waterflow
+      tag: latest
+      gpus:
+        min: 1
+    entrypoint: train
+    input_schema:
+      inputs:
+        - key: encoder_type
+          type: enum
+          required: true
+          allowed_values: [slae]
+          default: slae
+        - key: epochs
+          type: int
+          default: "200"
+        - key: batch_size
+          type: int
+          default: "4"
+        - key: lr
+          type: number
+          default: "1e-4"
+        - key: run_name
+          type: text
+        - key: train_list
+          type: text
+          default: /data/splits/train_list_0.95.txt
+        - key: val_list
+          type: text
+          default: /data/splits/valid_list_0.05.txt
+
+  - slug: waterflow-inference
+    name: WaterFlow Inference
+    description: Run inference with a trained WaterFlow checkpoint
+    container:
+      image: diffuseproject/waterflow
+      tag: latest
+      gpus:
+        min: 1
+    entrypoint: inference
+    input_schema:
+      inputs:
+        - key: run_dir
+          type: text
+          required: true
+        - key: num_steps
+          type: int
+          default: "100"
+        - key: pdb_list
+          type: text
+          default: /data/splits/valid_list_0.05.txt
+
+  - slug: waterflow-generate-esm
+    name: WaterFlow Generate ESM Embeddings
+    description: Generate ESM3 embeddings for PDB files
+    container:
+      image: diffuseproject/waterflow
+      tag: latest
+      gpus:
+        min: 1
+    entrypoint: generate-esm
+    input_schema:
+      inputs:
+        - key: split_file
+          type: text
+          default: /data/splits/train_list_0.95.txt
+
+fields:
+  - key: waterflow_encoder_type
+    type: enum
+    display_name: Encoder Type
+    allowed_values: [gvp, esm, slae]
+    required: true
+  - key: waterflow_epochs
+    type: number
+    display_name: Epochs
+    default: "200"
+  - key: waterflow_batch_size
+    type: number
+    display_name: Batch Size
+    default: "4"
+  - key: waterflow_learning_rate
+    type: number
+    display_name: Learning Rate
+    default: "1e-4"
