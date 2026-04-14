@@ -1,7 +1,7 @@
 # diffuse.yaml -- the contract between WaterFlow and Diffuse.
 #
 # Apply with: diffuse apply
-# Run with:   diffuse run start --profile waterflow-train-gvp
+# Run with:   diffuse run trigger --profile waterflow-train-gvp
 #
 # Idempotent -- safe to apply repeatedly.
 
@@ -17,13 +17,12 @@ description: >
 profiles:
   - slug: waterflow-train-gvp
     name: WaterFlow Train (GVP)
-    description: Train flow matching model with GVP encoder
     container:
       image: diffuseproject/waterflow
       tag: latest
       gpus:
         min: 1
-    entrypoint: train
+    entrypoint: null
     input_schema:
       inputs:
         - key: encoder_type
@@ -32,14 +31,29 @@ profiles:
           allowed_values: [gvp]
           default: gvp
         - key: epochs
-          type: int
+          type: number
           default: "200"
         - key: batch_size
-          type: int
+          type: number
           default: "4"
         - key: lr
           type: number
           default: "1e-4"
+        - key: scheduler
+          type: text
+          default: cosine
+        - key: warmup_steps
+          type: number
+          default: "500"
+        - key: save_dir
+          type: text
+          default: /data/checkpoints
+        - key: num_workers
+          type: number
+          default: "4"
+        - key: use_self_cond
+          type: boolean
+          default: true
         - key: run_name
           type: text
         - key: train_list
@@ -48,16 +62,48 @@ profiles:
         - key: val_list
           type: text
           default: /data/splits/valid_list_0.05.txt
+    run_config_defaults:
+      shared_memory_size: "16Gi"
+      runtime_class: nvidia
+      image_pull_policy: IfNotPresent
+      env:
+        WANDB_MODE: disabled
+        NVIDIA_VISIBLE_DEVICES: all
+        NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      volumes:
+        - name: waterflow-data
+          hostPath: /data/waterflow
+          mountPath: /data
+        - name: pdb-data
+          hostPath: /mnt/diffuse-public/pdb_redo_data
+          mountPath: /data/pdb
+          readOnly: true
+      args_template:
+        base_command: [train]
+        flag_args:
+          encoder_type: --encoder_type
+          epochs: --epochs
+          batch_size: --batch_size
+          lr: --lr
+          train_list: --train_list
+          val_list: --val_list
+          scheduler: --scheduler
+          warmup_steps: --warmup_steps
+          save_dir: --save_dir
+          run_name: --run_name
+          num_workers: --num_workers
+        boolean_args:
+          use_self_cond: --use_self_cond
+        static_args: [--base_pdb_dir, /data/pdb]
 
   - slug: waterflow-train-esm
     name: WaterFlow Train (ESM)
-    description: Train flow matching model with ESM encoder
     container:
       image: diffuseproject/waterflow
       tag: latest
       gpus:
         min: 1
-    entrypoint: train
+    entrypoint: null
     input_schema:
       inputs:
         - key: encoder_type
@@ -66,14 +112,29 @@ profiles:
           allowed_values: [esm]
           default: esm
         - key: epochs
-          type: int
+          type: number
           default: "200"
         - key: batch_size
-          type: int
+          type: number
           default: "4"
         - key: lr
           type: number
           default: "1e-4"
+        - key: scheduler
+          type: text
+          default: cosine
+        - key: warmup_steps
+          type: number
+          default: "500"
+        - key: save_dir
+          type: text
+          default: /data/checkpoints
+        - key: num_workers
+          type: number
+          default: "4"
+        - key: use_self_cond
+          type: boolean
+          default: true
         - key: run_name
           type: text
         - key: train_list
@@ -82,16 +143,48 @@ profiles:
         - key: val_list
           type: text
           default: /data/splits/valid_list_0.05.txt
+    run_config_defaults:
+      shared_memory_size: "16Gi"
+      runtime_class: nvidia
+      image_pull_policy: IfNotPresent
+      env:
+        WANDB_MODE: disabled
+        NVIDIA_VISIBLE_DEVICES: all
+        NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      volumes:
+        - name: waterflow-data
+          hostPath: /data/waterflow
+          mountPath: /data
+        - name: pdb-data
+          hostPath: /mnt/diffuse-public/pdb_redo_data
+          mountPath: /data/pdb
+          readOnly: true
+      args_template:
+        base_command: [train]
+        flag_args:
+          encoder_type: --encoder_type
+          epochs: --epochs
+          batch_size: --batch_size
+          lr: --lr
+          train_list: --train_list
+          val_list: --val_list
+          scheduler: --scheduler
+          warmup_steps: --warmup_steps
+          save_dir: --save_dir
+          run_name: --run_name
+          num_workers: --num_workers
+        boolean_args:
+          use_self_cond: --use_self_cond
+        static_args: [--base_pdb_dir, /data/pdb]
 
   - slug: waterflow-train-slae
     name: WaterFlow Train (SLAE)
-    description: Train flow matching model with SLAE encoder
     container:
       image: diffuseproject/waterflow
       tag: latest
       gpus:
         min: 1
-    entrypoint: train
+    entrypoint: null
     input_schema:
       inputs:
         - key: encoder_type
@@ -100,14 +193,29 @@ profiles:
           allowed_values: [slae]
           default: slae
         - key: epochs
-          type: int
+          type: number
           default: "200"
         - key: batch_size
-          type: int
+          type: number
           default: "4"
         - key: lr
           type: number
           default: "1e-4"
+        - key: scheduler
+          type: text
+          default: cosine
+        - key: warmup_steps
+          type: number
+          default: "500"
+        - key: save_dir
+          type: text
+          default: /data/checkpoints
+        - key: num_workers
+          type: number
+          default: "4"
+        - key: use_self_cond
+          type: boolean
+          default: true
         - key: run_name
           type: text
         - key: train_list
@@ -116,42 +224,127 @@ profiles:
         - key: val_list
           type: text
           default: /data/splits/valid_list_0.05.txt
+    run_config_defaults:
+      shared_memory_size: "16Gi"
+      runtime_class: nvidia
+      image_pull_policy: IfNotPresent
+      env:
+        WANDB_MODE: disabled
+        NVIDIA_VISIBLE_DEVICES: all
+        NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      volumes:
+        - name: waterflow-data
+          hostPath: /data/waterflow
+          mountPath: /data
+        - name: pdb-data
+          hostPath: /mnt/diffuse-public/pdb_redo_data
+          mountPath: /data/pdb
+          readOnly: true
+      args_template:
+        base_command: [train]
+        flag_args:
+          encoder_type: --encoder_type
+          epochs: --epochs
+          batch_size: --batch_size
+          lr: --lr
+          train_list: --train_list
+          val_list: --val_list
+          scheduler: --scheduler
+          warmup_steps: --warmup_steps
+          save_dir: --save_dir
+          run_name: --run_name
+          num_workers: --num_workers
+        boolean_args:
+          use_self_cond: --use_self_cond
+        static_args: [--base_pdb_dir, /data/pdb]
 
   - slug: waterflow-inference
     name: WaterFlow Inference
-    description: Run inference with a trained WaterFlow checkpoint
     container:
       image: diffuseproject/waterflow
       tag: latest
       gpus:
         min: 1
-    entrypoint: inference
+    entrypoint: null
     input_schema:
       inputs:
         - key: run_dir
           type: text
           required: true
         - key: num_steps
-          type: int
+          type: number
           default: "100"
         - key: pdb_list
           type: text
           default: /data/splits/valid_list_0.05.txt
+        - key: method
+          type: text
+          default: rk4
+        - key: use_sc
+          type: boolean
+          default: true
+    run_config_defaults:
+      shared_memory_size: "16Gi"
+      runtime_class: nvidia
+      image_pull_policy: IfNotPresent
+      env:
+        WANDB_MODE: disabled
+        NVIDIA_VISIBLE_DEVICES: all
+        NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      volumes:
+        - name: waterflow-data
+          hostPath: /data/waterflow
+          mountPath: /data
+        - name: pdb-data
+          hostPath: /mnt/diffuse-public/pdb_redo_data
+          mountPath: /data/pdb
+          readOnly: true
+      args_template:
+        base_command: [inference]
+        flag_args:
+          run_dir: --run_dir
+          pdb_list: --pdb_list
+          method: --method
+          num_steps: --num_steps
+        boolean_args:
+          use_sc: --use_sc
+        static_args: [--output_dir, /data/outputs, --base_pdb_dir, /data/pdb]
 
   - slug: waterflow-generate-esm
     name: WaterFlow Generate ESM Embeddings
-    description: Generate ESM3 embeddings for PDB files
     container:
       image: diffuseproject/waterflow
       tag: latest
       gpus:
         min: 1
-    entrypoint: generate-esm
+    entrypoint: null
     input_schema:
       inputs:
         - key: split_file
           type: text
           default: /data/splits/train_list_0.95.txt
+    run_config_defaults:
+      shared_memory_size: "16Gi"
+      runtime_class: nvidia
+      image_pull_policy: IfNotPresent
+      env:
+        WANDB_MODE: disabled
+        NVIDIA_VISIBLE_DEVICES: all
+        NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      volumes:
+        - name: waterflow-data
+          hostPath: /data/waterflow
+          mountPath: /data
+        - name: pdb-data
+          hostPath: /mnt/diffuse-public/pdb_redo_data
+          mountPath: /data/pdb
+          readOnly: true
+      args_template:
+        base_command: [generate-esm]
+        flag_args:
+          split_file: --split_file
+        boolean_args: {}
+        static_args: [--cache_dir, /data/cache, --base_pdb_dir, /data/pdb]
 
 fields:
   - key: waterflow_encoder_type
