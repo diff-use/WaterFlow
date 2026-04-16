@@ -32,25 +32,25 @@ profiles:
           default: gvp
         - key: epochs
           type: number
-          default: "200"
+          default: 200
         - key: batch_size
           type: number
-          default: "4"
+          default: 4
         - key: lr
           type: number
-          default: "1e-4"
+          default: 1e-3
         - key: scheduler
           type: text
           default: cosine
         - key: warmup_steps
           type: number
-          default: "500"
+          default: 500
         - key: save_dir
           type: text
           default: /data/checkpoints
         - key: num_workers
           type: number
-          default: "4"
+          default: 4
         - key: use_self_cond
           type: boolean
           default: true
@@ -113,25 +113,25 @@ profiles:
           default: esm
         - key: epochs
           type: number
-          default: "200"
+          default: 200
         - key: batch_size
           type: number
-          default: "4"
+          default: 4
         - key: lr
           type: number
-          default: "1e-4"
+          default: 1e-3
         - key: scheduler
           type: text
           default: cosine
         - key: warmup_steps
           type: number
-          default: "500"
+          default: 500
         - key: save_dir
           type: text
           default: /data/checkpoints
         - key: num_workers
           type: number
-          default: "4"
+          default: 4
         - key: use_self_cond
           type: boolean
           default: true
@@ -194,25 +194,25 @@ profiles:
           default: slae
         - key: epochs
           type: number
-          default: "200"
+          default: 200
         - key: batch_size
           type: number
-          default: "4"
+          default: 4
         - key: lr
           type: number
-          default: "1e-4"
+          default: 1e-3
         - key: scheduler
           type: text
           default: cosine
         - key: warmup_steps
           type: number
-          default: "500"
+          default: 500
         - key: save_dir
           type: text
           default: /data/checkpoints
         - key: num_workers
           type: number
-          default: "4"
+          default: 4
         - key: use_self_cond
           type: boolean
           default: true
@@ -273,7 +273,7 @@ profiles:
           required: true
         - key: num_steps
           type: number
-          default: "100"
+          default: 100
         - key: pdb_list
           type: text
           default: /data/splits/valid_list_0.05.txt
@@ -355,12 +355,12 @@ fields:
   - key: waterflow_epochs
     type: number
     display_name: Epochs
-    default: "200"
+    default: 200
   - key: waterflow_batch_size
     type: number
     display_name: Batch Size
-    default: "4"
+    default: 4
   - key: waterflow_learning_rate
     type: number
     display_name: Learning Rate
-    default: "1e-4"
+    default: 1e-3
