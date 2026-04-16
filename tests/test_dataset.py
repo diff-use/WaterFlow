@@ -1971,10 +1971,10 @@ class TestCachingBehavior:
 
         required_keys = [
             "protein_pos",
-            "protein_x",
+            "protein_feat",
             "protein_res_idx",
             "water_pos",
-            "water_x",
+            "water_feat",
             "pp_edge_index",
             "pp_edge_unit_vectors",
             "pp_edge_rbf",

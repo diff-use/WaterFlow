@@ -11,7 +11,7 @@ dependencies = [
   "e3nn",
   "esm",
   "biotite",
-  "pymol-open-source",
+  "pymol-open-source-whl>=3.1.0.4",
   "scipy",
   "pandas",
   "numpy",
@@ -21,6 +21,8 @@ dependencies = [
   "tqdm",
   "wandb",
   "jaxtyping",
+  "hydra-core",
+  "omegaconf",
 ]
 
 [dependency-groups]
