@@ -15,10 +15,17 @@ WaterFlow/
 │   ├── constants.py        # Shared constants (RBF bins, etc.)
 │   └── utils.py            # Metrics, plotting, logging utilities
 ├── scripts/                # Executable scripts
-│   ├── train.py            # Training pipeline
-│   ├── inference.py        # Run inference on trained models
+│   ├── train.py            # Training pipeline (Hydra-based)
+│   ├── inference.py        # Run inference on trained models (Hydra-based)
 │   ├── generate_esm_embeddings.py   # Precompute ESM embeddings
 │   └── generate_slae_embeddings.py  # Precompute SLAE embeddings
+├── configs/                # Hydra configuration files
+│   ├── train.yaml          # Main training config
+│   ├── inference.yaml      # Main inference config
+│   ├── data/default.yaml   # Data paths and quality filters
+│   ├── model/              # Encoder configs (gvp, esm, slae)
+│   ├── flow/default.yaml   # Flow matching parameters
+│   └── logging/default.yaml # Checkpointing and W&B settings
 ├── tests/                  # Test suite
 │   ├── test_dataset.py     # Dataset and preprocessing tests
 │   ├── test_flow.py        # Flow matching tests
@@ -103,12 +110,12 @@ Preprocessed data is cached under `--processed_dir` in a three-layer architectur
 ├── geometry/              # Graph structures (or geometry_mates/ when include_mates=True)
 │   └── <pdb_id>_final.pt
 │       - protein_pos: centered protein coordinates (N, 3)
-│       - protein_x: element one-hot encoding (N, 16)
+│       - protein_feat: element one-hot encoding (N, 16)
 │       - protein_res_idx: residue indices for grouping
-│       - water_pos, water_x: water coordinates and features
+│       - water_pos, water_feat: water coordinates and features
 │       - num_asu_protein: ASU atom count (mate boundary metadata)
 │       # Note: When include_mates=True, mate atoms are concatenated into
-│       # protein_pos/protein_x. Recover boundaries via:
+│       # protein_pos/protein_feat. Recover boundaries via:
 │       #   ASU atoms = protein_pos[:num_asu_protein]
 │       #   Mate atoms = protein_pos[num_asu_protein:]
 ├── esm/                   # ESM embeddings (per-residue)
@@ -189,26 +196,26 @@ uv run python -m scripts.generate_slae_embeddings \
 
 ## Training
 
+WaterFlow uses [Hydra](https://hydra.cc/) for configuration. Configs are structured under `configs/` with modular defaults.
+
 ### GVP Encoder (no precomputed embeddings required)
 
 ```bash
 uv run python -m scripts.train \
-    --train_list splits/train_list_0.95.txt \
-    --val_list splits/valid_list_0.05.txt \
-    --encoder_type gvp \
-    --batch_size 4
+    train_list=splits/train_list_0.95.txt \
+    val_list=splits/valid_list_0.05.txt
 ```
 
 ### ESM Encoder (requires precomputed ESM embeddings)
 
 ```bash
 uv run python -m scripts.train \
-    --train_list splits/train_list_0.95.txt \
-    --val_list splits/valid_list_0.05.txt \
-    --encoder_type esm \
-    --batch_size 1 \
-    --grad_accum_steps 4 \
-    --processed_dir ~/flow_cache/
+    train_list=splits/train_list_0.95.txt \
+    val_list=splits/valid_list_0.05.txt \
+    model=esm \
+    training.batch_size=1 \
+    training.optimizer.grad_accum_steps=4 \
+    data.processed_dir=~/flow_cache/
 ```
 
 ### Resuming from Checkpoints
@@ -218,66 +225,75 @@ To resume training from a checkpoint, you can load the model weights and optimiz
 ```bash
 # Checkpoints are saved in <save_dir>/<run_name>/checkpoints/
 # - best.pt: Best validation loss
-# - epoch_N.pt: Periodic checkpoints every --save_every epochs
+# - epoch_N.pt: Periodic checkpoints every logging.save_every epochs
 ```
 
-### Key Training Arguments
+### Configuration Structure
 
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--train_list` | required | Path to training split file |
-| `--val_list` | required | Path to validation split file |
-| `--encoder_type` | `gvp` | Encoder type: `gvp`, `esm`, or `slae` |
-| `--batch_size` | `4` | Batch size (use smaller for ESM due to memory) |
-| `--grad_accum_steps` | `1` | Gradient accumulation steps (effective batch = batch_size * grad_accum_steps) |
-| `--flow_layers` | `3` | Number of flow GVP layers |
-| `--hidden_s` | `256` | Scalar hidden dimension |
-| `--hidden_v` | `64` | Vector hidden dimension |
-| `--epochs` | `200` | Number of training epochs |
-| `--lr` | `1e-3` | Learning rate |
-| `--scheduler` | `cosine` | LR scheduler: `cosine`, `step`, or `none` |
-| `--warmup_steps` | `0` | Linear warmup steps |
-| `--processed_dir` | `~/flow_cache/` | Cache directory for preprocessed data |
-| `--save_dir` | `../flow_checkpoints` | Directory to save checkpoints |
-| `--save_every` | `10` | Save checkpoint every N epochs |
-| `--eval_every` | `5` | Run evaluation every N epochs |
-| `--min_edia` | `0.4` | Minimum EDIA score threshold for waters |
-| `--no_filter_by_edia` | - | Disable EDIA-based water filtering |
+Training configuration is organized into modular YAML files:
+
+| Config | Path | Description |
+|--------|------|-------------|
+| Main | `configs/train.yaml` | Training entry point with defaults |
+| Data | `configs/data/default.yaml` | Data paths and quality filters |
+| Model | `configs/model/{gvp,esm,slae}.yaml` | Encoder and flow architecture |
+| Flow | `configs/flow/default.yaml` | Flow matching parameters |
+| Logging | `configs/logging/default.yaml` | Checkpointing and W&B settings |
+
+### Key Training Options
+
+| Config Key | Default | Description |
+|------------|---------|-------------|
+| `train_list` | required | Path to training split file |
+| `val_list` | required | Path to validation split file |
+| `model` | `gvp` | Model config: `gvp`, `esm`, or `slae` |
+| `training.batch_size` | `4` | Batch size (use smaller for ESM) |
+| `training.optimizer.grad_accum_steps` | `1` | Gradient accumulation steps |
+| `training.epochs` | `200` | Number of training epochs |
+| `training.optimizer.lr` | `1e-3` | Learning rate |
+| `training.scheduler.type` | `cosine` | LR scheduler: `cosine`, `step`, `none` |
+| `data.processed_dir` | null | Cache directory for preprocessed data |
+| `logging.save_dir` | null | Directory to save checkpoints |
+| `logging.save_every` | `10` | Save checkpoint every N epochs |
+| `logging.eval_every` | `5` | Run evaluation every N epochs |
 
 ### Weights & Biases Logging
 
 Training automatically logs to W&B. Configure with:
 
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--wandb_project` | `water-flow` | W&B project name |
-| `--wandb_dir` | `../wandb_logs` | Local W&B log directory |
-| `--run_name` | auto-generated | Custom run name (format: `YYYYMMDD_HHMMSS_encoder_layers_hidden`) |
+| Config Key | Default | Description |
+|------------|---------|-------------|
+| `logging.wandb.project` | `water-flow` | W&B project name |
+| `logging.wandb.dir` | null | Local W&B log directory |
+| `logging.run_name` | auto-generated | Custom run name |
 
 ## Quality Filtering
 
-WaterFlow applies multiple quality filters to ensure high-quality training data.
+WaterFlow applies multiple quality filters to ensure high-quality training data. These are configured in `configs/data/default.yaml`.
 
 ### Structure-Level Quality Checks
 
 These checks determine whether a structure is included in training:
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--max_com_dist` | `25.0` | Max protein-water center-of-mass distance (A) |
-| `--max_clash_fraction` | `0.05` | Max fraction of waters clashing with protein |
-| `--clash_dist` | `2.0` | Distance threshold for clash detection (A) |
-| `--min_water_residue_ratio` | `0.6` | Minimum waters per residue ratio |
+| Config Key | Default | Description |
+|------------|---------|-------------|
+| `data.quality.max_com_dist` | `25.0` | Max protein-water center-of-mass distance (A) |
+| `data.quality.max_clash_fraction` | `0.05` | Max fraction of waters clashing with protein |
+| `data.quality.clash_dist` | `2.0` | Distance threshold for clash detection (A) |
+| `data.quality.min_water_residue_ratio` | `0.6` | Minimum waters per residue ratio |
 
 ### Per-Water Quality Filters
 
-These filters remove individual low-quality waters (can be toggled):
+These filters remove individual low-quality waters (toggleable via config):
 
-| Parameter | Default | Toggle Flag | Description |
-|-----------|---------|-------------|-------------|
-| `--max_protein_dist` | `5.0` | `--no_filter_by_distance` | Remove waters far from protein |
-| `--min_edia` | `0.4` | `--no_filter_by_edia` | Remove waters with low EDIA scores |
-| `--max_bfactor_zscore` | `1.5` | `--no_filter_by_bfactor` | Remove waters with high B-factor |
+| Config Key | Default | Description |
+|------------|---------|-------------|
+| `data.water_filter.max_protein_dist` | `5.0` | Remove waters far from protein |
+| `data.water_filter.filter_by_distance` | `true` | Toggle distance filtering |
+| `data.water_filter.min_edia` | `0.4` | Remove waters with low EDIA scores |
+| `data.water_filter.filter_by_edia` | `true` | Toggle EDIA filtering |
+| `data.water_filter.max_bfactor_zscore` | `1.5` | Remove waters with high B-factor |
+| `data.water_filter.filter_by_bfactor` | `true` | Toggle B-factor filtering |
 
 <details>
 <summary><strong>About EDIA Scores</strong></summary>
@@ -297,28 +313,37 @@ Run inference on a trained model:
 
 ```bash
 uv run python -m scripts.inference \
-    --run_dir /path/to/training_run \
-    --pdb_list splits/test_list.txt \
-    --output_dir ./outputs \
-    --method rk4 \
-    --num_steps 100
+    run_dir=/path/to/training_run \
+    pdb_list=splits/test_list.txt \
+    output_dir=./outputs
 ```
 
-### Key Inference Arguments
+With custom integration settings:
 
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--run_dir` | required | Path to training run directory (contains config.json) |
-| `--pdb_list` | required | Text file with PDB entries (one per line) |
-| `--output_dir` | required | Directory for output plots, GIFs, and metrics |
-| `--method` | `rk4` | Integration method: `euler` (fast) or `rk4` (accurate) |
-| `--num_steps` | `100` | Number of integration steps |
-| `--checkpoint` | `best.pt` | Checkpoint filename to load |
-| `--batch_size` | `8` | Number of proteins to process in parallel |
-| `--save_gifs` | `false` | Save trajectory GIFs (slower) |
-| `--threshold` | `1.0` | Distance threshold for precision/recall (A) |
-| `--water_ratio` | `None` | Sample `num_residues * ratio` waters (if not set, uses ground truth count) |
-| `--use_sc` | `false` | Use self-conditioning during integration |
+```bash
+uv run python -m scripts.inference \
+    run_dir=/path/to/training_run \
+    pdb_list=splits/test_list.txt \
+    output_dir=./outputs \
+    inference.integration.method=euler \
+    inference.integration.num_steps=50
+```
+
+### Key Inference Options
+
+| Config Key | Default | Description |
+|------------|---------|-------------|
+| `run_dir` | required | Path to training run directory (contains config.json) |
+| `pdb_list` | required | Text file with PDB entries (one per line) |
+| `output_dir` | required | Directory for output plots, GIFs, and metrics |
+| `inference.integration.method` | `rk4` | Integration method: `euler` (fast) or `rk4` (accurate) |
+| `inference.integration.num_steps` | `100` | Number of integration steps |
+| `inference.checkpoint` | `best.pt` | Checkpoint filename to load |
+| `inference.hardware.batch_size` | `8` | Number of proteins to process in parallel |
+| `inference.visualization.save_gifs` | `false` | Save trajectory GIFs (slower) |
+| `inference.evaluation.threshold` | `1.0` | Distance threshold for precision/recall (A) |
+| `inference.water.water_ratio` | null | Sample `num_residues * ratio` waters (if not set, uses ground truth count) |
+| `inference.integration.use_sc` | `false` | Use self-conditioning during integration |
 
 ### Output Structure
 

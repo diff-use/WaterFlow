@@ -1,0 +1,18 @@
+# Logging and checkpointing configuration
+
+save_dir: null
+run_name: null
+save_every: 10
+eval_every: 5
+n_eval_samples: 3
+rk4_steps: 100
+save_gifs: false
+threshold: 1.0
+
+log_level: INFO
+log_file: null
+device: cuda
+
+wandb:
+  project: water-flow
+  dir: null

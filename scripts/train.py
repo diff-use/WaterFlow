@@ -10,24 +10,21 @@ model. It handles:
 - Checkpointing and W&B logging
 
 Usage:
-    python scripts/train.py \\
-        --train_list /path/to/train.txt \\
-        --val_list /path/to/val.txt \\
-        --encoder_type gvp \\
-        --epochs 200 \\
-        --batch_size 4
+    python scripts/train.py train_list=splits/train.txt val_list=splits/val.txt
+    python scripts/train.py train_list=... model=slae training.batch_size=8
 """
 
-import argparse
-import json
 from datetime import datetime
 from pathlib import Path
+from typing import cast
 
+import hydra
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import wandb
 from loguru import logger
+from omegaconf import DictConfig, OmegaConf
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, StepLR
 from torch.utils.data import DataLoader
@@ -46,297 +43,45 @@ from src.utils import (
 )
 
 
-def generate_run_name(args: argparse.Namespace) -> str:
+def generate_run_name(cfg: DictConfig) -> str:
     """Generate a run name from timestamp and key parameters."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    layers = f"L{args.flow_layers}"
-    hidden = f"h{args.hidden_s}"
-    name = f"{timestamp}_{args.encoder_type}_{layers}_{hidden}"
+    layers = f"L{cfg.model.flow_layers}"
+    hidden = f"h{cfg.model.hidden_s}"
+    name = f"{timestamp}_{cfg.model.encoder_type}_{layers}_{hidden}"
     return name
 
 
-def parse_args():
-    """
-    Parse command-line arguments for training configuration.
-
-    Returns:
-        argparse.Namespace with all training hyperparameters and paths
-    """
-    # TODO: Add support for loading configuration from YAML/JSON config files.
-    # This would allow users to save and share training configurations easily.
-    # Example: --config config.yaml would load all arguments from the file,
-    # with CLI args taking precedence for overrides.
-
-    # TODO: Remove hardcoded default paths. These should be required arguments
-    # or loaded from environment variables / config files for portability.
-    # Current hardcoded paths:
-    #   - processed_dir: /home/srivasv/flow_cache/
-    #   - base_pdb_dir: /sb/wankowicz_lab/data/srivasv/pdb_redo_data
-    #   - save_dir: /home/srivasv/flow_checkpoints
-    #   - wandb_dir: /home/srivasv/wandb_logs
-    p = argparse.ArgumentParser()
-
-    # data
-    p.add_argument("--train_list", type=str, required=True)
-    p.add_argument("--val_list", type=str, required=True)
-    p.add_argument(
-        "--processed_dir",
-        type=str,
-        default="/home/srivasv/flow_cache/",
-        help=(
-            "Cache root. Geometry caches are expected in <processed_dir>/geometry, "
-            "embeddings in <processed_dir>/<encoder_name>."
-        ),
-    )
-    p.add_argument(
-        "--base_pdb_dir",
-        type=str,
-        default="/sb/wankowicz_lab/data/srivasv/pdb_redo_data",
-    )
-    p.add_argument(
-        "--geometry_cache_name",
-        type=str,
-        default="geometry",
-        help="Base name for geometry cache directory (e.g., 'geometry' -> geometry/ or geometry_unfiltered/)",
-    )
-    p.add_argument(
-        "--include_mates",
-        action="store_true",
-        help="Include symmetry mate atoms as protein nodes",
-    )
-    p.add_argument(
-        "--duplicate_single_sample",
-        type=int,
-        default=1,
-        help="If training on single sample, duplicate it N times for more gradient updates per epoch",
-    )
-
-    # dataset quality checks (always on)
-    p.add_argument(
-        "--max_com_dist",
-        type=float,
-        default=25.0,
-        help="Quality: max allowed protein-water center-of-mass distance (Angstroms).",
-    )
-    p.add_argument(
-        "--max_clash_fraction",
-        type=float,
-        default=0.05,
-        help="Quality: max allowed fraction of waters clashing with protein.",
-    )
-    p.add_argument(
-        "--clash_dist",
-        type=float,
-        default=2.0,
-        help="Quality: distance threshold for defining a water-protein clash (Angstroms).",
-    )
-    p.add_argument(
-        "--interface_dist_threshold",
-        type=float,
-        default=4.0,
-        help="Quality: max inter-chain interface distance to treat chains as interacting (Angstroms).",
-    )
-    p.add_argument(
-        "--min_water_residue_ratio",
-        type=float,
-        default=0.6,
-        help="Quality: minimum waters/residue ratio required per structure.",
-    )
-
-    # per-water filtering (toggleable)
-    p.add_argument(
-        "--max_protein_dist",
-        type=float,
-        default=5.0,
-        help="Water filter: remove waters farther than this from nearest protein atom (Angstroms).",
-    )
-    p.add_argument(
-        "--min_edia",
-        type=float,
-        default=0.4,
-        help="Water filter: remove waters with EDIA below this threshold.",
-    )
-    p.add_argument(
-        "--max_bfactor_zscore",
-        type=float,
-        default=1.5,
-        help="Water filter: remove waters with normalized B-factor above this threshold.",
-    )
-    p.add_argument(
-        "--no_filter_by_distance",
-        dest="filter_by_distance",
-        action="store_false",
-        help="Disable distance-from-protein water filtering (ignores --max_protein_dist).",
-    )
-    p.add_argument(
-        "--no_filter_by_edia",
-        dest="filter_by_edia",
-        action="store_false",
-        help="Disable EDIA-based water filtering (ignores --min_edia).",
-    )
-    p.add_argument(
-        "--no_filter_by_bfactor",
-        dest="filter_by_bfactor",
-        action="store_false",
-        help="Disable B-factor-based water filtering (ignores --max_bfactor_zscore).",
-    )
-    p.set_defaults(filter_by_distance=True, filter_by_edia=True, filter_by_bfactor=True)
-
-    # model
-    p.add_argument(
-        "--encoder_type", type=str, default="gvp", choices=["gvp", "slae", "esm"]
-    )
-    p.add_argument("--encoder_ckpt", type=str, default=None)
-    p.add_argument("--freeze_encoder", action="store_true")
-    p.add_argument("--hidden_s", type=int, default=256)
-    p.add_argument("--hidden_v", type=int, default=64)
-    p.add_argument("--flow_layers", type=int, default=3)
-    p.add_argument(
-        "--n_message_gvps",
-        type=int,
-        default=2,
-        help="Number of GVPs in message function per edge type (default: 2)",
-    )
-    p.add_argument(
-        "--n_update_gvps",
-        type=int,
-        default=2,
-        help="Number of GVPs in node update function (default: 2)",
-    )
-    p.add_argument(
-        "--drop_rate",
-        type=float,
-        default=0.1,
-        help="Dropout rate for GVP layers (default: 0.1)",
-    )
-    p.add_argument("--k_pw", type=int, default=16)
-    p.add_argument("--k_ww", type=int, default=16)
-
-    # optional cached-embedding override
-    p.add_argument(
-        "--embedding_dim",
-        type=int,
-        default=None,
-        help="Optional cached embedding dimension override for SLAE/ESM encoders",
-    )
-
-    # training
-    p.add_argument("--epochs", type=int, default=200)
-    p.add_argument("--batch_size", type=int, default=4)
-    p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--weight_decay", type=float, default=1e-4)
-    p.add_argument("--grad_clip", type=float, default=1.0)
-    p.add_argument(
-        "--grad_accum_steps",
-        type=int,
-        default=1,
-        help="Number of gradient accumulation steps",
-    )
-    p.add_argument("--num_workers", type=int, default=8)
-    p.add_argument(
-        "--prefetch_factor",
-        type=int,
-        default=4,
-        help="Number of batches to prefetch per worker",
-    )
-    p.add_argument(
-        "--pin_memory",
-        action="store_true",
-        help="Pin memory for faster CPU-GPU transfer",
-    )
-    p.add_argument(
-        "--persistent_workers",
-        action="store_true",
-        help="Keep workers alive between epochs",
-    )
-
-    # scheduler
-    p.add_argument(
-        "--scheduler", type=str, default="cosine", choices=["cosine", "step", "none"]
-    )
-    p.add_argument("--warmup_steps", type=int, default=0, help="Linear warmup steps")
-    p.add_argument(
-        "--eta_min_factor",
-        type=float,
-        default=0.001,
-        help="eta_min = lr * eta_min_factor",
-    )
-    p.add_argument(
-        "--step_size", type=int, default=50, help="StepLR step size (epochs)"
-    )
-    p.add_argument("--step_gamma", type=float, default=0.5, help="StepLR gamma")
-
-    # flow matching
-    p.add_argument("--use_self_cond", action="store_true")
-    p.add_argument("--p_self_cond", type=float, default=0.5)
-    p.add_argument("--use_distortion", action="store_true")
-    p.add_argument("--p_distort", type=float, default=0.2)
-    p.add_argument("--t_distort", type=float, default=0.5)
-    p.add_argument("--sigma_distort", type=float, default=0.5)
-
-    # checkpointing
-    p.add_argument("--save_dir", type=str, default="/home/srivasv/flow_checkpoints")
-    p.add_argument(
-        "--run_name",
-        type=str,
-        default=None,
-        help="Name for this run (auto-generated if not provided)",
-    )
-    p.add_argument("--save_every", type=int, default=10)
-    p.add_argument("--eval_every", type=int, default=5)
-    p.add_argument("--n_eval_samples", type=int, default=3)
-    p.add_argument("--rk4_steps", type=int, default=100)
-    p.add_argument(
-        "--save_gifs", action="store_true", help="Save trajectory GIFs during eval"
-    )
-    p.add_argument(
-        "--threshold",
-        type=float,
-        default=1.0,
-        help="Distance threshold in Angstroms for precision/recall (default: 1.0)",
-    )
-
-    # logging / wandb
-    p.add_argument("--log_level", type=str, default="INFO")
-    p.add_argument("--log_file", type=str, default=None)
-    p.add_argument("--wandb_project", type=str, default="water-flow")
-    p.add_argument("--wandb_dir", type=str, default="/home/srivasv/wandb_logs")
-    p.add_argument("--device", type=str, default="cuda")
-    args = p.parse_args()
-    if args.encoder_type == "gvp" and args.embedding_dim is not None:
-        p.error("--embedding_dim is only valid for cached encoders: slae or esm")
-    return args
-
-
-def _extract_quality_config(args: argparse.Namespace) -> dict:
+def _extract_quality_config(cfg: DictConfig) -> dict:
     """Extract dataset quality check parameters (always active in preprocessing)."""
     return {
-        "max_com_dist": args.max_com_dist,
-        "max_clash_fraction": args.max_clash_fraction,
-        "clash_dist": args.clash_dist,
-        "interface_dist_threshold": args.interface_dist_threshold,
-        "min_water_residue_ratio": args.min_water_residue_ratio,
+        "max_com_dist": cfg.data.quality.max_com_dist,
+        "max_clash_fraction": cfg.data.quality.max_clash_fraction,
+        "clash_dist": cfg.data.quality.clash_dist,
+        "interface_dist_threshold": cfg.data.quality.interface_dist_threshold,
+        "min_water_residue_ratio": cfg.data.quality.min_water_residue_ratio,
     }
 
 
-def _extract_water_filter_config(args: argparse.Namespace) -> dict:
+def _extract_water_filter_config(cfg: DictConfig) -> dict:
     """Extract per-water filtering parameters (toggleable)."""
     return {
-        "max_protein_dist": args.max_protein_dist,
-        "min_edia": args.min_edia,
-        "max_bfactor_zscore": args.max_bfactor_zscore,
-        "filter_by_distance": args.filter_by_distance,
-        "filter_by_edia": args.filter_by_edia,
-        "filter_by_bfactor": args.filter_by_bfactor,
+        "edia_dir": cfg.data.edia_dir,
+        "max_protein_dist": cfg.data.water_filter.max_protein_dist,
+        "min_edia": cfg.data.water_filter.min_edia,
+        "max_bfactor_zscore": cfg.data.water_filter.max_bfactor_zscore,
+        "filter_by_distance": cfg.data.water_filter.filter_by_distance,
+        "filter_by_edia": cfg.data.water_filter.filter_by_edia,
+        "filter_by_bfactor": cfg.data.water_filter.filter_by_bfactor,
     }
 
 
-def _build_dataset_config(args: argparse.Namespace) -> tuple[dict, dict, dict]:
+def _build_dataset_config(cfg: DictConfig) -> tuple[dict, dict, dict]:
     """
-    Build grouped dataset configuration from command-line arguments.
+    Build grouped dataset configuration from Hydra config.
 
     Args:
-        args: Parsed command-line arguments
+        cfg: Hydra DictConfig
 
     Returns:
         Tuple of (dataset_kwargs, quality_kwargs, water_filter_kwargs):
@@ -344,58 +89,63 @@ def _build_dataset_config(args: argparse.Namespace) -> tuple[dict, dict, dict]:
             - quality_kwargs: Structure-level quality check parameters
             - water_filter_kwargs: Per-water filtering parameters
     """
-    quality_kwargs = _extract_quality_config(args)
-    water_filter_kwargs = _extract_water_filter_config(args)
+    quality_kwargs = _extract_quality_config(cfg)
+    water_filter_kwargs = _extract_water_filter_config(cfg)
     dataset_kwargs = {
-        "encoder_type": args.encoder_type,
-        "base_pdb_dir": args.base_pdb_dir,
-        "geometry_cache_name": args.geometry_cache_name,
-        "include_mates": args.include_mates,
+        "encoder_type": cfg.model.encoder_type,
+        "base_pdb_dir": cfg.data.base_pdb_dir,
+        "geometry_cache_name": cfg.data.geometry_cache_name,
+        "include_mates": cfg.data.include_mates,
         **quality_kwargs,
         **water_filter_kwargs,
     }
     return dataset_kwargs, quality_kwargs, water_filter_kwargs
 
 
-def _ignored_water_filter_thresholds(args) -> list[str]:
+def _ignored_water_filter_thresholds(cfg: DictConfig) -> list[str]:
     """
     Identify water filter thresholds that are disabled.
 
     Args:
-        args: Parsed command-line arguments with filter_by_* flags
+        cfg: Hydra DictConfig with data.water_filter settings
 
     Returns:
         List of threshold parameter names that are disabled (e.g., ['min_edia'])
     """
     ignored = []
-    if not args.filter_by_distance:
+    if not cfg.data.water_filter.filter_by_distance:
         ignored.append("max_protein_dist")
-    if not args.filter_by_edia:
+    if not cfg.data.water_filter.filter_by_edia:
         ignored.append("min_edia")
-    if not args.filter_by_bfactor:
+    if not cfg.data.water_filter.filter_by_bfactor:
         ignored.append("max_bfactor_zscore")
     return ignored
 
 
-def _log_dataset_filter_config(args, quality_kwargs: dict):
+def _log_dataset_filter_config(cfg: DictConfig, quality_kwargs: dict):
     """
     Log dataset quality check and water filter configuration.
 
     Args:
-        args: Parsed command-line arguments with filter settings
+        cfg: Hydra DictConfig with filter settings
         quality_kwargs: Structure-level quality check parameters to log
     """
     active_filters = {
-        "distance": args.filter_by_distance,
-        "edia": args.filter_by_edia,
-        "bfactor": args.filter_by_bfactor,
+        "distance": cfg.data.water_filter.filter_by_distance,
+        "edia": cfg.data.water_filter.filter_by_edia,
+        "bfactor": cfg.data.water_filter.filter_by_bfactor,
     }
     logger.info(f"Dataset quality checks (always on): {quality_kwargs}")
     logger.info(f"Water filters (toggleable): {active_filters}")
 
-    ignored = _ignored_water_filter_thresholds(args)
+    ignored = _ignored_water_filter_thresholds(cfg)
     if ignored:
         logger.info(f"Ignored water-filter thresholds (disabled): {ignored}")
+
+    if cfg.data.water_filter.filter_by_edia and cfg.data.edia_dir is None:
+        logger.info(
+            "EDIA filter enabled but edia_dir is not set; EDIA filtering will be skipped."
+        )
 
 
 def _required_embedding_field(encoder_type: str) -> str | None:
@@ -464,12 +214,12 @@ def _resolve_embedding_dim(
     return inferred_dim if override_dim is None else int(override_dim)
 
 
-def resolve_encoder_config(args, sample_data, node_scalar_in: int):
+def resolve_encoder_config(cfg: DictConfig, sample_data, node_scalar_in: int):
     """
     Build a registry-friendly encoder config with inferred dimensions.
 
     Args:
-        args: Parsed command-line arguments containing encoder settings
+        cfg: Hydra DictConfig containing encoder settings
         sample_data: HeteroData sample used to infer embedding dimensions
         node_scalar_in: Number of input scalar features per node
 
@@ -480,18 +230,18 @@ def resolve_encoder_config(args, sample_data, node_scalar_in: int):
             - ESM: {"encoder_type": "esm", "embedding_key": "embedding", "embedding_dim": 1536, ...}
     """
     encoder_config = {
-        "encoder_type": args.encoder_type,
-        "hidden_s": args.hidden_s,
-        "hidden_v": args.hidden_v,
+        "encoder_type": cfg.model.encoder_type,
+        "hidden_s": cfg.model.hidden_s,
+        "hidden_v": cfg.model.hidden_v,
         "node_scalar_in": node_scalar_in,
-        "freeze_encoder": args.freeze_encoder,
-        "encoder_ckpt": args.encoder_ckpt,
+        "freeze_encoder": cfg.model.freeze_encoder,
+        "encoder_ckpt": cfg.model.encoder_ckpt,
     }
 
-    if _uses_cached_embeddings(args.encoder_type):
+    if _uses_cached_embeddings(cfg.model.encoder_type):
         encoder_config["embedding_key"] = "embedding"
         encoder_config["embedding_dim"] = _resolve_embedding_dim(
-            sample_data, args.encoder_type, args.embedding_dim
+            sample_data, cfg.model.encoder_type, cfg.model.embedding_dim
         )
 
     return encoder_config
@@ -511,40 +261,40 @@ def log_encoder_sample_stats(sample_data: HeteroData, encoder_type: str) -> None
 
 
 def build_model(
-    args: argparse.Namespace, device: torch.device, encoder_config: dict
+    cfg: DictConfig, device: torch.device, encoder_config: dict
 ) -> FlowWaterGVP:
     """
     Build encoder and flow model using registry-based encoder construction.
 
     Args:
-        args: Parsed command-line arguments with model hyperparameters
+        cfg: Hydra DictConfig with model hyperparameters
         device: Torch device to place the model on
         encoder_config: Registry-friendly config from resolve_encoder_config()
 
     Returns:
         FlowWaterGVP: Initialized model with the specified encoder
     """
-    logger.info(f"Building model with {args.encoder_type.upper()} encoder")
+    logger.info(f"Building model with {cfg.model.encoder_type.upper()} encoder")
     logger.info(f"Resolved encoder config: {encoder_config}")
 
     encoder = build_encoder(encoder_config, device)
 
     model = FlowWaterGVP(
         encoder=encoder,
-        hidden_dims=(args.hidden_s, args.hidden_v),
-        layers=args.flow_layers,
-        n_message_gvps=args.n_message_gvps,
-        n_update_gvps=args.n_update_gvps,
-        drop_rate=args.drop_rate,
-        k_pw=args.k_pw,
-        k_ww=args.k_ww,
+        hidden_dims=(cfg.model.hidden_s, cfg.model.hidden_v),
+        layers=cfg.model.flow_layers,
+        n_message_gvps=cfg.model.n_message_gvps,
+        n_update_gvps=cfg.model.n_update_gvps,
+        drop_rate=cfg.model.drop_rate,
+        k_pw=cfg.model.k_pw,
+        k_ww=cfg.model.k_ww,
     ).to(device)
 
     return model
 
 
 def run_eval_sampling(
-    flow_matcher, val_loader, args, epoch, device, global_step, eval_indices, run_dir
+    flow_matcher, val_loader, cfg, epoch, device, global_step, eval_indices, run_dir
 ):
     """Run RK4 integration on fixed eval samples and log results.
 
@@ -562,15 +312,17 @@ def run_eval_sampling(
 
         out = flow_matcher.rk4_integrate(
             graph,
-            num_steps=args.rk4_steps,
-            use_sc=args.use_self_cond,
+            num_steps=cfg.logging.rk4_steps,
+            use_sc=cfg.flow.use_self_cond,
             device=device,
             return_trajectory=True,
         )[0]  # rk4_integrate returns a list, get the single result
 
         # compute metrics
         final_metrics = compute_placement_metrics(
-            pred=out["water_pred"], true=out["water_true"], threshold=args.threshold
+            pred=out["water_pred"],
+            true=out["water_true"],
+            threshold=cfg.logging.threshold,
         )
 
         final_rmsd = compute_rmsd(out["water_pred"], out["water_true"])
@@ -603,7 +355,7 @@ def run_eval_sampling(
         plt.close()
 
         # save GIF if requested
-        if args.save_gifs and "trajectory" in out:
+        if cfg.logging.save_gifs and "trajectory" in out:
             gif_path = run_dir / "gifs" / f"epoch{epoch}_sample{i}.gif"
             gif_path.parent.mkdir(parents=True, exist_ok=True)
             create_trajectory_gif(
@@ -634,7 +386,7 @@ def train_epoch(
     train_loader: DataLoader,
     optimizer: AdamW,
     warmup_scheduler,
-    args: argparse.Namespace,
+    cfg: DictConfig,
     epoch: int,
     optimizer_step_count: int,
 ) -> tuple[dict[str, float], int, int]:
@@ -648,20 +400,21 @@ def train_epoch(
 
     pbar = tqdm(train_loader, desc=f"Epoch {epoch} [Train]")
     for step, batch in enumerate(pbar):
-        batch = batch.to(args.device)
+        batch = batch.to(cfg.logging.device)
         if batch["water"].num_nodes == 0:
             skipped_batches += 1
             continue
 
         metrics = flow_matcher.training_step(
             batch,
-            use_self_conditioning=args.use_self_cond,
-            accumulation_steps=args.grad_accum_steps,
+            use_self_conditioning=cfg.flow.use_self_cond,
+            accumulation_steps=cfg.training.optimizer.grad_accum_steps,
         )
 
         if metrics["per_sample_info"] is not None:
-            per_sample_losses = metrics["per_sample_info"]["losses"].cpu()
-            num_graphs = metrics["per_sample_info"]["num_graphs"]
+            per_sample_info = cast(dict, metrics["per_sample_info"])
+            per_sample_losses = per_sample_info["losses"].cpu()
+            num_graphs = per_sample_info["num_graphs"]
 
             if hasattr(batch, "pdb_id"):
                 pdb_ids = (
@@ -677,15 +430,15 @@ def train_epoch(
                 logger.warning("=" * 60)
 
         processed_batches += 1
-        total_loss += metrics["loss"]
-        total_rmsd += metrics["rmsd"]
+        total_loss += cast(float, metrics["loss"])
+        total_rmsd += cast(float, metrics["rmsd"])
 
         # Step optimizer every grad_accum_steps
-        if (step + 1) % args.grad_accum_steps == 0:
-            if args.grad_clip > 0:
+        if (step + 1) % cfg.training.optimizer.grad_accum_steps == 0:
+            if cfg.training.optimizer.grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(
                     [p for p in flow_matcher.model.parameters() if p.requires_grad],
-                    max_norm=args.grad_clip,
+                    max_norm=cfg.training.optimizer.grad_clip,
                 )
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
@@ -694,7 +447,7 @@ def train_epoch(
             # Step warmup scheduler per optimizer step
             if (
                 warmup_scheduler is not None
-                and optimizer_step_count <= args.warmup_steps
+                and optimizer_step_count <= cfg.training.scheduler.warmup_steps
             ):
                 warmup_scheduler.step()
 
@@ -716,16 +469,19 @@ def train_epoch(
         )
 
     # Handle remaining gradients at end of epoch
-    if (step + 1) % args.grad_accum_steps != 0:
-        if args.grad_clip > 0:
+    if (step + 1) % cfg.training.optimizer.grad_accum_steps != 0:
+        if cfg.training.optimizer.grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(
                 [p for p in flow_matcher.model.parameters() if p.requires_grad],
-                max_norm=args.grad_clip,
+                max_norm=cfg.training.optimizer.grad_clip,
             )
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
         optimizer_step_count += 1
-        if warmup_scheduler is not None and optimizer_step_count <= args.warmup_steps:
+        if (
+            warmup_scheduler is not None
+            and optimizer_step_count <= cfg.training.scheduler.warmup_steps
+        ):
             warmup_scheduler.step()
 
     final_global_step = (epoch - 1) * len(train_loader) + len(train_loader) - 1
@@ -757,7 +513,7 @@ def train_epoch(
 def val_epoch(
     flow_matcher: FlowMatcher,
     val_loader: DataLoader,
-    args: argparse.Namespace,
+    cfg: DictConfig,
     epoch: int,
 ) -> dict[str, float]:
     """Single validation epoch."""
@@ -767,7 +523,7 @@ def val_epoch(
     processed_batches = 0
 
     for batch in tqdm(val_loader, desc=f"Epoch {epoch} [Val]"):
-        batch = batch.to(args.device)
+        batch = batch.to(cfg.logging.device)
         if batch["water"].num_nodes == 0:
             skipped_batches += 1
             continue
@@ -840,7 +596,7 @@ def save_checkpoint(
     logger.info(f"{'Best ' if best else ''}Checkpoint saved: {path}")
 
 
-def build_scheduler(optimizer, args):
+def build_scheduler(optimizer, cfg: DictConfig):
     """
     Build warmup and main learning rate schedulers.
 
@@ -849,82 +605,99 @@ def build_scheduler(optimizer, args):
 
     Args:
         optimizer: AdamW optimizer instance
-        args: Parsed arguments with scheduler configuration
+        cfg: Hydra DictConfig with scheduler configuration
 
     Returns:
         Tuple of (warmup_scheduler, main_scheduler), either may be None
     """
     # Warmup scheduler (stepped per optimizer step)
     warmup_scheduler = None
-    if args.warmup_steps > 0:
+    if cfg.training.scheduler.warmup_steps > 0:
         warmup_scheduler = LinearLR(
-            optimizer, start_factor=1e-8, end_factor=1.0, total_iters=args.warmup_steps
+            optimizer,
+            start_factor=1e-8,
+            end_factor=1.0,
+            total_iters=cfg.training.scheduler.warmup_steps,
         )
 
     # Main scheduler (stepped per epoch, after warmup)
     main_scheduler = None
-    if args.scheduler == "cosine":
+    if cfg.training.scheduler.type == "cosine":
         main_scheduler = CosineAnnealingLR(
-            optimizer, T_max=args.epochs, eta_min=args.lr * args.eta_min_factor
+            optimizer,
+            T_max=cfg.training.epochs,
+            eta_min=cfg.training.optimizer.lr * cfg.training.scheduler.eta_min_factor,
         )
-    elif args.scheduler == "step":
+    elif cfg.training.scheduler.type == "step":
         main_scheduler = StepLR(
-            optimizer, step_size=args.step_size, gamma=args.step_gamma
+            optimizer,
+            step_size=cfg.training.scheduler.step_size,
+            gamma=cfg.training.scheduler.step_gamma,
         )
 
     return warmup_scheduler, main_scheduler
 
 
-def main():
+@hydra.main(version_base=None, config_path="../configs", config_name="train")
+def main(cfg: DictConfig) -> None:
     """Run the full training pipeline."""
-    args = parse_args()
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    device = torch.device(cfg.logging.device if torch.cuda.is_available() else "cpu")
 
-    if args.run_name is None:
-        args.run_name = generate_run_name(args)
+    # Generate run name if not provided
+    run_name = cfg.logging.run_name or generate_run_name(cfg)
 
-    run_dir = Path(args.save_dir) / args.run_name
+    # Determine save directory (Hydra changes cwd, so use absolute paths)
+    save_dir = Path(cfg.logging.save_dir) if cfg.logging.save_dir else Path.cwd()
+    run_dir = save_dir / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "checkpoints").mkdir(exist_ok=True)
     (run_dir / "plots").mkdir(exist_ok=True)
     (run_dir / "gifs").mkdir(exist_ok=True)
 
-    log_file = Path(args.log_file) if args.log_file else run_dir / "train.log"
-    setup_logging_for_tqdm(level=args.log_level, log_file=str(log_file))
+    log_file = (
+        Path(cfg.logging.log_file) if cfg.logging.log_file else run_dir / "train.log"
+    )
+    setup_logging_for_tqdm(level=cfg.logging.log_level, log_file=str(log_file))
 
     logger.info("=" * 60)
-    logger.info(f"Run name: {args.run_name}")
+    logger.info(f"Run name: {run_name}")
     logger.info(f"Run directory: {run_dir}")
     logger.info(f"Log file: {log_file}")
     logger.info("=" * 60)
 
+    # Save resolved Hydra config
+    config_file = run_dir / "config.yaml"
+    with open(config_file, "w") as f:
+        f.write(OmegaConf.to_yaml(cfg))
+    logger.info(f"Configuration saved to: {config_file}")
+
     # data loaders
-    dataset_kwargs, quality_kwargs, _ = _build_dataset_config(args)
-    _log_dataset_filter_config(args, quality_kwargs)
+    dataset_kwargs, quality_kwargs, _ = _build_dataset_config(cfg)
+    _log_dataset_filter_config(cfg, quality_kwargs)
 
     train_loader = get_dataloader(
-        pdb_list_file=args.train_list,
-        processed_dir=args.processed_dir,
-        batch_size=args.batch_size,
+        pdb_list_file=cfg.train_list,
+        processed_dir=cfg.data.processed_dir,
+        batch_size=cfg.training.batch_size,
         shuffle=True,
-        num_workers=args.num_workers,
-        pin_memory=args.pin_memory,
-        prefetch_factor=args.prefetch_factor,
-        persistent_workers=args.persistent_workers,
-        duplicate_single_sample=args.duplicate_single_sample,
+        num_workers=cfg.training.dataloader.num_workers,
+        pin_memory=cfg.training.dataloader.pin_memory,
+        prefetch_factor=cfg.training.dataloader.prefetch_factor,
+        persistent_workers=cfg.training.dataloader.persistent_workers,
+        duplicate_single_sample=cfg.data.duplicate_single_sample,
         **dataset_kwargs,
     )
 
     val_loader = get_dataloader(
-        pdb_list_file=args.val_list,
-        processed_dir=args.processed_dir,
-        batch_size=args.batch_size,
+        pdb_list_file=cfg.val_list,
+        processed_dir=cfg.data.processed_dir,
+        batch_size=cfg.training.batch_size,
         shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=args.pin_memory,
-        prefetch_factor=args.prefetch_factor,
-        persistent_workers=args.persistent_workers,
-        duplicate_single_sample=args.duplicate_single_sample,
+        num_workers=cfg.training.dataloader.num_workers,
+        pin_memory=cfg.training.dataloader.pin_memory,
+        prefetch_factor=cfg.training.dataloader.prefetch_factor,
+        persistent_workers=cfg.training.dataloader.persistent_workers,
+        duplicate_single_sample=cfg.data.duplicate_single_sample,
         **dataset_kwargs,
     )
 
@@ -932,7 +705,7 @@ def main():
     np.random.seed(42)
     eval_indices = np.random.choice(
         len(val_loader.dataset),
-        min(args.n_eval_samples, len(val_loader.dataset)),
+        min(cfg.logging.n_eval_samples, len(val_loader.dataset)),
         replace=False,
     ).tolist()
 
@@ -951,43 +724,40 @@ def main():
     node_scalar_in = int(sample_data["protein"].x.shape[-1])
     logger.info(f"Detected protein input dimension: {node_scalar_in}")
 
-    log_encoder_sample_stats(sample_data, args.encoder_type)
+    log_encoder_sample_stats(sample_data, cfg.model.encoder_type)
     encoder_config = resolve_encoder_config(
-        args, sample_data, node_scalar_in=node_scalar_in
+        cfg, sample_data, node_scalar_in=node_scalar_in
     )
 
-    config_dict = vars(args).copy()
+    # Create config dict for wandb logging
+    config_dict = cast(dict, OmegaConf.to_container(cfg, resolve=True))
     config_dict["active_water_filters"] = {
-        "distance": args.filter_by_distance,
-        "edia": args.filter_by_edia,
-        "bfactor": args.filter_by_bfactor,
+        "distance": cfg.data.water_filter.filter_by_distance,
+        "edia": cfg.data.water_filter.filter_by_edia,
+        "bfactor": cfg.data.water_filter.filter_by_bfactor,
     }
     config_dict["ignored_water_filter_thresholds"] = _ignored_water_filter_thresholds(
-        args
+        cfg
     )
     config_dict["node_scalar_in"] = node_scalar_in
     config_dict["resolved_encoder_config"] = encoder_config
-    config_file = run_dir / "config.json"
-    with open(config_file, "w") as f:
-        json.dump(config_dict, f, indent=2)
-    logger.info(f"Configuration saved to: {config_file}")
 
     wandb.init(
-        project=args.wandb_project,
-        dir=args.wandb_dir,
-        name=args.run_name,
+        project=cfg.logging.wandb.project,
+        dir=cfg.logging.wandb.dir,
+        name=run_name,
         config=config_dict,
     )
 
-    model = build_model(args, device, encoder_config=encoder_config)
+    model = build_model(cfg, device, encoder_config=encoder_config)
     trainable_params, total_params = count_parameters(model)
     logger.info("Model statistics:")
     logger.info(f"Trainable parameters: {trainable_params:,}")
     logger.info(f"Total parameters: {total_params:,}")
 
     # quick forward pass sanity check for cached embedding encoders
-    if _uses_cached_embeddings(args.encoder_type):
-        logger.info(f"Testing forward pass with {args.encoder_type.upper()}...")
+    if _uses_cached_embeddings(cfg.model.encoder_type):
+        logger.info(f"Testing forward pass with {cfg.model.encoder_type.upper()}...")
         model.eval()
         batch = next(iter(train_loader)).to(device)
         with torch.no_grad():
@@ -1002,30 +772,30 @@ def main():
 
     flow_matcher = FlowMatcher(
         model=model,
-        p_self_cond=args.p_self_cond,
-        use_distortion=args.use_distortion,
-        p_distort=args.p_distort,
-        t_distort=args.t_distort,
-        sigma_distort=args.sigma_distort,
+        p_self_cond=cfg.flow.p_self_cond,
+        use_distortion=cfg.flow.use_distortion,
+        p_distort=cfg.flow.p_distort,
+        t_distort=cfg.flow.t_distort,
+        sigma_distort=cfg.flow.sigma_distort,
     )
 
     optimizer = AdamW(
         [p for p in model.parameters() if p.requires_grad],
-        lr=args.lr,
-        weight_decay=args.weight_decay,
+        lr=cfg.training.optimizer.lr,
+        weight_decay=cfg.training.optimizer.weight_decay,
     )
-    warmup_scheduler, main_scheduler = build_scheduler(optimizer, args)
+    warmup_scheduler, main_scheduler = build_scheduler(optimizer, cfg)
 
     best_val_loss = float("inf")
     optimizer_step_count = 0
 
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(1, cfg.training.epochs + 1):
         train_metrics, global_step, optimizer_step_count = train_epoch(
             flow_matcher,
             train_loader,
             optimizer,
             warmup_scheduler,
-            args,
+            cfg,
             epoch,
             optimizer_step_count,
         )
@@ -1033,12 +803,15 @@ def main():
         train_metrics["epoch"] = epoch
         wandb.log(train_metrics, step=global_step)
 
-        val_metrics = val_epoch(flow_matcher, val_loader, args, epoch)
+        val_metrics = val_epoch(flow_matcher, val_loader, cfg, epoch)
         val_metrics["epoch"] = epoch
         wandb.log(val_metrics, step=global_step)
 
         # Step main scheduler per epoch (after warmup completes)
-        if main_scheduler is not None and optimizer_step_count >= args.warmup_steps:
+        if (
+            main_scheduler is not None
+            and optimizer_step_count >= cfg.training.scheduler.warmup_steps
+        ):
             main_scheduler.step()
 
         logger.info(
@@ -1059,7 +832,7 @@ def main():
                 best=True,
             )
 
-        if epoch % args.save_every == 0:
+        if epoch % cfg.logging.save_every == 0:
             save_checkpoint(
                 model,
                 optimizer,
@@ -1070,11 +843,11 @@ def main():
                 run_dir / "checkpoints" / f"epoch_{epoch}.pt",
             )
 
-        if epoch % args.eval_every == 0:
+        if epoch % cfg.logging.eval_every == 0:
             eval_metrics = run_eval_sampling(
                 flow_matcher,
                 val_loader,
-                args,
+                cfg,
                 epoch,
                 device,
                 global_step,

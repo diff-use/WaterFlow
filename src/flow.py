@@ -741,12 +741,12 @@ class FlowMatcher:
         x = torch.randn(total_waters, 3, device=device) * sigma_per_water.unsqueeze(-1)
 
         # create water features (oxygen one-hot, index 2 for 'O' in ELEMENT_VOCAB)
-        water_x = torch.zeros(total_waters, 16, device=device)
-        water_x[:, 2] = 1.0  # oxygen is index 2 in ELEMENT_VOCAB
+        water_feat = torch.zeros(total_waters, 16, device=device)
+        water_feat[:, 2] = 1.0  # oxygen is index 2 in ELEMENT_VOCAB
 
         # update graph with new water nodes
         g["water"].pos = x
-        g["water"].x = water_x
+        g["water"].x = water_feat
         g["water"].batch = batch_w
         g["water"].num_nodes = total_waters
 

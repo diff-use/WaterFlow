@@ -1,0 +1,25 @@
+# Data configuration
+
+processed_dir: null
+base_pdb_dir: null
+edia_dir: null
+geometry_cache_name: geometry
+include_mates: false
+duplicate_single_sample: 1
+
+# Dataset quality checks (always active during preprocessing)
+quality:
+  max_com_dist: 25.0
+  max_clash_fraction: 0.05
+  clash_dist: 2.0
+  interface_dist_threshold: 4.0
+  min_water_residue_ratio: 0.6
+
+# Per-water filtering (toggleable)
+water_filter:
+  filter_by_distance: true
+  max_protein_dist: 5.0
+  filter_by_edia: true
+  min_edia: 0.4
+  filter_by_bfactor: true
+  max_bfactor_zscore: 1.5

@@ -1,0 +1,8 @@
+# Flow matching configuration
+
+use_self_cond: false
+p_self_cond: 0.5
+use_distortion: false
+p_distort: 0.2
+t_distort: 0.5
+sigma_distort: 0.5
