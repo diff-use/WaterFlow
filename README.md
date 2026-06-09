@@ -7,7 +7,7 @@ Predicting water molecule placements on protein surfaces using flow matching con
 The Astera ACTL overlay image is published as:
 
 ```bash
-harbor.astera.sh/library/waterflow:main-actl-2026-06-08
+harbor.astera.sh/library/waterflow:main-actl-2026-06-09
 ```
 
 Once the ACTL catalog alias is available, launch from this checkout with:
@@ -21,7 +21,7 @@ Before the alias lands, use the full image reference:
 
 ```bash
 actl pod up waterflow --profile single \
-  --image harbor.astera.sh/library/waterflow:main-actl-2026-06-08 \
+  --image harbor.astera.sh/library/waterflow:main-actl-2026-06-09 \
   --pvc-size 100Gi -n diffuse --yes
 ```
 
@@ -55,7 +55,7 @@ To build the ACTL overlay locally:
 docker buildx build --platform linux/amd64 \
   -f Dockerfile.astera \
   --build-arg WATERFLOW_BASE_IMAGE=docker.io/diffuseproject/waterflow:latest@sha256:cfa4d600c88adf5223814e2c1861de85bf6047fe279c0df44f44cb4a8e6c65dc \
-  -t harbor.astera.sh/library/waterflow:main-actl-2026-06-08 \
+  -t harbor.astera.sh/library/waterflow:main-actl-2026-06-09 \
   .
 ```
 
