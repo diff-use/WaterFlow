@@ -6,6 +6,11 @@
 
 set -e
 
+# ACTL overlays sync the editable checkout to /home/dev/workspace while the
+# production image keeps the baked source in /app. Let the wrapper select the
+# source tree without changing normal Docker behavior.
+APP_DIR="${WATERFLOW_APP_DIR:-/app}"
+
 # Show help if no arguments
 show_help() {
     cat << EOF
@@ -59,7 +64,7 @@ COMMAND="${1:-}"
 case "$COMMAND" in
     train)
         shift
-        exec python /app/scripts/train.py \
+        exec python "${APP_DIR}/scripts/train.py" \
             --base_pdb_dir "${WATERFLOW_PDB_DIR}" \
             --processed_dir "${WATERFLOW_CACHE_DIR}" \
             --save_dir "${WATERFLOW_CHECKPOINT_DIR}" \
@@ -69,7 +74,7 @@ case "$COMMAND" in
 
     inference)
         shift
-        exec python /app/scripts/inference.py \
+        exec python "${APP_DIR}/scripts/inference.py" \
             --base_pdb_dir "${WATERFLOW_PDB_DIR}" \
             --processed_dir "${WATERFLOW_CACHE_DIR}" \
             --output_dir "${WATERFLOW_OUTPUT_DIR}" \
@@ -78,7 +83,7 @@ case "$COMMAND" in
 
     generate-esm)
         shift
-        exec python /app/scripts/generate_esm_embeddings.py \
+        exec python "${APP_DIR}/scripts/generate_esm_embeddings.py" \
             --base_pdb_dir "${WATERFLOW_PDB_DIR}" \
             --cache_dir "${WATERFLOW_CACHE_DIR}" \
             "$@"
