@@ -2,7 +2,7 @@ name: Astera ACTL Docker image
 
 on:
   push:
-    branches: [main]
+    branches: [main, actl-overlay-build-2026-06-09]
     paths:
       - Dockerfile.astera
       - .github/workflows/astera-docker.yml
