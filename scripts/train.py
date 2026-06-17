@@ -22,6 +22,7 @@ import argparse
 import json
 from datetime import datetime
 from pathlib import Path
+from typing import cast
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -285,7 +286,7 @@ def parse_args():
     p.add_argument("--save_every", type=int, default=10)
     p.add_argument("--eval_every", type=int, default=5)
     p.add_argument("--n_eval_samples", type=int, default=3)
-    p.add_argument("--rk4_steps", type=int, default=100)
+    p.add_argument("--num_steps", type=int, default=100)
     p.add_argument(
         "--save_gifs", action="store_true", help="Save trajectory GIFs during eval"
     )
@@ -562,7 +563,7 @@ def run_eval_sampling(
 
         out = flow_matcher.rk4_integrate(
             graph,
-            num_steps=args.rk4_steps,
+            num_steps=args.num_steps,
             use_sc=args.use_self_cond,
             device=device,
             return_trajectory=True,
@@ -659,9 +660,10 @@ def train_epoch(
             accumulation_steps=args.grad_accum_steps,
         )
 
-        if metrics["per_sample_info"] is not None:
-            per_sample_losses = metrics["per_sample_info"]["losses"].cpu()
-            num_graphs = metrics["per_sample_info"]["num_graphs"]
+        per_sample_info = metrics["per_sample_info"]
+        if per_sample_info is not None and isinstance(per_sample_info, dict):
+            per_sample_losses = per_sample_info["losses"].cpu()
+            num_graphs = per_sample_info["num_graphs"]
 
             if hasattr(batch, "pdb_id"):
                 pdb_ids = (
@@ -677,8 +679,8 @@ def train_epoch(
                 logger.warning("=" * 60)
 
         processed_batches += 1
-        total_loss += metrics["loss"]
-        total_rmsd += metrics["rmsd"]
+        total_loss += cast(float, metrics["loss"])
+        total_rmsd += cast(float, metrics["rmsd"])
 
         # Step optimizer every grad_accum_steps
         if (step + 1) % args.grad_accum_steps == 0:
