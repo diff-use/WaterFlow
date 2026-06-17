@@ -11,6 +11,7 @@ import torch
 import torch.nn.functional as F
 from torch_geometric.data import Data, HeteroData
 
+from src.constants import NUM_RBF
 from src.flow import (
     build_knn_edges,
     FlowMatcher,
@@ -18,6 +19,7 @@ from src.flow import (
     ProteinWaterUpdate,
 )
 from src.gvp_encoder import GVPEncoder, make_gvp_encoder_data, ProteinGVPEncoder
+from src.utils import compute_edge_features
 
 
 @pytest.fixture
@@ -39,6 +41,14 @@ def simple_hetero_data(device):
     data["protein", "pp", "protein"].edge_index = torch.tensor(
         [[0, 1, 2, 3], [1, 2, 3, 4]], dtype=torch.long, device=device
     )
+    edge_unit_vectors, edge_rbf = compute_edge_features(
+        data["protein"].pos,
+        data["protein", "pp", "protein"].edge_index,
+        num_gaussians=NUM_RBF,
+        cutoff=8.0,
+    )
+    data["protein", "pp", "protein"].edge_unit_vectors = edge_unit_vectors
+    data["protein", "pp", "protein"].edge_rbf = edge_rbf
 
     return data
 
@@ -69,6 +79,14 @@ def batched_hetero_data(device):
     data["protein", "pp", "protein"].edge_index = torch.tensor(
         [[0, 1, 10, 11], [1, 2, 11, 12]], dtype=torch.long, device=device
     )
+    edge_unit_vectors, edge_rbf = compute_edge_features(
+        data["protein"].pos,
+        data["protein", "pp", "protein"].edge_index,
+        num_gaussians=NUM_RBF,
+        cutoff=8.0,
+    )
+    data["protein", "pp", "protein"].edge_unit_vectors = edge_unit_vectors
+    data["protein", "pp", "protein"].edge_rbf = edge_rbf
 
     return data
 
@@ -219,11 +237,58 @@ class TestProteinWaterUpdate:
     def test_build_edges(self, simple_hetero_data):
         updater = ProteinWaterUpdate(hidden_dims=(128, 16), layers=1)
 
-        edge_dict = updater.build_edges(simple_hetero_data, k_pw=4, k_ww=3)
+        edge_dict = updater.build_edges(simple_hetero_data)
 
         assert ("protein", "pw", "water") in edge_dict
         assert ("water", "ww", "water") in edge_dict
+        assert ("water", "wp", "protein") in edge_dict
         assert edge_dict[("protein", "pw", "water")].shape[0] == 2
+
+    def test_build_edges_preserves_direction(self, device):
+        data = HeteroData()
+        data["protein"].pos = torch.tensor(
+            [[0.0, 0.0, 0.0], [5.0, 0.0, 0.0]],
+            device=device,
+        )
+        data["protein"].x = torch.randn(2, 16, device=device)
+        data["protein"].batch = torch.zeros(2, dtype=torch.long, device=device)
+        data["water"].pos = torch.tensor(
+            [[0.5, 0.0, 0.0], [5.5, 0.0, 0.0]],
+            device=device,
+        )
+        data["water"].x = torch.randn(2, 16, device=device)
+        data["water"].batch = torch.zeros(2, dtype=torch.long, device=device)
+        data["protein", "pp", "protein"].edge_index = torch.tensor(
+            [[0, 1], [1, 0]], dtype=torch.long, device=device
+        )
+        edge_unit_vectors, edge_rbf = compute_edge_features(
+            data["protein"].pos,
+            data["protein", "pp", "protein"].edge_index,
+            num_gaussians=NUM_RBF,
+            cutoff=1.0,
+        )
+        data["protein", "pp", "protein"].edge_unit_vectors = edge_unit_vectors
+        data["protein", "pp", "protein"].edge_rbf = edge_rbf
+
+        updater = ProteinWaterUpdate(hidden_dims=(128, 16), cutoff=1.0, layers=1)
+        edge_dict = updater.build_edges(data)
+
+        pw_edges = set(
+            zip(
+                edge_dict[("protein", "pw", "water")][0].tolist(),
+                edge_dict[("protein", "pw", "water")][1].tolist(),
+            )
+        )
+        wp_edges = set(
+            zip(
+                edge_dict[("water", "wp", "protein")][0].tolist(),
+                edge_dict[("water", "wp", "protein")][1].tolist(),
+            )
+        )
+
+        assert pw_edges == {(0, 0), (1, 1)}
+        assert wp_edges == {(0, 0), (1, 1)}
+        assert edge_dict[("water", "ww", "water")].shape[1] == 0
 
     def test_build_edges_empty_water(self, device):
         data = HeteroData()
@@ -237,6 +302,62 @@ class TestProteinWaterUpdate:
 
         assert edge_dict[("protein", "pw", "water")].shape == (2, 0)
         assert edge_dict[("water", "ww", "water")].shape == (2, 0)
+
+    def test_radius_policy_can_leave_scaled_gaussian_waters_isolated(self, device):
+        data = HeteroData()
+        data["protein"].pos = torch.tensor([[0.0, 0.0, 0.0]], device=device)
+        data["protein"].x = torch.randn(1, 16, device=device)
+        data["protein"].batch = torch.zeros(1, dtype=torch.long, device=device)
+        data["water"].pos = torch.tensor(
+            [[25.0, 0.0, 0.0], [50.0, 0.0, 0.0]],
+            device=device,
+        )
+        data["water"].x = torch.randn(2, 16, device=device)
+        data["water"].batch = torch.zeros(2, dtype=torch.long, device=device)
+        data.dynamic_edge_policy = "radius"
+
+        updater = ProteinWaterUpdate(
+            hidden_dims=(64, 8),
+            layers=1,
+            cutoff=8.0,
+            dynamic_edge_policy="radius",
+        )
+
+        edge_dict = updater.build_edges(data)
+
+        assert edge_dict[("protein", "pw", "water")].shape == (2, 0)
+        assert edge_dict[("water", "wp", "protein")].shape == (2, 0)
+
+    def test_knn_fallback_connects_isolated_scaled_gaussian_waters(self, device):
+        data = HeteroData()
+        data["protein"].pos = torch.tensor(
+            [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]],
+            device=device,
+        )
+        data["protein"].x = torch.randn(2, 16, device=device)
+        data["protein"].batch = torch.zeros(2, dtype=torch.long, device=device)
+        data["water"].pos = torch.tensor(
+            [[25.0, 0.0, 0.0], [50.0, 0.0, 0.0]],
+            device=device,
+        )
+        data["water"].x = torch.randn(2, 16, device=device)
+        data["water"].batch = torch.zeros(2, dtype=torch.long, device=device)
+        data.dynamic_edge_policy = "knn_if_isolated"
+
+        updater = ProteinWaterUpdate(
+            hidden_dims=(64, 8),
+            layers=1,
+            cutoff=8.0,
+            dynamic_edge_policy="radius",
+            knn_fallback_k=1,
+        )
+
+        edge_dict = updater.build_edges(data)
+        pw_edges = edge_dict[("protein", "pw", "water")]
+        wp_edges = edge_dict[("water", "wp", "protein")]
+
+        assert set(pw_edges[1].tolist()) == {0, 1}
+        assert set(wp_edges[0].tolist()) == {0, 1}
 
     def test_forward_shapes(self, simple_hetero_data, device):
         s_h, v_h = 128, 16
@@ -320,6 +441,14 @@ class TestFlowWaterGVP:
         data["protein", "pp", "protein"].edge_index = torch.tensor(
             [[0, 1], [1, 2]], dtype=torch.long, device=device
         )
+        edge_unit_vectors, edge_rbf = compute_edge_features(
+            data["protein"].pos,
+            data["protein", "pp", "protein"].edge_index,
+            num_gaussians=NUM_RBF,
+            cutoff=8.0,
+        )
+        data["protein", "pp", "protein"].edge_unit_vectors = edge_unit_vectors
+        data["protein", "pp", "protein"].edge_rbf = edge_rbf
         # No water nodes
 
         t = torch.tensor([0.5], device=device)
@@ -514,6 +643,14 @@ class TestEdgeCases:
         data["protein", "pp", "protein"].edge_index = torch.tensor(
             [[0, 1], [1, 2]], dtype=torch.long, device=device
         )
+        edge_unit_vectors, edge_rbf = compute_edge_features(
+            data["protein"].pos,
+            data["protein", "pp", "protein"].edge_index,
+            num_gaussians=NUM_RBF,
+            cutoff=8.0,
+        )
+        data["protein", "pp", "protein"].edge_unit_vectors = edge_unit_vectors
+        data["protein", "pp", "protein"].edge_rbf = edge_rbf
 
         t = torch.tensor([0.5], device=device)
         v_pred = model(data, t)
@@ -552,7 +689,7 @@ class TestWaterEdgeConnectivity:
         """Ensure every water has at least one protein-water edge."""
         updater = ProteinWaterUpdate(hidden_dims=(128, 16), layers=1)
 
-        edge_dict = updater.build_edges(simple_hetero_data, k_pw=4, k_ww=3)
+        edge_dict = updater.build_edges(simple_hetero_data)
         pw_edges = edge_dict[("protein", "pw", "water")]
 
         n_water = simple_hetero_data["water"].num_nodes
@@ -567,7 +704,7 @@ class TestWaterEdgeConnectivity:
         """Ensure every water has at least one water-water edge (if multiple waters exist)."""
         updater = ProteinWaterUpdate(hidden_dims=(128, 16), layers=1)
 
-        edge_dict = updater.build_edges(simple_hetero_data, k_pw=4, k_ww=3)
+        edge_dict = updater.build_edges(simple_hetero_data)
         ww_edges = edge_dict[("water", "ww", "water")]
 
         n_water = simple_hetero_data["water"].num_nodes
@@ -579,24 +716,11 @@ class TestWaterEdgeConnectivity:
                 f"Only {len(water_nodes_with_edges)}/{n_water} waters have water-water edges"
             )
 
-    @pytest.mark.xfail(
-        reason=(
-            "build_knn_edges' src/dst argument-order fix changes self-graph (ww) "
-            "edge direction: row 0 now holds discovered neighbors rather than query "
-            "points, so a point that is nobody's k-nearest neighbor can be dropped "
-            "from coverage. The fixed-degree k_pw/k_ww KNN approach is replaced by "
-            "radius-based edges + KNN-fallback-for-isolated-nodes in the next PR "
-            "(edge type flags & dynamic edge construction), which removes the "
-            "k_pw/k_ww params and fixes this guarantee structurally. Remove this "
-            "marker when that PR lands."
-        ),
-        strict=True,
-    )
     def test_batched_waters_have_edges(self, batched_hetero_data):
         """Ensure all waters in a batched graph have edges."""
         updater = ProteinWaterUpdate(hidden_dims=(128, 16), layers=1)
 
-        edge_dict = updater.build_edges(batched_hetero_data, k_pw=4, k_ww=3)
+        edge_dict = updater.build_edges(batched_hetero_data)
         pw_edges = edge_dict[("protein", "pw", "water")]
         ww_edges = edge_dict[("water", "ww", "water")]
 
@@ -627,9 +751,17 @@ class TestWaterEdgeConnectivity:
         data["protein", "pp", "protein"].edge_index = torch.tensor(
             [[0, 1], [1, 2]], dtype=torch.long, device=device
         )
+        edge_unit_vectors, edge_rbf = compute_edge_features(
+            data["protein"].pos,
+            data["protein", "pp", "protein"].edge_index,
+            num_gaussians=NUM_RBF,
+            cutoff=8.0,
+        )
+        data["protein", "pp", "protein"].edge_unit_vectors = edge_unit_vectors
+        data["protein", "pp", "protein"].edge_rbf = edge_rbf
 
         updater = ProteinWaterUpdate(hidden_dims=(128, 16), layers=1)
-        edge_dict = updater.build_edges(data, k_pw=4, k_ww=3)
+        edge_dict = updater.build_edges(data)
 
         pw_edges = edge_dict[("protein", "pw", "water")]
         ww_edges = edge_dict[("water", "ww", "water")]
@@ -641,5 +773,5 @@ class TestWaterEdgeConnectivity:
         water_nodes_with_edges = torch.unique(pw_edges[1])
         assert len(water_nodes_with_edges) == 1, "Single water must have protein edges"
 
-        # Single water should have no water-water edges (since k_ww excludes self-loops)
+        # Single water should have no water-water edges because self-loops are disabled
         assert ww_edges.shape[1] == 0, "Single water should have no water-water edges"

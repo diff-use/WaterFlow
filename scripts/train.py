@@ -105,6 +105,18 @@ def parse_args():
         help="Include symmetry mate atoms as protein nodes",
     )
     p.add_argument(
+        "--cutoff",
+        type=float,
+        default=8.0,
+        help="Distance cutoff in Angstroms used for PP preprocessing and dynamic water edges.",
+    )
+    p.add_argument(
+        "--max_neighbors",
+        type=int,
+        default=256,
+        help="Maximum neighbors per node for radius-based graph construction.",
+    )
+    p.add_argument(
         "--duplicate_single_sample",
         type=int,
         default=1,
@@ -209,8 +221,29 @@ def parse_args():
         default=0.1,
         help="Dropout rate for GVP layers (default: 0.1)",
     )
-    p.add_argument("--k_pw", type=int, default=16)
-    p.add_argument("--k_ww", type=int, default=16)
+    p.add_argument(
+        "--disable_ww",
+        action="store_true",
+        help="Disable water-water (WW) message passing edges",
+    )
+    p.add_argument(
+        "--disable_wp",
+        action="store_true",
+        help="Disable water-protein (WP) message passing edges",
+    )
+    p.add_argument(
+        "--dynamic_edge_policy",
+        type=str,
+        default="radius",
+        choices=["radius", "knn_if_isolated"],
+        help="Dynamic water-edge policy. 'knn_if_isolated' adds KNN fallback edges for waters with no radius-based protein context.",
+    )
+    p.add_argument(
+        "--knn_fallback_k",
+        type=int,
+        default=8,
+        help="KNN fallback degree for isolated waters when enabled.",
+    )
 
     # optional cached-embedding override
     p.add_argument(
@@ -305,6 +338,8 @@ def parse_args():
     args = p.parse_args()
     if args.encoder_type == "gvp" and args.embedding_dim is not None:
         p.error("--embedding_dim is only valid for cached encoders: slae or esm")
+    if args.knn_fallback_k < 1:
+        p.error("--knn_fallback_k must be >= 1")
     return args
 
 
@@ -349,6 +384,7 @@ def _build_dataset_config(args: argparse.Namespace) -> tuple[dict, dict, dict]:
     dataset_kwargs = {
         "encoder_type": args.encoder_type,
         "base_pdb_dir": args.base_pdb_dir,
+        "cutoff": args.cutoff,
         "geometry_cache_name": args.geometry_cache_name,
         "include_mates": args.include_mates,
         **quality_kwargs,
@@ -533,11 +569,15 @@ def build_model(
         encoder=encoder,
         hidden_dims=(args.hidden_s, args.hidden_v),
         layers=args.flow_layers,
+        cutoff=args.cutoff,
+        max_neighbors=args.max_neighbors,
         n_message_gvps=args.n_message_gvps,
         n_update_gvps=args.n_update_gvps,
         drop_rate=args.drop_rate,
-        k_pw=args.k_pw,
-        k_ww=args.k_ww,
+        disable_ww=args.disable_ww,
+        disable_wp=args.disable_wp,
+        dynamic_edge_policy=args.dynamic_edge_policy,
+        knn_fallback_k=args.knn_fallback_k,
     ).to(device)
 
     return model
@@ -1007,6 +1047,7 @@ def main():
         p_distort=args.p_distort,
         t_distort=args.t_distort,
         sigma_distort=args.sigma_distort,
+        dynamic_edge_policy=args.dynamic_edge_policy,
     )
 
     optimizer = AdamW(

@@ -98,3 +98,15 @@ ELEMENT_VOCAB = [
     "BR",
 ]
 ELEM_IDX = {e: i for i, e in enumerate(ELEMENT_VOCAB)}
+
+
+def get_active_edge_types(
+    disable_ww: bool = False, disable_wp: bool = False
+) -> list[tuple[str, str, str]]:
+    """Return the list of active edge types based on disable flags."""
+    etypes = [EDGE_PW, EDGE_PP]  # always active
+    if not disable_ww:
+        etypes.append(EDGE_WW)
+    if not disable_wp:
+        etypes.append(EDGE_WP)
+    return etypes

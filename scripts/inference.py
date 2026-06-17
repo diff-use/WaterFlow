@@ -211,6 +211,7 @@ def load_config(run_dir: Path) -> dict:
 def _extract_dataset_filter_config(config: dict) -> dict:
     """Extract dataset filter params from training config with fallback to defaults."""
     return {
+        "cutoff": config.get("cutoff", 8.0),
         "max_com_dist": config.get("max_com_dist", 25.0),
         "max_clash_fraction": config.get("max_clash_fraction", 0.05),
         "clash_dist": config.get("clash_dist", 2.0),
@@ -270,11 +271,15 @@ def build_model_from_config(config: dict, device: torch.device) -> nn.Module:
         hidden_dims=(config.get("hidden_s") or 256, config.get("hidden_v") or 64),
         edge_scalar_dim=config.get("edge_scalar_dim") or NUM_RBF,
         layers=config.get("flow_layers") or 3,
+        cutoff=config.get("cutoff", 8.0),
+        max_neighbors=config.get("max_neighbors", 256),
         drop_rate=config.get("drop_rate", 0.1),
         n_message_gvps=config.get("n_message_gvps", 2),
         n_update_gvps=config.get("n_update_gvps", 2),
-        k_pw=config.get("k_pw") or 16,
-        k_ww=config.get("k_ww") or 16,
+        disable_ww=config.get("disable_ww", False),
+        disable_wp=config.get("disable_wp", False),
+        dynamic_edge_policy=config.get("dynamic_edge_policy", "radius"),
+        knn_fallback_k=config.get("knn_fallback_k", 8),
     ).to(device)
 
     return model
@@ -431,6 +436,7 @@ def main():
     flow_matcher = FlowMatcher(
         model=model,
         p_self_cond=config.get("p_self_cond", 0.5),
+        dynamic_edge_policy=config.get("dynamic_edge_policy", "radius"),
     )
 
     # Load dataset

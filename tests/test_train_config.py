@@ -121,13 +121,15 @@ def test_inference_build_model_from_config_uses_embedding_dim(device):
         "flow_layers": 2,
         "node_scalar_in": 16,
         "embedding_dim": 128,
-        "k_pw": 8,
-        "k_ww": 8,
+        "cutoff": 6.5,
+        "max_neighbors": 128,
     }
 
     model = build_model_from_config(config, device)
 
     assert model.encoder.output_dims == (128, 0)
+    assert model.cutoff == pytest.approx(6.5)
+    assert model.max_neighbors == 128
 
 
 def test_parse_args_rejects_embedding_dim_for_gvp(monkeypatch):
@@ -171,6 +173,7 @@ def test_dataset_defaults_match_train_defaults(monkeypatch):
     assert args.min_water_residue_ratio == dataset_defaults["min_water_residue_ratio"]
     assert args.max_protein_dist == dataset_defaults["max_protein_dist"]
     assert args.max_com_dist == dataset_defaults["max_com_dist"]
+    assert args.cutoff == dataset_defaults["cutoff"]
 
 
 def test_inference_extracts_filter_config_from_training_config():

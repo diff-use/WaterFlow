@@ -14,8 +14,10 @@ import torch
 from torch_cluster import radius_graph
 from torch_geometric.data import Data, HeteroData
 
+from src.constants import NUM_RBF
 from src.encoder_base import build_encoder, CachedEmbeddingEncoder, get_encoder_class
 from src.gvp_encoder import GVPEncoder, ProteinGVPEncoder
+from src.utils import compute_edge_features
 
 
 # ============== Fixtures ==============
@@ -58,6 +60,14 @@ def sample_hetero_data(device):
     # Protein-protein edges
     pp_edges = radius_graph(data["protein"].pos, r=8.0, loop=False)
     data["protein", "pp", "protein"].edge_index = pp_edges
+    edge_unit_vectors, edge_rbf = compute_edge_features(
+        data["protein"].pos,
+        pp_edges,
+        num_gaussians=NUM_RBF,
+        cutoff=8.0,
+    )
+    data["protein", "pp", "protein"].edge_unit_vectors = edge_unit_vectors
+    data["protein", "pp", "protein"].edge_rbf = edge_rbf
 
     return data
 
