@@ -656,7 +656,7 @@ def filter_waters_by_quality(
 
 class ProteinWaterDataset(Dataset):
     """
-    Dataset for protein crystal contact prediction.
+    Dataset for predicting water positions in protein crystal structures.
 
     Returns HeteroData with:
     - 'protein' node type: ASU protein atoms + optionally symmetry mates
@@ -991,21 +991,13 @@ class ProteinWaterDataset(Dataset):
         # both -> UNK at the same position). Apply the same renaming here so the
         # residue count and indices align with the stored ESM embeddings.
         sanitized_for_idx = protein_atoms.copy()
-        for _i in range(len(sanitized_for_idx)):
-            _aa1 = THREE_TO_ONE.get(sanitized_for_idx.res_name[_i], "X")
-            sanitized_for_idx.res_name[_i] = ONE_TO_THREE.get(_aa1, "UNK")
+        for i in range(len(sanitized_for_idx)):
+            aa1 = THREE_TO_ONE.get(sanitized_for_idx.res_name[i], "X")
+            sanitized_for_idx.res_name[i] = ONE_TO_THREE.get(aa1, "UNK")
         res_starts = bts.get_residue_starts(sanitized_for_idx)
         num_residues = len(res_starts)
-        protein_res_idx_np = np.zeros(len(protein_atoms), dtype=np.int64)
-        for res_i in range(len(res_starts)):
-            start = res_starts[res_i]
-            end = (
-                res_starts[res_i + 1]
-                if res_i + 1 < len(res_starts)
-                else len(protein_atoms)
-            )
-            protein_res_idx_np[start:end] = res_i
-        protein_res_idx = torch.tensor(protein_res_idx_np, dtype=torch.long)
+        atom_res_idx = np.searchsorted(res_starts, np.arange(len(protein_atoms)), side="right") - 1
+        protein_res_idx = torch.from_numpy(atom_res_idx.astype(np.int64))
         num_waters = len(water_atoms)
         ratio_valid, ratio_reason = check_water_residue_ratio(
             num_waters,
