@@ -16,6 +16,8 @@ from src.flow import (
     FlowMatcher,
     FlowWaterGVP,
     ProteinWaterUpdate,
+    sample_waters_scaled_gaussian,
+    sample_waters_uniform_ball,
 )
 from src.gvp_encoder import GVPEncoder, make_gvp_encoder_data, ProteinGVPEncoder
 
@@ -400,6 +402,23 @@ class TestFlowMatcher:
         assert "rmsd" in result
         assert result["loss"] >= 0
 
+    def test_scaled_gaussian_auto_policy_enables_knn_fallback(
+        self, device, gvp_encoder
+    ):
+        model = FlowWaterGVP(
+            encoder=gvp_encoder,
+            hidden_dims=(64, 8),
+            layers=1,
+        ).to(device)
+
+        flow_matcher = FlowMatcher(
+            model,
+            sampling_strategy="scaled_gaussian",
+            dynamic_edge_policy="auto",
+        )
+
+        assert flow_matcher._effective_dynamic_edge_policy() == "knn_if_isolated"
+
     @pytest.mark.slow
     def test_euler_integrate(self, flow_matcher, simple_hetero_data, device):
         results = flow_matcher.euler_integrate(
@@ -450,6 +469,108 @@ class TestFlowMatcher:
 
         n_water = simple_hetero_data["water"].num_nodes
         assert water_pred.shape == (n_water, 3)
+
+
+# ============== Tests for water sampling strategies ==============
+
+
+@pytest.mark.unit
+class TestUniformBallSampling:
+    def test_shapes_and_counts(self, device):
+        torch.manual_seed(0)
+        protein_pos = torch.tensor(
+            [[0.0, 0.0, 0.0], [0.5, 0.0, 0.0],
+             [0.0, 0.0, 0.0], [0.5, 0.0, 0.0]],
+            device=device,
+        )
+        batch_p = torch.tensor([0, 0, 1, 1], dtype=torch.long, device=device)
+        num_waters = torch.tensor([4, 3], dtype=torch.long, device=device)
+
+        pos, batch_w = sample_waters_uniform_ball(
+            protein_pos=protein_pos, batch_p=batch_p,
+            num_waters=num_waters, cutoff=2.0, device=device,
+        )
+
+        assert pos.shape == (7, 3)
+        assert batch_w.shape == (7,)
+        assert (batch_w == 0).sum().item() == 4
+        assert (batch_w == 1).sum().item() == 3
+
+    def test_all_within_cutoff(self, device):
+        torch.manual_seed(42)
+        protein_pos = torch.randn(20, 3, device=device) * 50
+        batch_p = torch.cat([torch.zeros(10), torch.ones(10)]).long().to(device)
+        num_waters = torch.tensor([50, 50], dtype=torch.long, device=device)
+        cutoff = 8.0
+
+        pos, batch_w = sample_waters_uniform_ball(
+            protein_pos=protein_pos, batch_p=batch_p,
+            num_waters=num_waters, cutoff=cutoff, device=device,
+        )
+
+        for g in range(2):
+            g_waters = pos[batch_w == g]
+            g_protein = protein_pos[batch_p == g]
+            dists = torch.cdist(g_waters, g_protein)
+            assert dists.min(dim=1).values.max().item() <= cutoff + 1e-5
+
+    def test_empty_waters(self, device):
+        protein_pos = torch.randn(5, 3, device=device)
+        batch_p = torch.zeros(5, dtype=torch.long, device=device)
+        num_waters = torch.tensor([0], dtype=torch.long, device=device)
+
+        pos, batch_w = sample_waters_uniform_ball(
+            protein_pos=protein_pos, batch_p=batch_p,
+            num_waters=num_waters, cutoff=8.0, device=device,
+        )
+
+        assert pos.shape == (0, 3)
+        assert batch_w.shape == (0,)
+
+    def test_large_spread_protein_succeeds(self, device):
+        """The scenario that crashes truncated Gaussian (sigma~50) works here."""
+        torch.manual_seed(0)
+        protein_pos = torch.randn(500, 3, device=device) * 50
+        batch_p = torch.zeros(500, dtype=torch.long, device=device)
+        num_waters = torch.tensor([301], dtype=torch.long, device=device)
+
+        pos, batch_w = sample_waters_uniform_ball(
+            protein_pos=protein_pos, batch_p=batch_p,
+            num_waters=num_waters, cutoff=8.0, device=device,
+        )
+
+        assert pos.shape == (301, 3)
+        assert batch_w.shape == (301,)
+
+
+@pytest.mark.unit
+class TestScaledGaussianSampling:
+    def test_shapes_and_counts(self, device):
+        torch.manual_seed(0)
+        num_waters = torch.tensor([4, 3], dtype=torch.long, device=device)
+        sigma = torch.tensor([1.0, 2.0], device=device)
+
+        pos, batch_w = sample_waters_scaled_gaussian(
+            num_waters=num_waters, sigma_per_graph=sigma,
+            device=device, dtype=torch.float32,
+        )
+
+        assert pos.shape == (7, 3)
+        assert batch_w.shape == (7,)
+        assert (batch_w == 0).sum().item() == 4
+        assert (batch_w == 1).sum().item() == 3
+
+    def test_empty_waters(self, device):
+        num_waters = torch.tensor([0], dtype=torch.long, device=device)
+        sigma = torch.tensor([1.0], device=device)
+
+        pos, batch_w = sample_waters_scaled_gaussian(
+            num_waters=num_waters, sigma_per_graph=sigma,
+            device=device, dtype=torch.float32,
+        )
+
+        assert pos.shape == (0, 3)
+        assert batch_w.shape == (0,)
 
 
 # ============== Tests for distortion ==============
