@@ -479,16 +479,18 @@ class TestUniformBallSampling:
     def test_shapes_and_counts(self, device):
         torch.manual_seed(0)
         protein_pos = torch.tensor(
-            [[0.0, 0.0, 0.0], [0.5, 0.0, 0.0],
-             [0.0, 0.0, 0.0], [0.5, 0.0, 0.0]],
+            [[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [0.0, 0.0, 0.0], [0.5, 0.0, 0.0]],
             device=device,
         )
         batch_p = torch.tensor([0, 0, 1, 1], dtype=torch.long, device=device)
         num_waters = torch.tensor([4, 3], dtype=torch.long, device=device)
 
         pos, batch_w = sample_waters_uniform_ball(
-            protein_pos=protein_pos, batch_p=batch_p,
-            num_waters=num_waters, cutoff=2.0, device=device,
+            protein_pos=protein_pos,
+            batch_p=batch_p,
+            num_waters=num_waters,
+            cutoff=2.0,
+            device=device,
         )
 
         assert pos.shape == (7, 3)
@@ -504,8 +506,11 @@ class TestUniformBallSampling:
         cutoff = 8.0
 
         pos, batch_w = sample_waters_uniform_ball(
-            protein_pos=protein_pos, batch_p=batch_p,
-            num_waters=num_waters, cutoff=cutoff, device=device,
+            protein_pos=protein_pos,
+            batch_p=batch_p,
+            num_waters=num_waters,
+            cutoff=cutoff,
+            device=device,
         )
 
         for g in range(2):
@@ -520,8 +525,11 @@ class TestUniformBallSampling:
         num_waters = torch.tensor([0], dtype=torch.long, device=device)
 
         pos, batch_w = sample_waters_uniform_ball(
-            protein_pos=protein_pos, batch_p=batch_p,
-            num_waters=num_waters, cutoff=8.0, device=device,
+            protein_pos=protein_pos,
+            batch_p=batch_p,
+            num_waters=num_waters,
+            cutoff=8.0,
+            device=device,
         )
 
         assert pos.shape == (0, 3)
@@ -535,8 +543,11 @@ class TestUniformBallSampling:
         num_waters = torch.tensor([301], dtype=torch.long, device=device)
 
         pos, batch_w = sample_waters_uniform_ball(
-            protein_pos=protein_pos, batch_p=batch_p,
-            num_waters=num_waters, cutoff=8.0, device=device,
+            protein_pos=protein_pos,
+            batch_p=batch_p,
+            num_waters=num_waters,
+            cutoff=8.0,
+            device=device,
         )
 
         assert pos.shape == (301, 3)
@@ -559,10 +570,12 @@ class TestUniformBallSampling:
         # batch two copies: graph 0 gets 50 waters, graph 1 gets 30
         protein_pos = torch.tensor(protein_pos_np, dtype=torch.float32, device=device)
         protein_pos_both = torch.cat([protein_pos, protein_pos], dim=0)
-        batch_p = torch.cat([
-            torch.zeros(n_atoms, dtype=torch.long, device=device),
-            torch.ones(n_atoms, dtype=torch.long, device=device),
-        ])
+        batch_p = torch.cat(
+            [
+                torch.zeros(n_atoms, dtype=torch.long, device=device),
+                torch.ones(n_atoms, dtype=torch.long, device=device),
+            ]
+        )
         num_waters = torch.tensor([50, 30], dtype=torch.long, device=device)
         cutoff = 8.0
 
@@ -582,10 +595,10 @@ class TestUniformBallSampling:
 
         # every water must be within cutoff of at least one protein atom in its graph
         for g, n_w in enumerate(num_waters.tolist()):
-            g_waters = pos[batch_w == g]                    # (n_w, 3)
-            g_protein = protein_pos_both[batch_p == g]      # (n_atoms, 3)
-            dists = torch.cdist(g_waters, g_protein)        # (n_w, n_atoms)
-            min_dists = dists.min(dim=1).values             # (n_w,)
+            g_waters = pos[batch_w == g]  # (n_w, 3)
+            g_protein = protein_pos_both[batch_p == g]  # (n_atoms, 3)
+            dists = torch.cdist(g_waters, g_protein)  # (n_w, n_atoms)
+            min_dists = dists.min(dim=1).values  # (n_w,)
             assert min_dists.max().item() <= cutoff + 1e-4, (
                 f"Graph {g}: water too far from protein "
                 f"(max dist {min_dists.max().item():.4f} > {cutoff})"
@@ -600,8 +613,10 @@ class TestScaledGaussianSampling:
         sigma = torch.tensor([1.0, 2.0], device=device)
 
         pos, batch_w = sample_waters_scaled_gaussian(
-            num_waters=num_waters, sigma_per_graph=sigma,
-            device=device, dtype=torch.float32,
+            num_waters=num_waters,
+            sigma_per_graph=sigma,
+            device=device,
+            dtype=torch.float32,
         )
 
         assert pos.shape == (7, 3)
@@ -614,8 +629,10 @@ class TestScaledGaussianSampling:
         sigma = torch.tensor([1.0], device=device)
 
         pos, batch_w = sample_waters_scaled_gaussian(
-            num_waters=num_waters, sigma_per_graph=sigma,
-            device=device, dtype=torch.float32,
+            num_waters=num_waters,
+            sigma_per_graph=sigma,
+            device=device,
+            dtype=torch.float32,
         )
 
         assert pos.shape == (0, 3)

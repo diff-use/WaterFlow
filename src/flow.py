@@ -90,9 +90,9 @@ def sample_waters_uniform_ball(
     direction = direction / direction.norm(dim=-1, keepdim=True).clamp(min=1e-12)
 
     # uniform radius inside the ball: r = R * U^(1/3)
-    r = cutoff * torch.rand(total_waters, 1, device=device, dtype=protein_pos.dtype).pow(
-        1.0 / 3.0
-    )
+    r = cutoff * torch.rand(
+        total_waters, 1, device=device, dtype=protein_pos.dtype
+    ).pow(1.0 / 3.0)
 
     return anchors + r * direction, batch_w
 
