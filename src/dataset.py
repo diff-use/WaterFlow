@@ -996,7 +996,9 @@ class ProteinWaterDataset(Dataset):
             sanitized_for_idx.res_name[i] = ONE_TO_THREE.get(aa1, "UNK")
         res_starts = bts.get_residue_starts(sanitized_for_idx)
         num_residues = len(res_starts)
-        atom_res_idx = np.searchsorted(res_starts, np.arange(len(protein_atoms)), side="right") - 1
+        atom_res_idx = (
+            np.searchsorted(res_starts, np.arange(len(protein_atoms)), side="right") - 1
+        )
         protein_res_idx = torch.from_numpy(atom_res_idx.astype(np.int64))
         num_waters = len(water_atoms)
         ratio_valid, ratio_reason = check_water_residue_ratio(
