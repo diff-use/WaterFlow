@@ -28,7 +28,6 @@ import torch
 
 from src.constants import ELEM_IDX, ELEMENT_VOCAB
 from src.dataset import (
-    _load_torch_cache,
     _make_undirected,
     _pad_atom_embeddings_for_mates,
     apply_threshold_filter,
