@@ -257,16 +257,9 @@ def parse_args():
     )
     p.add_argument(
         "--cache_load_mmap",
-        dest="cache_load_mmap",
         action="store_true",
-        default=True,
-        help="Use mmap-backed torch.load for dataset cache files when supported (default: True)",
-    )
-    p.add_argument(
-        "--no_cache_load_mmap",
-        dest="cache_load_mmap",
-        action="store_false",
-        help="Disable mmap-backed cache loading and use regular torch.load",
+        default=False,
+        help="Use mmap-backed torch.load for dataset cache files when supported",
     )
 
     # scheduler

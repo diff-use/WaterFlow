@@ -698,7 +698,7 @@ class ProteinWaterDataset(Dataset):
         filter_by_edia: bool = True,
         filter_by_bfactor: bool = True,
         sample_cache_size: int = 0,
-        cache_load_mmap: bool = True,
+        cache_load_mmap: bool = False,
     ):
         """
         Args:
