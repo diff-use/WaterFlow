@@ -12,6 +12,8 @@ Organized by category to match utils.py structure:
 All test cases created with assistance from Claude Code and refined.
 """
 
+from pathlib import Path
+
 import matplotlib
 import numpy as np
 import pytest
@@ -30,12 +32,14 @@ from src.utils import (
     compute_rmsd,
     normalize_ins_code,
     ot_coupling,
+    parse_split_file,
     # Visualization
     plot_3d_frame,
     # Feature encoding
     rbf,
     # Metrics
     recall_precision,
+    resolve_structure_path,
     save_protein_plot,
 )
 
@@ -129,6 +133,58 @@ class TestInsertionCodeNormalization:
     def test_normalize_valid_code(self):
         assert normalize_ins_code("A") == "A"
         assert normalize_ins_code(" B ") == "B"
+
+
+@pytest.mark.unit
+class TestStructurePathResolution:
+    """Tests for lazy CIF/PDB path resolution helpers."""
+
+    @staticmethod
+    def _write_structure(base_dir: Path, pdb_id: str, suffixes: list[str]) -> None:
+        structure_dir = base_dir / pdb_id
+        structure_dir.mkdir(parents=True, exist_ok=True)
+        for suffix in suffixes:
+            (structure_dir / f"{pdb_id}_final{suffix}").write_text("")
+
+    def test_resolve_structure_path_prefers_existing_cif(self, tmp_path):
+        base_dir = tmp_path / "pdbs"
+        self._write_structure(base_dir, "abcd", [".cif", ".pdb"])
+
+        resolved = resolve_structure_path(base_dir / "abcd" / "abcd_final.cif")
+
+        assert resolved == base_dir / "abcd" / "abcd_final.cif"
+
+    def test_resolve_structure_path_falls_back_to_pdb(self, tmp_path):
+        base_dir = tmp_path / "pdbs"
+        self._write_structure(base_dir, "wxyz", [".pdb"])
+
+        resolved = resolve_structure_path(base_dir / "wxyz" / "wxyz_final.cif")
+
+        assert resolved == base_dir / "wxyz" / "wxyz_final.pdb"
+
+    def test_resolve_structure_path_returns_none_when_missing(self, tmp_path):
+        resolved = resolve_structure_path(tmp_path / "missing" / "missing_final.cif")
+
+        assert resolved is None
+
+    def test_parse_split_file_does_not_probe_filesystem(self, tmp_path, monkeypatch):
+        base_dir = tmp_path / "pdbs"
+        self._write_structure(base_dir, "scanfree", [".pdb"])
+
+        split_file = tmp_path / "split.txt"
+        split_file.write_text("scanfree_final\n")
+
+        def fail_exists(self):
+            raise AssertionError(
+                "Path.exists should not be called during split parsing"
+            )
+
+        monkeypatch.setattr(Path, "exists", fail_exists)
+
+        entries = parse_split_file(split_file, base_dir)
+
+        assert len(entries) == 1
+        assert entries[0]["pdb_path"] == (base_dir / "scanfree" / "scanfree_final.cif")
 
 
 @pytest.mark.unit

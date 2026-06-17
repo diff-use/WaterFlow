@@ -20,6 +20,7 @@ All test cases created with assistance from Claude Code.
 """
 
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -507,6 +508,45 @@ class TestParseAsuWithBiotite:
 
 
 @pytest.mark.integration
+class TestCIFParsing:
+    """Tests for CIF parsing with biotite."""
+
+    def test_cif_parse_returns_protein_and_water(self, cif_6eey):
+        """Should return protein and water atom arrays from CIF."""
+        protein_atoms, water_atoms = parse_asu_with_biotite(cif_6eey)
+
+        assert protein_atoms is not None
+        assert water_atoms is not None
+        assert len(protein_atoms) > 0
+
+    def test_cif_hydrogen_removed(self, cif_6eey):
+        """Hydrogens should be removed from CIF-parsed arrays."""
+        protein_atoms, water_atoms = parse_asu_with_biotite(cif_6eey)
+
+        protein_elements = set(protein_atoms.element)
+        water_elements = set(water_atoms.element) if len(water_atoms) > 0 else set()
+
+        assert "H" not in protein_elements
+        assert "H" not in water_elements
+
+    def test_cif_water_residue_names(self, cif_6eey):
+        """Water atoms from CIF should have HOH or WAT residue names."""
+        _, water_atoms = parse_asu_with_biotite(cif_6eey)
+
+        if len(water_atoms) > 0:
+            water_res_names = set(water_atoms.res_name)
+            assert water_res_names.issubset({"HOH", "WAT"})
+
+    def test_cif_matches_pdb(self, pdb_6eey, cif_6eey):
+        """CIF and PDB parsing of the same structure should produce matching atom counts."""
+        pdb_protein, pdb_water = parse_asu_with_biotite(pdb_6eey)
+        cif_protein, cif_water = parse_asu_with_biotite(cif_6eey)
+
+        assert len(cif_protein) == len(pdb_protein)
+        assert len(cif_water) == len(pdb_water)
+
+
+@pytest.mark.integration
 class TestGetCrystalContactsPymol:
     """Tests for PyMOL crystal contact detection."""
 
@@ -811,6 +851,13 @@ class TestGetDataloader:
 class TestPdbListParsing:
     """Tests for PDB list file parsing."""
 
+    @staticmethod
+    def _write_structure(base_dir: Path, pdb_id: str, suffixes: list[str]) -> None:
+        structure_dir = base_dir / pdb_id
+        structure_dir.mkdir(parents=True, exist_ok=True)
+        for suffix in suffixes:
+            (structure_dir / f"{pdb_id}_final{suffix}").write_text("")
+
     def test_chain_specific_format_rejected(self, tmp_path, pdb_base_dir):
         """Chain-specific format should be rejected."""
         list_file = tmp_path / "list.txt"
@@ -867,6 +914,104 @@ class TestPdbListParsing:
         )
 
         assert len(dataset.entries) == 1
+
+    def test_prefers_cif_when_both_formats_exist(self, tmp_path):
+        """Split parsing should store the preferred CIF path."""
+        base_dir = tmp_path / "pdbs"
+        self._write_structure(base_dir, "abcd", [".cif", ".pdb"])
+
+        list_file = tmp_path / "list.txt"
+        list_file.write_text("abcd_final\n")
+
+        dataset = ProteinWaterDataset(
+            pdb_list_file=str(list_file),
+            processed_dir=str(tmp_path / "processed"),
+            base_pdb_dir=str(base_dir),
+            preprocess=False,
+        )
+
+        assert len(dataset.entries) == 1
+        assert dataset.entries[0]["pdb_path"] == (base_dir / "abcd" / "abcd_final.cif")
+        assert dataset.entries[0]["cache_key"] == "abcd_final"
+        assert dataset.entries[0]["embedding_key"] == "abcd_final"
+
+    def test_falls_back_to_pdb_path_when_cif_is_missing(self, tmp_path):
+        """Split parsing should use the PDB path when no CIF file exists."""
+        base_dir = tmp_path / "pdbs"
+        self._write_structure(base_dir, "wxyz", [".pdb"])
+
+        list_file = tmp_path / "list.txt"
+        list_file.write_text("wxyz_final\n")
+
+        dataset = ProteinWaterDataset(
+            pdb_list_file=str(list_file),
+            processed_dir=str(tmp_path / "processed"),
+            base_pdb_dir=str(base_dir),
+            preprocess=False,
+        )
+
+        assert len(dataset.entries) == 1
+        assert dataset.entries[0]["pdb_path"] == (base_dir / "wxyz" / "wxyz_final.pdb")
+
+    def test_only_requested_ids_are_added(self, tmp_path):
+        """Entries should only be created for IDs listed in the split file."""
+        base_dir = tmp_path / "pdbs"
+        self._write_structure(base_dir, "keep1", [".pdb"])
+        self._write_structure(base_dir, "keep2", [".cif"])
+        self._write_structure(base_dir, "ignoreme", [".cif", ".pdb"])
+
+        list_file = tmp_path / "list.txt"
+        list_file.write_text("keep1_final\nkeep2_final\n")
+
+        dataset = ProteinWaterDataset(
+            pdb_list_file=str(list_file),
+            processed_dir=str(tmp_path / "processed"),
+            base_pdb_dir=str(base_dir),
+            preprocess=False,
+        )
+
+        assert [entry["pdb_id"] for entry in dataset.entries] == ["keep1", "keep2"]
+        assert dataset.entries[0]["pdb_path"] == (
+            base_dir / "keep1" / "keep1_final.pdb"
+        )
+        assert dataset.entries[1]["pdb_path"] == (
+            base_dir / "keep2" / "keep2_final.cif"
+        )
+
+    def test_parse_does_not_probe_filesystem(self, tmp_path, monkeypatch):
+        """Split parsing should avoid base-tree scans and only probe requested IDs."""
+        base_dir = tmp_path / "pdbs"
+        self._write_structure(base_dir, "scanfree", [".cif"])
+
+        list_file = tmp_path / "list.txt"
+        list_file.write_text("scanfree_final\n")
+        isfile_calls = []
+
+        def fail_scandir(*args, **kwargs):
+            raise AssertionError("os.scandir should not be called during split parsing")
+
+        real_isfile = os.path.isfile
+
+        def track_isfile(path):
+            isfile_calls.append(Path(path))
+            return real_isfile(path)
+
+        monkeypatch.setattr("src.dataset.os.scandir", fail_scandir)
+        monkeypatch.setattr("src.dataset.os.path.isfile", track_isfile)
+
+        dataset = ProteinWaterDataset(
+            pdb_list_file=str(list_file),
+            processed_dir=str(tmp_path / "processed"),
+            base_pdb_dir=str(base_dir),
+            preprocess=False,
+        )
+
+        assert len(dataset.entries) == 1
+        assert len(isfile_calls) == 1
+        assert isfile_calls[0] == base_dir / "scanfree" / "scanfree_final.cif"
+        assert dataset.entries[0]["pdb_path"] == (
+            base_dir / "scanfree" / "scanfree_final.cif"
+        )
 
 
 @pytest.mark.unit

@@ -9,7 +9,7 @@ Utility functions organized by category:
 3. Metrics (recall_precision, compute_rmsd, compute_placement_metrics)
 4. Visualization (plot_3d_frame, create_trajectory_gif, save_protein_plot)
 5. Logging (setup_logging_for_tqdm)
-6. File parsing (parse_split_file)
+6. File parsing (parse_split_file, resolve_structure_path)
 """
 
 from collections.abc import Sequence
@@ -117,9 +117,27 @@ def normalize_ins_code(value) -> str:
     return ins
 
 
+def resolve_structure_path(path: str | Path) -> Path | None:
+    """Resolve a preferred CIF/PDB path to an existing structure file."""
+    structure_path = Path(path)
+    if structure_path.exists():
+        return structure_path
+
+    if structure_path.suffix == ".cif":
+        fallback_path = structure_path.with_suffix(".pdb")
+    elif structure_path.suffix == ".pdb":
+        fallback_path = structure_path.with_suffix(".cif")
+    else:
+        return None
+
+    if fallback_path.exists():
+        return fallback_path
+    return None
+
+
 def parse_split_file(split_file: Path, base_pdb_dir: Path) -> list[dict]:
     """
-    Parse split file and construct entries with paths.
+    Parse split file and construct entries with preferred CIF paths.
 
     Split file format: one entry per line, e.g., '6eey_final' or '6eey_final_A'.
     Lines must contain at least one underscore; the first part is the PDB ID.
@@ -129,7 +147,9 @@ def parse_split_file(split_file: Path, base_pdb_dir: Path) -> list[dict]:
         base_pdb_dir: Base directory containing PDB subdirectories
 
     Returns:
-        List of entry dicts with keys: pdb_id, pdb_path, cache_key
+        List of entry dicts with keys: pdb_id, pdb_path, cache_key.
+        `pdb_path` is a preferred `.cif` path; callers should resolve the
+        actual existing file with `resolve_structure_path()` when parsing.
 
     Raises:
         ValueError: If split_file contains only malformed lines
@@ -151,7 +171,7 @@ def parse_split_file(split_file: Path, base_pdb_dir: Path) -> list[dict]:
                 continue
 
             pdb_id = parts[0]
-            pdb_path = base_pdb_dir / pdb_id / f"{pdb_id}_final.pdb"
+            pdb_path = base_pdb_dir / pdb_id / f"{pdb_id}_final.cif"
 
             entries.append(
                 {

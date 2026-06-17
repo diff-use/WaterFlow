@@ -29,6 +29,14 @@ def _resolve_pdb_path(pdb_id):
     return str(path)
 
 
+def _resolve_cif_path(pdb_id):
+    """Resolves a CIF path, raising an error if missing."""
+    path = PDB_BASE_DIR / pdb_id / f"{pdb_id}_final.cif"
+    if not path.exists():
+        raise FileNotFoundError(f"CIF file not found: {path}")
+    return str(path)
+
+
 def _resolve_edia_path(pdb_id):
     """Resolves an EDIA JSON path, raising an error if missing."""
     path = PDB_BASE_DIR / pdb_id / f"{pdb_id}_final.json"
@@ -41,6 +49,12 @@ def _resolve_edia_path(pdb_id):
 def pdb_6eey():
     """6eey - standard PDB that passes all quality checks."""
     return _resolve_pdb_path("6eey")
+
+
+@pytest.fixture
+def cif_6eey():
+    """6eey - CIF format of standard test structure."""
+    return _resolve_cif_path("6eey")
 
 
 @pytest.fixture
