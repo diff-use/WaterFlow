@@ -542,6 +542,55 @@ class TestUniformBallSampling:
         assert pos.shape == (301, 3)
         assert batch_w.shape == (301,)
 
+    def test_real_structure_cutoff_and_batch(self, device, pdb_6eey):
+        """Cutoff guarantee holds on real protein geometry; batch indexing is correct
+        when two structures with different water counts are packed into one call."""
+        import biotite.structure as bts
+        from biotite.structure.io.pdb import PDBFile, get_structure
+
+        pdb_file = PDBFile.read(pdb_6eey)
+        atoms = get_structure(pdb_file, model=1, altloc="occupancy")
+        atoms = atoms[atoms.element != "H"]
+        protein_atoms = atoms[bts.filter_amino_acids(atoms)]
+
+        protein_pos_np = protein_atoms.coord  # (N, 3) float64
+        n_atoms = len(protein_pos_np)
+
+        # batch two copies: graph 0 gets 50 waters, graph 1 gets 30
+        protein_pos = torch.tensor(protein_pos_np, dtype=torch.float32, device=device)
+        protein_pos_both = torch.cat([protein_pos, protein_pos], dim=0)
+        batch_p = torch.cat([
+            torch.zeros(n_atoms, dtype=torch.long, device=device),
+            torch.ones(n_atoms, dtype=torch.long, device=device),
+        ])
+        num_waters = torch.tensor([50, 30], dtype=torch.long, device=device)
+        cutoff = 8.0
+
+        pos, batch_w = sample_waters_uniform_ball(
+            protein_pos=protein_pos_both,
+            batch_p=batch_p,
+            num_waters=num_waters,
+            cutoff=cutoff,
+            device=device,
+        )
+
+        # correct total count and per-graph split
+        assert pos.shape == (80, 3)
+        assert batch_w.shape == (80,)
+        assert (batch_w == 0).sum().item() == 50
+        assert (batch_w == 1).sum().item() == 30
+
+        # every water must be within cutoff of at least one protein atom in its graph
+        for g, n_w in enumerate(num_waters.tolist()):
+            g_waters = pos[batch_w == g]                    # (n_w, 3)
+            g_protein = protein_pos_both[batch_p == g]      # (n_atoms, 3)
+            dists = torch.cdist(g_waters, g_protein)        # (n_w, n_atoms)
+            min_dists = dists.min(dim=1).values             # (n_w,)
+            assert min_dists.max().item() <= cutoff + 1e-4, (
+                f"Graph {g}: water too far from protein "
+                f"(max dist {min_dists.max().item():.4f} > {cutoff})"
+            )
+
 
 @pytest.mark.unit
 class TestScaledGaussianSampling:
