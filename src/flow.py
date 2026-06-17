@@ -26,7 +26,6 @@ from src.gvp import GVP, GVPMultiEdgeConv
 from src.utils import ot_coupling
 
 
-
 def sample_waters_uniform_ball(
     protein_pos: Tensor,
     batch_p: Tensor,
@@ -721,7 +720,7 @@ class FlowMatcher:
         batch: HeteroData,
         use_self_conditioning: bool = True,
         accumulation_steps: int = 1,
-    ) -> dict[str, float | int | None]:
+    ) -> dict[str, object]:
         """
         Single flow matching training step (forward + backward only).
 
@@ -757,7 +756,6 @@ class FlowMatcher:
 
         x1 = batch["water"].pos
         batch_w = batch["water"].batch
-        batch_p = batch["protein"].batch
         num_graphs = self._num_graphs(batch)
 
         sigma_per_graph = self.compute_sigma_per_graph(batch, device)
@@ -854,7 +852,6 @@ class FlowMatcher:
 
         x1 = batch["water"].pos
         batch_w = batch["water"].batch
-        batch_p = batch["protein"].batch
         num_graphs = self._num_graphs(batch)
 
         num_w_per_graph = scatter(

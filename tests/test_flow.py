@@ -546,7 +546,7 @@ class TestUniformBallSampling:
         """Cutoff guarantee holds on real protein geometry; batch indexing is correct
         when two structures with different water counts are packed into one call."""
         import biotite.structure as bts
-        from biotite.structure.io.pdb import PDBFile, get_structure
+        from biotite.structure.io.pdb import get_structure, PDBFile
 
         pdb_file = PDBFile.read(pdb_6eey)
         atoms = get_structure(pdb_file, model=1, altloc="occupancy")
