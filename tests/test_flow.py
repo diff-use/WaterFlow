@@ -570,7 +570,7 @@ class TestWaterEdgeConnectivity:
             "edge direction: row 0 now holds discovered neighbors rather than query "
             "points, so a point that is nobody's k-nearest neighbor can be dropped "
             "from coverage. Intermittent because it depends on random fixture positions. "
-            "Fixed structurally in the edge-type-flags PR via radius-based edges."
+            "Fixed structurally in the future edge-type-flags PR via radius-based edges."
         ),
     )
     def test_all_waters_have_water_edges(self, simple_hetero_data):
