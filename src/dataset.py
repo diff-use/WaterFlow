@@ -192,7 +192,7 @@ def _pad_atom_embeddings_for_mates(
     return torch.cat([asu_embedding, pad], dim=0)
 
 
-def _load_torch_cache(path: Path, *, cache_load_mmap: bool = True):
+def _load_torch_cache(path: Path, cache_load_mmap: bool = True) -> dict:
     """Load a torch cache file, using mmap when supported by the file/runtime."""
     if not cache_load_mmap:
         return torch.load(path, weights_only=False)
