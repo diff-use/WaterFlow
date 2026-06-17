@@ -29,7 +29,14 @@ from torch_cluster import radius_graph
 from torch_geometric.data import Batch, HeteroData
 from tqdm import tqdm
 
-from src.constants import EDGE_PP, ELEM_IDX, ELEMENT_VOCAB, NUM_RBF
+from src.constants import (
+    EDGE_PP,
+    ELEM_IDX,
+    ELEMENT_VOCAB,
+    NUM_RBF,
+    ONE_TO_THREE,
+    THREE_TO_ONE,
+)
 from src.utils import (
     compute_edge_features,
     normalize_ins_code,
@@ -140,7 +147,7 @@ def match_atoms_to_coords(
     Returns:
         List of indices into atoms array for matched atoms
     """
-    if target_coords.shape[0] == 0:
+    if target_coords.shape[0] == 0 or len(atoms) == 0:
         return []
 
     matched = []
@@ -977,20 +984,28 @@ class ProteinWaterDataset(Dataset):
         protein_elements = [str(e).upper() for e in protein_atoms.element]
         protein_x = element_onehot(protein_elements)
 
-        # compute residue indices (including ins_code to match ESM/SLAE residue counting)
-        res_id = protein_atoms.res_id
-        chain_id_arr = protein_atoms.chain_id
-        ins_code_arr = np.array(
-            [normalize_ins_code(x) for x in protein_atoms.ins_code], dtype=object
-        )
-        residue_keys = list(zip(chain_id_arr, res_id, ins_code_arr))
-        unique_res = {k: i for i, k in enumerate(dict.fromkeys(residue_keys))}
-        protein_res_idx = torch.tensor(
-            [unique_res[k] for k in residue_keys], dtype=torch.long
-        )
-
-        # check water/residue ratio
-        num_residues = len(unique_res)
+        # Compute residue indices matching ESM's sanitized residue counting.
+        # The ESM generation script renames non-canonical residues to their canonical
+        # 3-letter equivalent (unknowns -> UNK), which can merge two residues that
+        # share (chain, resid, ins_code) but had different res_names (e.g. Q2K + QIP
+        # both -> UNK at the same position). Apply the same renaming here so the
+        # residue count and indices align with the stored ESM embeddings.
+        sanitized_for_idx = protein_atoms.copy()
+        for _i in range(len(sanitized_for_idx)):
+            _aa1 = THREE_TO_ONE.get(sanitized_for_idx.res_name[_i], "X")
+            sanitized_for_idx.res_name[_i] = ONE_TO_THREE.get(_aa1, "UNK")
+        res_starts = bts.get_residue_starts(sanitized_for_idx)
+        num_residues = len(res_starts)
+        protein_res_idx_np = np.zeros(len(protein_atoms), dtype=np.int64)
+        for res_i in range(len(res_starts)):
+            start = res_starts[res_i]
+            end = (
+                res_starts[res_i + 1]
+                if res_i + 1 < len(res_starts)
+                else len(protein_atoms)
+            )
+            protein_res_idx_np[start:end] = res_i
+        protein_res_idx = torch.tensor(protein_res_idx_np, dtype=torch.long)
         num_waters = len(water_atoms)
         ratio_valid, ratio_reason = check_water_residue_ratio(
             num_waters,

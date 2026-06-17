@@ -39,7 +39,8 @@ def build_knn_edges(
     if src_pos.numel() == 0 or dst_pos.numel() == 0:
         return torch.empty(2, 0, dtype=torch.long, device=src_pos.device)
 
-    idx = knn(x=dst_pos, y=src_pos, k=k, batch_x=batch_dst, batch_y=batch_src)
+    idx = knn(x=src_pos, y=dst_pos, k=k, batch_x=batch_src, batch_y=batch_dst)
+    idx = torch.stack((idx[1], idx[0]), dim=0)
 
     # remove self-edges if homogeneous
     if src_pos.data_ptr() == dst_pos.data_ptr():
