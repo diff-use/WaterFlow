@@ -811,6 +811,22 @@ class TestGetDataloader:
 class TestPdbListParsing:
     """Tests for PDB list file parsing."""
 
+    @staticmethod
+    def _write_structure(base_dir: Path, pdb_id: str, suffixes: list[str]) -> None:
+        """Create placeholder structure files for path-resolution tests."""
+        structure_dir = base_dir / pdb_id
+        structure_dir.mkdir(parents=True, exist_ok=True)
+        for suffix in suffixes:
+            (structure_dir / f"{pdb_id}_final{suffix}").write_text("")
+
+    @staticmethod
+    def _write_geometry_caches(processed_dir: Path, cache_keys: list[str]) -> None:
+        """Create placeholder geometry cache files so parsed entries survive filtering."""
+        cache_dir = processed_dir / "geometry_mates"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        for cache_key in cache_keys:
+            (cache_dir / f"{cache_key}.pt").write_bytes(b"cache")
+
     def test_chain_specific_format_rejected(self, tmp_path, pdb_base_dir):
         """Chain-specific format should be rejected."""
         list_file = tmp_path / "list.txt"
@@ -829,10 +845,12 @@ class TestPdbListParsing:
         """Should parse whole PDB format: pdb_id_final"""
         list_file = tmp_path / "list.txt"
         list_file.write_text("6eey_final\n")
+        processed_dir = tmp_path / "processed"
+        self._write_geometry_caches(processed_dir, ["6eey_final"])
 
         dataset = ProteinWaterDataset(
             pdb_list_file=str(list_file),
-            processed_dir=str(tmp_path / "processed"),
+            processed_dir=str(processed_dir),
             base_pdb_dir=str(pdb_base_dir),
             preprocess=False,
         )
@@ -844,10 +862,12 @@ class TestPdbListParsing:
         """Should parse multiple entries."""
         list_file = tmp_path / "list.txt"
         list_file.write_text("6eey_final\n1deu_final\n")
+        processed_dir = tmp_path / "processed"
+        self._write_geometry_caches(processed_dir, ["6eey_final", "1deu_final"])
 
         dataset = ProteinWaterDataset(
             pdb_list_file=str(list_file),
-            processed_dir=str(tmp_path / "processed"),
+            processed_dir=str(processed_dir),
             base_pdb_dir=str(pdb_base_dir),
             preprocess=False,
         )
@@ -858,15 +878,44 @@ class TestPdbListParsing:
         """Empty lines should be ignored."""
         list_file = tmp_path / "list.txt"
         list_file.write_text("\n6eey_final\n\n\n")
+        processed_dir = tmp_path / "processed"
+        self._write_geometry_caches(processed_dir, ["6eey_final"])
 
         dataset = ProteinWaterDataset(
             pdb_list_file=str(list_file),
-            processed_dir=str(tmp_path / "processed"),
+            processed_dir=str(processed_dir),
             base_pdb_dir=str(pdb_base_dir),
             preprocess=False,
         )
 
         assert len(dataset.entries) == 1
+
+    def test_entries_not_filtered_by_cache_on_non_preprocess(self, tmp_path, monkeypatch):
+        """Without preprocess=True, entries are kept regardless of cache existence."""
+        base_dir = tmp_path / "pdbs"
+        self._write_structure(base_dir, "keep", [".pdb"])
+        self._write_structure(base_dir, "drop", [".pdb"])
+
+        list_file = tmp_path / "list.txt"
+        list_file.write_text("keep_final\ndrop_final\n")
+        processed_dir = tmp_path / "processed"
+        geometry_dir = processed_dir / "geometry_mates"
+        geometry_dir.mkdir(parents=True, exist_ok=True)
+        # Only keep_final has a cache file; drop_final does not
+        (geometry_dir / "keep_final.pt").write_text("cache")
+
+        dataset = ProteinWaterDataset(
+            pdb_list_file=str(list_file),
+            processed_dir=str(processed_dir),
+            base_pdb_dir=str(base_dir),
+            preprocess=False,
+        )
+
+        # Both entries survive — missing cache is not filtered at init time
+        assert [entry["cache_key"] for entry in dataset.entries] == [
+            "keep_final",
+            "drop_final",
+        ]
 
 
 @pytest.mark.unit
@@ -1920,7 +1969,7 @@ class TestCachingBehavior:
         assert data1["protein"].num_nodes == data2["protein"].num_nodes
 
     def test_missing_geometry_cache_raises_in_getitem(self, tmp_path, pdb_base_dir):
-        """Should raise FileNotFoundError when cache missing during getitem."""
+        """Datasets without valid caches should be emptied during initialization."""
         list_file = tmp_path / "list.txt"
         list_file.write_text("6eey_final\n")
 
@@ -1932,8 +1981,35 @@ class TestCachingBehavior:
             preprocess=False,
         )
 
+        # Entry is kept even without a cache — missing cache raises on access
+        assert len(dataset.entries) == 1
         with pytest.raises(FileNotFoundError, match="Geometry cache file not found"):
             _ = dataset[0]
+
+    def test_preprocess_filters_failed_entries(self, tmp_path, monkeypatch):
+        """Entries that fail preprocessing should be dropped from the dataset."""
+        list_file = tmp_path / "list.txt"
+        list_file.write_text("good_final\nbad_final\n")
+
+        def fake_preprocess_one(self, entry, cache_path):
+            if entry["pdb_id"] == "good":
+                cache_path.write_bytes(b"cache")
+                return
+            raise ValueError("simulated preprocessing failure")
+
+        monkeypatch.setattr(
+            ProteinWaterDataset, "_preprocess_one", fake_preprocess_one
+        )
+
+        dataset = ProteinWaterDataset(
+            pdb_list_file=str(list_file),
+            processed_dir=str(tmp_path / "processed"),
+            base_pdb_dir=str(tmp_path / "pdbs"),
+            preprocess=True,
+        )
+
+        assert [entry["pdb_id"] for entry in dataset.entries] == ["good"]
+        assert len(dataset) == 1
 
     def test_corrupted_cache_raises_meaningful_error(self, tmp_path, pdb_base_dir):
         """Corrupted cache should raise appropriate error."""
@@ -2353,10 +2429,12 @@ class TestAdditionalEdgeCases:
         """Should handle PDB list with extra whitespace."""
         list_file = tmp_path / "list.txt"
         list_file.write_text("  6eey_final  \n\n  \n")
+        processed_dir = tmp_path / "processed"
+        TestPdbListParsing._write_geometry_caches(processed_dir, ["6eey_final"])
 
         dataset = ProteinWaterDataset(
             pdb_list_file=str(list_file),
-            processed_dir=str(tmp_path / "processed"),
+            processed_dir=str(processed_dir),
             base_pdb_dir=str(pdb_base_dir),
             preprocess=False,
         )

@@ -815,39 +815,50 @@ class ProteinWaterDataset(Dataset):
         """
         self.geometry_dir.mkdir(parents=True, exist_ok=True)
 
-        to_process = [
-            e
-            for e in self.entries
-            if not (self.geometry_dir / f"{e['cache_key']}.pt").exists()
-        ]
+        logger.info(
+            f"Checking geometry cache files for {len(self.entries)} requested entries"
+        )
+        to_process = []
+        for entry in self.entries:
+            cache_path = self.geometry_dir / f"{entry['cache_key']}.pt"
+            if not cache_path.is_file():
+                to_process.append(entry)
 
         if not to_process:
             logger.info("All entries already preprocessed.")
-            return
+        else:
+            logger.info(f"Preprocessing {len(to_process)} entries...")
+            failures = []
+            for entry in tqdm(to_process, desc="Preprocessing"):
+                cache_path = self.geometry_dir / f"{entry['cache_key']}.pt"
+                try:
+                    self._preprocess_one(entry, cache_path)
+                except Exception as e:
+                    logger.warning(f"\nFailed to preprocess {entry['cache_key']}: {e}")
+                    failures.append((entry["cache_key"], str(e)))
 
-        logger.info(f"Preprocessing {len(to_process)} entries...")
-        failures = []
-        for entry in tqdm(to_process, desc="Preprocessing"):
+            # write failures to log file
+            if failures:
+                failure_log_path = self.geometry_dir / "preprocessing_failures.log"
+                with open(failure_log_path, "a") as f:
+                    for pdb_id, reason in failures:
+                        f.write(f"{pdb_id}\t{reason}\n")
+                logger.info(f"Logged {len(failures)} failures to {failure_log_path}")
+
+        self._filter_entries_to_existing_geometry_cache()
+
+    def _filter_entries_to_existing_geometry_cache(self) -> None:
+        """Keep only entries with an existing geometry cache file."""
+        self.geometry_dir.mkdir(parents=True, exist_ok=True)
+
+        logger.info(
+            f"Checking geometry cache files for {len(self.entries)} requested entries"
+        )
+        valid_entries = []
+        for entry in self.entries:
             cache_path = self.geometry_dir / f"{entry['cache_key']}.pt"
-            try:
-                self._preprocess_one(entry, cache_path)
-            except Exception as e:
-                logger.warning(f"\nFailed to preprocess {entry['cache_key']}: {e}")
-                failures.append((entry["cache_key"], str(e)))
-
-        # write failures to log file
-        if failures:
-            failure_log_path = self.geometry_dir / "preprocessing_failures.log"
-            with open(failure_log_path, "a") as f:
-                for pdb_id, reason in failures:
-                    f.write(f"{pdb_id}\t{reason}\n")
-            logger.info(f"Logged {len(failures)} failures to {failure_log_path}")
-
-        valid_entries = [
-            e
-            for e in self.entries
-            if (self.geometry_dir / f"{e['cache_key']}.pt").exists()
-        ]
+            if cache_path.is_file():
+                valid_entries.append(entry)
         n_removed = len(self.entries) - len(valid_entries)
         if n_removed > 0:
             logger.info(f"Filtered out {n_removed} entries without valid cache files.")
@@ -877,20 +888,28 @@ class ProteinWaterDataset(Dataset):
         if not chain_valid:
             raise ValueError(f"Quality filter failed: {chain_reason}")
 
-        crystal_data = get_crystal_contacts_pymol(pdb_path, self.cutoff)
+        if self.include_mates:
+            crystal_data = get_crystal_contacts_pymol(pdb_path, self.cutoff)
 
-        # Ensure consistency between biotite and PyMOL parsing.
-        # Both parse the same ASU, but may differ in altloc selection, hydrogen
-        # handling, or edge cases. Keep only waters present in both representations.
-        asu_water_indices = match_atoms_to_coords(
-            water_atoms, crystal_data["asu_coords"]
-        )
-        if asu_water_indices:
-            asu_water_mask = np.zeros(len(water_atoms), dtype=bool)
-            asu_water_mask[asu_water_indices] = True
-            water_atoms = water_atoms[asu_water_mask]
-        else:
-            water_atoms = water_atoms[:0]
+            # Ensure consistency between biotite and PyMOL parsing.
+            # Both parse the same ASU, but may differ in altloc selection, hydrogen
+            # handling, or edge cases. Keep only waters present in both representations.
+            asu_water_indices = match_atoms_to_coords(
+                water_atoms, crystal_data["asu_coords"]
+            )
+            if asu_water_indices:
+                asu_water_mask = np.zeros(len(water_atoms), dtype=bool)
+                asu_water_mask[asu_water_indices] = True
+                water_atoms = water_atoms[asu_water_mask]
+            else:
+                if len(water_atoms) > 0:
+                    logger.warning(
+                        f"{entry['pdb_id']}: no waters survived biotite/PyMOL cross-check"
+                        f" (had {len(water_atoms)})"
+                    )
+                else:
+                    logger.warning(f"{entry['pdb_id']}: no waters found in structure")
+                water_atoms = water_atoms[:0]
 
         # Per-water filtering is optional; structure-level quality checks below always run.
         use_distance_filter = self.filter_by_distance
@@ -1010,19 +1029,24 @@ class ProteinWaterDataset(Dataset):
             water_x = torch.zeros((0, len(ELEMENT_VOCAB) + 1), dtype=torch.float32)
 
         # process symmetry mate atoms
-        mate_coords = crystal_data["mate_coords"]
-        if mate_coords.shape[0] > 0:
-            mate_pos = torch.tensor(mate_coords, dtype=torch.float32) - center
-            mate_elements = [a.symbol.upper() for a in crystal_data["mate_atoms"]]
-            mate_x = element_onehot(mate_elements)
+        if self.include_mates:
+            mate_coords = crystal_data["mate_coords"]
+            if mate_coords.shape[0] > 0:
+                mate_pos = torch.tensor(mate_coords, dtype=torch.float32) - center
+                mate_elements = [a.symbol.upper() for a in crystal_data["mate_atoms"]]
+                mate_x = element_onehot(mate_elements)
 
-            # compute mate residue indices (group atoms by actual residue)
-            mate_residue_keys = [(a.chain, a.resi) for a in crystal_data["mate_atoms"]]
-            unique_mate_res = list(dict.fromkeys(mate_residue_keys))  # preserves order
-            mate_res_map = {k: i for i, k in enumerate(unique_mate_res)}
-            mate_res_idx = torch.tensor(
-                [mate_res_map[k] for k in mate_residue_keys], dtype=torch.long
-            )
+                # compute mate residue indices (group atoms by actual residue)
+                mate_residue_keys = [(a.chain, a.resi) for a in crystal_data["mate_atoms"]]
+                unique_mate_res = list(dict.fromkeys(mate_residue_keys))  # preserves order
+                mate_res_map = {k: i for i, k in enumerate(unique_mate_res)}
+                mate_res_idx = torch.tensor(
+                    [mate_res_map[k] for k in mate_residue_keys], dtype=torch.long
+                )
+            else:
+                mate_pos = torch.zeros((0, 3), dtype=torch.float32)
+                mate_x = torch.zeros((0, len(ELEMENT_VOCAB) + 1), dtype=torch.float32)
+                mate_res_idx = torch.empty(0, dtype=torch.long)
         else:
             mate_pos = torch.zeros((0, 3), dtype=torch.float32)
             mate_x = torch.zeros((0, len(ELEMENT_VOCAB) + 1), dtype=torch.float32)
