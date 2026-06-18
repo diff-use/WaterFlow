@@ -36,6 +36,7 @@ from src.dataset import (
     check_water_clashes,
     check_water_residue_ratio,
     compute_normalized_bfactors,
+    dedup_mate_atoms,
     element_onehot,
     filter_waters_by_quality,
     get_crystal_contacts_pymol,
@@ -243,6 +244,82 @@ class TestMatchAtomsToCoords:
         # Should match with loose tolerance
         matched_loose = match_atoms_to_coords(atoms, target_coords, tolerance=0.1)
         assert len(matched_loose) == 1
+
+    def test_one_to_one_at_special_position(self):
+        """Two near-coincident targets must not collapse onto one source index."""
+        import biotite.structure as bts
+
+        # Two distinct source atoms ~coincident (special position scenario)
+        atoms = bts.AtomArray(2)
+        atoms.coord = np.array([[0.0, 0.0, 0.0], [0.002, 0.0, 0.0]])
+
+        # Two targets, each near the coincident cluster
+        target_coords = np.array([[0.0, 0.0, 0.0], [0.002, 0.0, 0.0]])
+
+        matched = match_atoms_to_coords(atoms, target_coords, tolerance=0.05)
+
+        # Both targets matched, but to distinct source atoms (one-to-one).
+        assert len(matched) == 2
+        assert len(set(matched)) == 2
+
+
+@pytest.mark.unit
+class TestDedupMateAtoms:
+    """Tests for symmetry-mate coordinate deduplication."""
+
+    def _atoms(self, n):
+        return [object() for _ in range(n)]
+
+    def test_empty_passthrough(self):
+        coords = np.zeros((0, 3))
+        out_c, out_a = dedup_mate_atoms(coords, [], np.zeros((0, 3)))
+        assert out_c.shape == (0, 3)
+        assert out_a == []
+
+    def test_drops_atoms_coincident_with_reference(self):
+        """Mate atoms on top of an ASU/target atom are removed (label leak)."""
+        mate_coords = np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]])
+        mate_atoms = self._atoms(2)
+        reference = np.array([[0.0, 0.0, 0.0]])  # ASU/target atom at origin
+
+        out_c, out_a = dedup_mate_atoms(mate_coords, mate_atoms, reference, tol=0.3)
+
+        assert out_c.shape[0] == 1
+        assert len(out_a) == 1
+        np.testing.assert_allclose(out_c[0], [10.0, 0.0, 0.0])
+
+    def test_drops_redundant_mate_images(self):
+        """A mate atom coincident with an already-kept mate atom is removed (#1)."""
+        mate_coords = np.array(
+            [[0.0, 0.0, 0.0], [0.01, 0.0, 0.0], [5.0, 0.0, 0.0]]
+        )
+        mate_atoms = self._atoms(3)
+        reference = np.array([[50.0, 0.0, 0.0]])  # far away, no reference hit
+
+        out_c, out_a = dedup_mate_atoms(mate_coords, mate_atoms, reference, tol=0.3)
+
+        # First kept, near-duplicate dropped, distinct atom kept.
+        assert out_c.shape[0] == 2
+        assert len(out_a) == 2
+
+    def test_keeps_atoms_aligned(self):
+        """Returned coords and atom objects stay in lockstep."""
+        mate_coords = np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]])
+        a0, a1 = object(), object()
+        reference = np.array([[0.0, 0.0, 0.0]])
+
+        out_c, out_a = dedup_mate_atoms(mate_coords, [a0, a1], reference, tol=0.3)
+
+        assert out_a == [a1]
+        np.testing.assert_allclose(out_c[0], [10.0, 0.0, 0.0])
+
+    def test_no_reference_only_self_dedup(self):
+        """With empty reference, only redundant self-images are removed."""
+        mate_coords = np.array([[0.0, 0.0, 0.0], [0.05, 0.0, 0.0]])
+        out_c, _ = dedup_mate_atoms(
+            mate_coords, self._atoms(2), np.zeros((0, 3)), tol=0.3
+        )
+        assert out_c.shape[0] == 1
 
 
 @pytest.mark.unit
@@ -535,6 +612,41 @@ class TestGetCrystalContactsPymol:
         assert (
             result_large["mate_coords"].shape[0] >= result_small["mate_coords"].shape[0]
         )
+
+    def test_protein_only_drops_mate_solvent(self, pdb_8dzt):
+        """Default (protein-only) mates exclude solvent/ions/ligands kept by raw."""
+        raw = get_crystal_contacts_pymol(pdb_8dzt, cutoff=5.0, protein_only=False)
+        prot = get_crystal_contacts_pymol(pdb_8dzt, cutoff=5.0, protein_only=True)
+
+        # 8dzt mates include waters + ions/ligands (CA, G4P), so protein-only is smaller.
+        assert prot["mate_coords"].shape[0] < raw["mate_coords"].shape[0]
+
+    def test_protein_only_excludes_water_resn(self, pdb_8dzt):
+        """No HOH/WAT residues remain among protein-only mate atoms."""
+        prot = get_crystal_contacts_pymol(pdb_8dzt, cutoff=5.0, protein_only=True)
+        resns = {str(a.resn).upper() for a in prot["mate_atoms"]}
+        assert "HOH" not in resns
+        assert "WAT" not in resns
+
+    def test_special_position_water_leak_removed(self, pdb_4h0b):
+        """4h0b has a target water on the 6-fold axis whose symmetry copy lands
+        ~0A away. With raw mates that copy is a label leak; protein-only mates
+        (default) must remove it."""
+        from scipy.spatial import cKDTree
+
+        _, water_atoms = parse_asu_with_biotite(pdb_4h0b)
+        raw = get_crystal_contacts_pymol(pdb_4h0b, cutoff=5.0, protein_only=False)
+        prot = get_crystal_contacts_pymol(pdb_4h0b, cutoff=5.0, protein_only=True)
+
+        raw_leak = (
+            cKDTree(raw["mate_coords"]).query(water_atoms.coord, k=1)[0] < 0.3
+        ).sum()
+        prot_leak = (
+            cKDTree(prot["mate_coords"]).query(water_atoms.coord, k=1)[0] < 0.3
+        ).sum()
+
+        assert raw_leak >= 1, "expected a special-position leak in raw mates"
+        assert prot_leak == 0, "protein-only mates must remove the special-position leak"
 
 
 @pytest.mark.integration

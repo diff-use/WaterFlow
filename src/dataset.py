@@ -22,6 +22,7 @@ import torch
 import torch.nn.functional as F
 from biotite.structure.io.pdb import get_structure, PDBFile
 from loguru import logger
+from scipy.spatial import cKDTree
 from scipy.spatial.distance import cdist
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
@@ -79,7 +80,7 @@ def parse_asu_with_biotite(
 
 
 def get_crystal_contacts_pymol(
-    pdb_path: str, cutoff: float = 5.0
+    pdb_path: str, cutoff: float = 5.0, protein_only: bool = True
 ) -> dict[str, np.ndarray | list]:
     """
     Extract ASU and symmetry mate atoms within crystal contact distance.
@@ -87,16 +88,26 @@ def get_crystal_contacts_pymol(
     Uses PyMOL's symexp command to generate symmetry mates and selects
     interface atoms within the specified cutoff distance.
 
+    Mate atoms are restricted to protein (``polymer.protein``): a symmetry mate's
+    waters/ions/ligands are merely symmetry images of ASU atoms (in particular,
+    mate waters are copies of the ASU waters that are the prediction targets), so
+    including them as context nodes is a soft label leak and is inconsistent with
+    how the ASU is split. The neighbor *protein* surface is the genuine
+    crystal-contact context we want to keep.
+
     Args:
         pdb_path: Path to PDB file with crystal symmetry information
         cutoff: Distance cutoff in Angstroms for interface detection
+        protein_only: Restrict mates to protein (default). Set False to return all
+            mate atoms incl. solvent/ions/ligands (used by diagnostics to inspect
+            the raw, pre-filter symmetry expansion).
 
     Returns:
         Dict with keys:
             - 'asu_coords': (N_asu, 3) ASU atom coordinates
-            - 'mate_coords': (N_mate, 3) symmetry mate atom coordinates
+            - 'mate_coords': (N_mate, 3) symmetry mate atom coordinates (protein only)
             - 'asu_atoms': List of PyMOL atom objects for ASU
-            - 'mate_atoms': List of PyMOL atom objects for mates
+            - 'mate_atoms': List of PyMOL atom objects for mates (protein only)
     """
     with pymol2.PyMOL() as pm:
         cmd = pm.cmd
@@ -105,7 +116,9 @@ def get_crystal_contacts_pymol(
         obj = "struct"
         cmd.load(pdb_path, obj)
         cmd.symexp("sym", obj, obj, cutoff)
-        cmd.select("interface", f"byres (sym* within {cutoff} of {obj})")
+        # Restrict mates to protein; whole residues with any atom within cutoff.
+        mate_sel = "sym* and polymer.protein" if protein_only else "sym*"
+        cmd.select("interface", f"byres (({mate_sel}) within {cutoff} of {obj})")
 
         asu_coords = cmd.get_coords(obj, state=1)
         mate_coords = cmd.get_coords("sym* and interface", state=1)
@@ -138,18 +151,84 @@ def match_atoms_to_coords(
         tolerance: Maximum distance in Angstroms for a valid match
 
     Returns:
-        List of indices into atoms array for matched atoms
+        List of indices into atoms array for matched atoms.
+        Matching is one-to-one: each source atom is claimed by at most one target,
+        so two near-coincident targets (e.g. waters on a special position) cannot
+        collapse onto the same source index.
     """
-    if target_coords.shape[0] == 0:
+    if target_coords.shape[0] == 0 or len(atoms) == 0:
         return []
 
     matched = []
-    for i, coord in enumerate(target_coords):
+    used = np.zeros(len(atoms), dtype=bool)
+    for coord in target_coords:
         dists = np.linalg.norm(atoms.coord - coord, axis=1)
-        min_idx = np.argmin(dists)
-        if dists[min_idx] < tolerance:
-            matched.append(min_idx)
+        # Walk nearest-first so the closest unclaimed atom within tolerance wins.
+        for src_idx in np.argsort(dists):
+            if dists[src_idx] >= tolerance:
+                break
+            if not used[src_idx]:
+                used[src_idx] = True
+                matched.append(int(src_idx))
+                break
     return matched
+
+
+def dedup_mate_atoms(
+    mate_coords: np.ndarray,
+    mate_atoms: list,
+    reference_coords: np.ndarray,
+    tol: float = 0.3,
+) -> tuple[np.ndarray, list]:
+    """
+    Drop symmetry-mate atoms that coincide with a reference atom or with an
+    already-kept mate atom.
+
+    Crystal symmetry creates exact/near-exact coincidences: an atom on a rotation
+    or screw axis is mapped onto itself, and the same physical residue can be
+    reached via two operators. Naively each is treated as an independent node,
+    producing duplicate graph nodes (~0 A self-edges) and, when a target water
+    sits on a special position, a hard label leak (its own symmetry copy appears
+    in the context). This pass removes mate atoms within ``tol`` of:
+      (a) an ASU protein atom or a target water (``reference_coords``), or
+      (b) a mate atom already kept (redundant symmetry image).
+
+    Args:
+        mate_coords: (N, 3) mate atom coordinates (uncentered).
+        mate_atoms: Parallel list of mate atom objects (kept in lockstep).
+        reference_coords: (M, 3) ASU protein + target water coordinates (uncentered).
+        tol: Coincidence radius in Angstroms.
+
+    Returns:
+        (kept_coords, kept_atoms) with coincident mate atoms removed.
+    """
+    if mate_coords.shape[0] == 0:
+        return mate_coords, mate_atoms
+
+    ref_tree = (
+        cKDTree(reference_coords)
+        if reference_coords is not None and len(reference_coords)
+        else None
+    )
+
+    keep_coords: list[np.ndarray] = []
+    keep_atoms: list = []
+    kept_tree: cKDTree | None = None  # rebuilt as kept atoms accumulate
+    for c, a in zip(mate_coords, mate_atoms):
+        if ref_tree is not None and ref_tree.query(c, k=1)[0] < tol:
+            continue  # coincides with an ASU atom or a target water
+        if kept_tree is not None and kept_tree.query(c, k=1)[0] < tol:
+            continue  # redundant symmetry image of a kept mate atom
+        keep_coords.append(c)
+        keep_atoms.append(a)
+        kept_tree = cKDTree(np.asarray(keep_coords))
+
+    kept = (
+        np.asarray(keep_coords)
+        if keep_coords
+        else np.zeros((0, mate_coords.shape[1]), dtype=mate_coords.dtype)
+    )
+    return kept, keep_atoms
 
 
 def _make_undirected(edge_index: torch.Tensor) -> torch.Tensor:
@@ -720,7 +799,7 @@ class ProteinWaterDataset(Dataset):
         """
 
         self.cache_dir = Path(processed_dir)
-        # Directory-based separation: geometry/ vs geometry_mates/
+        # Directory-based separation: geometry/ vs geometry_mates/.
         cache_suffix = "_mates" if include_mates else ""
         self.geometry_dir = self.cache_dir / f"{geometry_cache_name}{cache_suffix}"
         self.base_pdb_dir = Path(base_pdb_dir)
@@ -948,11 +1027,25 @@ class ProteinWaterDataset(Dataset):
                 )
             )
 
+            # Distance reference for the per-water distance filter. A crystal-contact
+            # water lives in the gap between the ASU and a neighbor copy: it can be
+            # close to a mate yet far from the ASU protein. Include mate (neighbor
+            # protein) coords so these legitimate waters are not discarded.
+            if (
+                self.include_mates
+                and crystal_data["mate_coords"].shape[0] > 0
+            ):
+                filter_protein_coords = np.concatenate(
+                    [protein_atoms.coord, crystal_data["mate_coords"]], axis=0
+                )
+            else:
+                filter_protein_coords = protein_atoms.coord
+
             # apply quality filters
             keep_mask = filter_waters_by_quality(
                 water_atoms.coord,
                 water_keys,
-                protein_atoms.coord if use_distance_filter else None,
+                filter_protein_coords if use_distance_filter else None,
                 edia_lookup,
                 bfactor_lookup,
                 max_protein_dist=self.max_protein_dist,
@@ -1027,6 +1120,22 @@ class ProteinWaterDataset(Dataset):
         else:
             water_pos = torch.zeros((0, 3), dtype=torch.float32)
             water_x = torch.zeros((0, len(ELEMENT_VOCAB) + 1), dtype=torch.float32)
+
+        # Drop mate atoms coincident with an ASU protein atom, a target water, or
+        # an already-kept mate atom (special positions / redundant symmetry images).
+        # Uses uncentered coords (crystal_data coords are centered below via -center).
+        if self.include_mates:
+            reference = (
+                np.concatenate([protein_atoms.coord, water_atoms.coord], axis=0)
+                if len(water_atoms)
+                else protein_atoms.coord
+            )
+            crystal_data["mate_coords"], crystal_data["mate_atoms"] = dedup_mate_atoms(
+                crystal_data["mate_coords"],
+                crystal_data["mate_atoms"],
+                reference,
+                tol=0.3,
+            )
 
         # process symmetry mate atoms
         if self.include_mates:

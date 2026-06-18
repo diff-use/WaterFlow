@@ -67,6 +67,19 @@ def pdb_1deu():
     return _resolve_pdb_path("1deu")
 
 
+@pytest.fixture
+def pdb_4h0b():
+    """4h0b - P6 space group; a water on the 6-fold axis (special position) whose
+    symmetry copy lands ~0A away, the special-position label-leak case."""
+    return _resolve_pdb_path("4h0b")
+
+
+@pytest.fixture
+def edia_4h0b():
+    """4h0b EDIA JSON file with water quality scores from PDB-REDO."""
+    return _resolve_edia_path("4h0b")
+
+
 # ============== Shared encoder fixtures ==============
 
 
