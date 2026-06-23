@@ -1021,6 +1021,8 @@ class ProteinWaterDataset(Dataset):
             water_x = torch.zeros((0, len(ELEMENT_VOCAB) + 1), dtype=torch.float32)
 
         # process symmetry mate atoms
+        # NOTE(ligands+mates): mate ligand het atoms belong here too when
+        # include_ligands is set -- see TODO at the ASU ligand-append block below.
         mate_coords = crystal_data["mate_coords"]
         if mate_coords.shape[0] > 0:
             mate_pos = torch.tensor(mate_coords, dtype=torch.float32) - center
@@ -1061,6 +1063,14 @@ class ProteinWaterDataset(Dataset):
         # is_ligand mask marks which protein-type nodes are ligand atoms.
         # Ligands always go last so num_asu_protein and mate counts are unaffected,
         # preserving ESM/SLAE embedding alignment via _pad_atom_embeddings_for_mates.
+        #
+        # TODO(ligands+mates): this only adds ASU ligands. Once dev_crystal_mates
+        # lands, mates are restricted to polymer.protein, so a ligand sitting in a
+        # crystal contact is dropped from the mate side -> the ASU sees its own
+        # ligands but neighbor/contact ligands are invisible (asymmetric context).
+        # For consistency, also include ligand het atoms from the symmetry mates:
+        # keep them in get_crystal_contacts_pymol (don't filter to polymer.protein),
+        # run them through dedup_mate_atoms, and append with is_ligand=True like here.
         if self.include_ligands and ligand_atoms:
             ligand_pos = torch.tensor(ligand_atoms.coord, dtype=torch.float32) - center
             ligand_elements = [str(e).upper() for e in ligand_atoms.element]
