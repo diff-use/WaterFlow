@@ -46,13 +46,12 @@ from src.dataset import parse_asu_with_biotite
 from src.utils import (
     normalize_ins_code,
     parse_split_file,
-    resolve_structure_path,
     setup_logging_for_tqdm,
 )
 
 
 def compute_esm_embeddings(
-    pdb_path: Path,
+    struc_path: Path,
     model: ESM3,
 ) -> dict | None:
     """
@@ -66,7 +65,7 @@ def compute_esm_embeddings(
     How ESM parses: (https://github.com/evolutionaryscale/esm/blob/main/esm/utils/structure/protein_chain.py)
 
     Args:
-        pdb_path: Path to PDB file
+        struc_path: Path to structure file (PDB/CIF)
         model: Loaded ESM3 model
 
     Returns:
@@ -74,9 +73,9 @@ def compute_esm_embeddings(
     """
     try:
         # Load ground truth atoms using geometry cache parser in src/dataset.py
-        protein_atoms, _ = parse_asu_with_biotite(str(pdb_path))
+        protein_atoms, _ = parse_asu_with_biotite(str(struc_path))
         if len(protein_atoms) == 0:
-            raise ValueError(f"No protein atoms found in {pdb_path}")
+            raise ValueError(f"No protein atoms found in {struc_path}")
 
         # Extract ground truth sequence before mutating the array
         key_to_resname = {}
@@ -120,7 +119,7 @@ def compute_esm_embeddings(
         protein = ESMProtein.from_protein_complex(complex_obj)
 
         if not protein.sequence or protein.sequence.replace("|", "") == "":
-            raise ValueError(f"ESM returned empty sequence for {pdb_path}")
+            raise ValueError(f"ESM returned empty sequence for {struc_path}")
 
         with torch.no_grad():
             protein_tensor = model.encode(protein)
@@ -145,7 +144,7 @@ def compute_esm_embeddings(
         # Validate: length mismatch means embeddings won't align with residues
         if len(esm_seq) != num_residues:
             raise ValueError(
-                f"Length mismatch after sanitization for {pdb_path}! "
+                f"Length mismatch after sanitization for {struc_path}! "
                 f"Biotite: {num_residues}, ESM: {len(esm_seq)}"
             )
 
@@ -156,7 +155,7 @@ def compute_esm_embeddings(
         }
 
     except Exception as e:
-        logger.error(f"Error computing embeddings for {pdb_path}: {e}")
+        logger.error(f"Error computing embeddings for {struc_path}: {e}")
         return None
 
 
@@ -247,13 +246,7 @@ def main() -> None:
         cache_key = entry["cache_key"]
         cache_path = esm_cache_dir / f"{cache_key}.pt"
 
-        pdb_path = resolve_structure_path(entry["pdb_path"])
-        if pdb_path is None:
-            logger.error(f"Structure file not found: {entry['pdb_path']}")
-            failures.append((cache_key, "Structure file not found"))
-            continue
-
-        result = compute_esm_embeddings(pdb_path, model)
+        result = compute_esm_embeddings(entry["struc_path"], model)
 
         if result is not None:
             result["pdb_id"] = entry["pdb_id"]

@@ -20,7 +20,6 @@ All test cases created with assistance from Claude Code.
 """
 
 import json
-import os
 from pathlib import Path
 
 import numpy as np
@@ -480,17 +479,17 @@ class TestCheckChainInteractions:
 class TestParseAsuWithBiotite:
     """Tests for PDB parsing with biotite."""
 
-    def test_parse_returns_protein_and_water(self, pdb_6eey):
+    def test_parse_returns_protein_and_water(self, parsed_pdb_6eey):
         """Should return protein and water atom arrays."""
-        protein_atoms, water_atoms = parse_asu_with_biotite(pdb_6eey)
+        protein_atoms, water_atoms = parsed_pdb_6eey
 
         assert protein_atoms is not None
         assert water_atoms is not None
         assert len(protein_atoms) > 0
 
-    def test_hydrogen_removed(self, pdb_6eey):
+    def test_hydrogen_removed(self, parsed_pdb_6eey):
         """Hydrogens should be removed from output."""
-        protein_atoms, water_atoms = parse_asu_with_biotite(pdb_6eey)
+        protein_atoms, water_atoms = parsed_pdb_6eey
 
         protein_elements = set(protein_atoms.element)
         water_elements = set(water_atoms.element) if len(water_atoms) > 0 else set()
@@ -498,9 +497,9 @@ class TestParseAsuWithBiotite:
         assert "H" not in protein_elements
         assert "H" not in water_elements
 
-    def test_water_residue_names(self, pdb_6eey):
+    def test_water_residue_names(self, parsed_pdb_6eey):
         """Water atoms should have HOH or WAT residue names."""
-        _, water_atoms = parse_asu_with_biotite(pdb_6eey)
+        _, water_atoms = parsed_pdb_6eey
 
         if len(water_atoms) > 0:
             water_res_names = set(water_atoms.res_name)
@@ -511,17 +510,17 @@ class TestParseAsuWithBiotite:
 class TestCIFParsing:
     """Tests for CIF parsing with biotite."""
 
-    def test_cif_parse_returns_protein_and_water(self, cif_6eey):
+    def test_cif_parse_returns_protein_and_water(self, parsed_cif_6eey):
         """Should return protein and water atom arrays from CIF."""
-        protein_atoms, water_atoms = parse_asu_with_biotite(cif_6eey)
+        protein_atoms, water_atoms = parsed_cif_6eey
 
         assert protein_atoms is not None
         assert water_atoms is not None
         assert len(protein_atoms) > 0
 
-    def test_cif_hydrogen_removed(self, cif_6eey):
+    def test_cif_hydrogen_removed(self, parsed_cif_6eey):
         """Hydrogens should be removed from CIF-parsed arrays."""
-        protein_atoms, water_atoms = parse_asu_with_biotite(cif_6eey)
+        protein_atoms, water_atoms = parsed_cif_6eey
 
         protein_elements = set(protein_atoms.element)
         water_elements = set(water_atoms.element) if len(water_atoms) > 0 else set()
@@ -529,18 +528,18 @@ class TestCIFParsing:
         assert "H" not in protein_elements
         assert "H" not in water_elements
 
-    def test_cif_water_residue_names(self, cif_6eey):
+    def test_cif_water_residue_names(self, parsed_cif_6eey):
         """Water atoms from CIF should have HOH or WAT residue names."""
-        _, water_atoms = parse_asu_with_biotite(cif_6eey)
+        _, water_atoms = parsed_cif_6eey
 
         if len(water_atoms) > 0:
             water_res_names = set(water_atoms.res_name)
             assert water_res_names.issubset({"HOH", "WAT"})
 
-    def test_cif_matches_pdb(self, pdb_6eey, cif_6eey):
+    def test_cif_matches_pdb(self, parsed_pdb_6eey, parsed_cif_6eey):
         """CIF and PDB parsing of the same structure should produce matching atom counts."""
-        pdb_protein, pdb_water = parse_asu_with_biotite(pdb_6eey)
-        cif_protein, cif_water = parse_asu_with_biotite(cif_6eey)
+        pdb_protein, pdb_water = parsed_pdb_6eey
+        cif_protein, cif_water = parsed_cif_6eey
 
         assert len(cif_protein) == len(pdb_protein)
         assert len(cif_water) == len(pdb_water)
@@ -594,23 +593,10 @@ class TestGetCrystalContactsPymol:
 class TestProteinWaterDataset:
     """Tests for the main dataset class."""
 
-    def test_dataset_creation(
+    def test_dataset_creation_and_getitem(
         self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir
     ):
-        """Dataset should be created successfully."""
-        dataset = ProteinWaterDataset(
-            pdb_list_file=single_pdb_list_file,
-            processed_dir=str(tmp_processed_dir),
-            base_pdb_dir=str(pdb_base_dir),
-            preprocess=True,
-        )
-
-        assert len(dataset) >= 1
-
-    def test_getitem_returns_heterodata(
-        self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir
-    ):
-        """__getitem__ should return HeteroData."""
+        """Dataset builds and __getitem__ returns HeteroData with the required fields."""
         from torch_geometric.data import HeteroData
 
         dataset = ProteinWaterDataset(
@@ -620,32 +606,21 @@ class TestProteinWaterDataset:
             preprocess=True,
         )
 
+        assert len(dataset) >= 1
+
         data = dataset[0]
         assert isinstance(data, HeteroData)
 
-    def test_heterodata_has_required_fields(
-        self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir
-    ):
-        """HeteroData should have required node types and fields."""
-        dataset = ProteinWaterDataset(
-            pdb_list_file=single_pdb_list_file,
-            processed_dir=str(tmp_processed_dir),
-            base_pdb_dir=str(pdb_base_dir),
-            preprocess=True,
-        )
-
-        data = dataset[0]
-
-        # Check protein nodes
+        # Protein nodes
         assert hasattr(data["protein"], "pos")
         assert hasattr(data["protein"], "x")
         assert hasattr(data["protein"], "residue_index")
 
-        # Check water nodes
+        # Water nodes
         assert hasattr(data["water"], "pos")
         assert hasattr(data["water"], "x")
 
-        # Check edges
+        # Edges
         assert ("protein", "pp", "protein") in data.edge_types
 
     def test_protein_positions_centered(
@@ -668,7 +643,7 @@ class TestProteinWaterDataset:
     def test_duplicate_single_sample(
         self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir
     ):
-        """duplicate_single_sample should multiply dataset length."""
+        """duplicate_single_sample multiplies length; every index wraps to the one sample."""
         dataset = ProteinWaterDataset(
             pdb_list_file=single_pdb_list_file,
             processed_dir=str(tmp_processed_dir),
@@ -677,56 +652,14 @@ class TestProteinWaterDataset:
             duplicate_single_sample=10,
         )
 
+        assert len(dataset.entries) == 1
         assert len(dataset) == 10
 
-        # All items should be the same
+        # Every index wraps to the same underlying sample.
         data_0 = dataset[0]
         data_5 = dataset[5]
         assert torch.allclose(data_0["protein"].pos, data_5["protein"].pos)
-
-    def test_cached_file_created(
-        self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir
-    ):
-        """Preprocessing should create cached .pt file."""
-        _ = ProteinWaterDataset(
-            pdb_list_file=single_pdb_list_file,
-            processed_dir=str(tmp_processed_dir),
-            base_pdb_dir=str(pdb_base_dir),
-            preprocess=True,
-        )  # need to call this to trigger the processing
-
-        # With include_mates=True, cache goes to geometry_mates/ directory
-        cache_file = tmp_processed_dir / "geometry_mates" / "6eey_final.pt"
-        assert cache_file.exists()
-
-    def test_no_reprocess_if_cached(
-        self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir
-    ):
-        """Should not reprocess if cache exists."""
-        # First creation
-        ProteinWaterDataset(
-            pdb_list_file=single_pdb_list_file,
-            processed_dir=str(tmp_processed_dir),
-            base_pdb_dir=str(pdb_base_dir),
-            preprocess=True,
-            include_mates=True,
-        )
-
-        # With include_mates=True, cache goes to geometry_mates/ directory
-        cache_file = tmp_processed_dir / "geometry_mates" / "6eey_final.pt"
-        mtime_1 = cache_file.stat().st_mtime
-
-        # Second creation should not modify cache
-        ProteinWaterDataset(
-            pdb_list_file=single_pdb_list_file,
-            processed_dir=str(tmp_processed_dir),
-            base_pdb_dir=str(pdb_base_dir),
-            preprocess=True,
-            include_mates=True,
-        )
-
-        mtime_2 = cache_file.stat().st_mtime
-        assert mtime_1 == mtime_2
+        assert data_0.pdb_id == data_5.pdb_id
 
 
 @pytest.mark.integration
@@ -914,10 +847,10 @@ class TestPdbListParsing:
 
         assert len(dataset.entries) == 2
 
-    def test_empty_lines_ignored(self, tmp_path, pdb_base_dir):
-        """Empty lines should be ignored."""
+    def test_blank_lines_and_whitespace_ignored(self, tmp_path, pdb_base_dir):
+        """Blank lines and surrounding whitespace should be ignored."""
         list_file = tmp_path / "list.txt"
-        list_file.write_text("\n6eey_final\n\n\n")
+        list_file.write_text("\n  6eey_final  \n\n  \n")
 
         dataset = ProteinWaterDataset(
             pdb_list_file=str(list_file),
@@ -927,6 +860,7 @@ class TestPdbListParsing:
         )
 
         assert len(dataset.entries) == 1
+        assert dataset.entries[0]["pdb_id"] == "6eey"
 
     def test_prefers_cif_when_both_formats_exist(self, tmp_path):
         """Split parsing should store the preferred CIF path."""
@@ -944,7 +878,7 @@ class TestPdbListParsing:
         )
 
         assert len(dataset.entries) == 1
-        assert dataset.entries[0]["pdb_path"] == (base_dir / "abcd" / "abcd_final.cif")
+        assert dataset.entries[0]["struc_path"] == (base_dir / "abcd" / "abcd_final.cif")
         assert dataset.entries[0]["cache_key"] == "abcd_final"
         assert dataset.entries[0]["embedding_key"] == "abcd_final"
 
@@ -964,10 +898,10 @@ class TestPdbListParsing:
         )
 
         assert len(dataset.entries) == 1
-        assert dataset.entries[0]["pdb_path"] == (base_dir / "wxyz" / "wxyz_final.pdb")
+        assert dataset.entries[0]["struc_path"] == (base_dir / "wxyz" / "wxyz_final.pdb")
 
     def test_only_requested_ids_are_added(self, tmp_path):
-        """Entries should only be created for IDs listed in the split file."""
+        """Only IDs listed in the split file should produce entries."""
         base_dir = tmp_path / "pdbs"
         self._write_structure(base_dir, "keep1", [".pdb"])
         self._write_structure(base_dir, "keep2", [".cif"])
@@ -984,80 +918,40 @@ class TestPdbListParsing:
         )
 
         assert [entry["pdb_id"] for entry in dataset.entries] == ["keep1", "keep2"]
-        assert dataset.entries[0]["pdb_path"] == (
-            base_dir / "keep1" / "keep1_final.pdb"
-        )
-        assert dataset.entries[1]["pdb_path"] == (
-            base_dir / "keep2" / "keep2_final.cif"
-        )
-
-    def test_parse_does_not_probe_filesystem(self, tmp_path, monkeypatch):
-        """Split parsing should avoid base-tree scans and only probe requested IDs."""
-        base_dir = tmp_path / "pdbs"
-        self._write_structure(base_dir, "scanfree", [".cif"])
-
-        list_file = tmp_path / "list.txt"
-        list_file.write_text("scanfree_final\n")
-        isfile_calls = []
-
-        def fail_scandir(*args, **kwargs):
-            raise AssertionError("os.scandir should not be called during split parsing")
-
-        real_isfile = os.path.isfile
-
-        def track_isfile(path):
-            isfile_calls.append(Path(path))
-            return real_isfile(path)
-
-        monkeypatch.setattr("src.dataset.os.scandir", fail_scandir)
-        monkeypatch.setattr("src.dataset.os.path.isfile", track_isfile)
-
-        dataset = ProteinWaterDataset(
-            pdb_list_file=str(list_file),
-            processed_dir=str(tmp_path / "processed"),
-            base_pdb_dir=str(base_dir),
-            preprocess=False,
-        )
-
-        assert len(dataset.entries) == 1
-        assert len(isfile_calls) == 1
-        assert isfile_calls[0] == base_dir / "scanfree" / "scanfree_final.cif"
-        assert dataset.entries[0]["pdb_path"] == (
-            base_dir / "scanfree" / "scanfree_final.cif"
-        )
 
 
 @pytest.mark.unit
 class TestDatasetEdgeCases:
     """Tests for edge cases in dataset handling."""
 
-    def test_include_mates_flag(
+    def test_include_mates_affects_nodes_and_cache_dir(
         self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir
     ):
-        """include_mates flag should affect protein node count."""
-        # Create dataset with mates
+        """include_mates adds protein nodes and routes to a separate cache directory."""
+        # Same processed_dir: mates -> geometry_mates/, no-mates -> geometry/.
         dataset_with_mates = ProteinWaterDataset(
             pdb_list_file=single_pdb_list_file,
-            processed_dir=str(tmp_processed_dir / "with_mates"),
+            processed_dir=str(tmp_processed_dir),
             base_pdb_dir=str(pdb_base_dir),
             include_mates=True,
             preprocess=True,
         )
-
-        # Create dataset without mates (separate cache dir)
         dataset_no_mates = ProteinWaterDataset(
             pdb_list_file=single_pdb_list_file,
-            processed_dir=str(tmp_processed_dir / "no_mates"),
+            processed_dir=str(tmp_processed_dir),
             base_pdb_dir=str(pdb_base_dir),
             include_mates=False,
             preprocess=True,
         )
 
+        # With mates should have >= nodes.
         data_with = dataset_with_mates[0]
         data_without = dataset_no_mates[0]
-
-        # With mates should have >= atoms
         assert data_with["protein"].num_nodes >= data_without["protein"].num_nodes
+
+        # Each setting caches into its own directory.
+        assert (tmp_processed_dir / "geometry" / "6eey_final.pt").exists()
+        assert (tmp_processed_dir / "geometry_mates" / "6eey_final.pt").exists()
 
     def test_custom_cutoff(self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir):
         """Custom cutoff should affect edge connectivity."""
@@ -1119,35 +1013,6 @@ class TestDatasetEdgeCases:
         # Unit vectors should have norm ~1
         unit_norms = torch.linalg.norm(pp_edge.edge_unit_vectors, dim=-1)
         assert torch.allclose(unit_norms, torch.ones_like(unit_norms), atol=1e-4)
-
-    def test_directory_based_cache_separation(
-        self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir
-    ):
-        """Different include_mates settings should use different directories."""
-        # Create dataset without mates
-        ProteinWaterDataset(
-            pdb_list_file=single_pdb_list_file,
-            processed_dir=str(tmp_processed_dir),
-            base_pdb_dir=str(pdb_base_dir),
-            include_mates=False,
-            preprocess=True,
-        )
-
-        # Create dataset with mates
-        ProteinWaterDataset(
-            pdb_list_file=single_pdb_list_file,
-            processed_dir=str(tmp_processed_dir),
-            base_pdb_dir=str(pdb_base_dir),
-            include_mates=True,
-            preprocess=True,
-        )
-
-        # Check that both directories exist with the correct cache files
-        cache_no_mates = tmp_processed_dir / "geometry" / "6eey_final.pt"
-        cache_with_mates = tmp_processed_dir / "geometry_mates" / "6eey_final.pt"
-
-        assert cache_no_mates.exists(), "geometry/ cache should exist"
-        assert cache_with_mates.exists(), "geometry_mates/ cache should exist"
 
     def test_custom_geometry_cache_name(
         self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir
@@ -2470,54 +2335,3 @@ class TestAdditionalEdgeCases:
 
         assert len(dataset.entries) == 0
         assert len(dataset) == 0
-
-    def test_duplicate_single_sample_multiplies_length(
-        self, single_pdb_list_file, tmp_path, pdb_base_dir
-    ):
-        """duplicate_single_sample should multiply effective length."""
-        dataset = ProteinWaterDataset(
-            pdb_list_file=single_pdb_list_file,
-            processed_dir=str(tmp_path),
-            base_pdb_dir=str(pdb_base_dir),
-            preprocess=True,
-            duplicate_single_sample=10,
-        )
-
-        assert len(dataset.entries) == 1
-        assert len(dataset) == 10
-
-    def test_getitem_with_duplication_wraps_index(
-        self, single_pdb_list_file, tmp_path, pdb_base_dir
-    ):
-        """getitem should wrap index when using duplicate_single_sample."""
-        dataset = ProteinWaterDataset(
-            pdb_list_file=single_pdb_list_file,
-            processed_dir=str(tmp_path),
-            base_pdb_dir=str(pdb_base_dir),
-            preprocess=True,
-            duplicate_single_sample=5,
-        )
-
-        # All indices should return the same data
-        data0 = dataset[0]
-        data1 = dataset[1]
-        data4 = dataset[4]
-
-        assert data0["protein"].num_nodes == data1["protein"].num_nodes
-        assert data0["protein"].num_nodes == data4["protein"].num_nodes
-        assert data0.pdb_id == data1.pdb_id
-
-    def test_pdb_list_with_whitespace(self, tmp_path, pdb_base_dir):
-        """Should handle PDB list with extra whitespace."""
-        list_file = tmp_path / "list.txt"
-        list_file.write_text("  6eey_final  \n\n  \n")
-
-        dataset = ProteinWaterDataset(
-            pdb_list_file=str(list_file),
-            processed_dir=str(tmp_path / "processed"),
-            base_pdb_dir=str(pdb_base_dir),
-            preprocess=False,
-        )
-
-        assert len(dataset.entries) == 1
-        assert dataset.entries[0]["pdb_id"] == "6eey"

@@ -39,7 +39,6 @@ from src.utils import (
     rbf,
     # Metrics
     recall_precision,
-    resolve_structure_path,
     save_protein_plot,
 )
 
@@ -136,55 +135,41 @@ class TestInsertionCodeNormalization:
 
 
 @pytest.mark.unit
-class TestStructurePathResolution:
-    """Tests for lazy CIF/PDB path resolution helpers."""
+class TestSplitFileParsing:
+    """Tests for parse_split_file CIF/PDB structure-path resolution."""
 
     @staticmethod
-    def _write_structure(base_dir: Path, pdb_id: str, suffixes: list[str]) -> None:
+    def _write_split(tmp_path: Path, pdb_id: str, suffixes: list[str]) -> tuple[Path, Path]:
+        """Write a structure dir (with the given suffixes) and a one-line split file."""
+        base_dir = tmp_path / "pdbs"
         structure_dir = base_dir / pdb_id
         structure_dir.mkdir(parents=True, exist_ok=True)
         for suffix in suffixes:
             (structure_dir / f"{pdb_id}_final{suffix}").write_text("")
 
-    def test_resolve_structure_path_prefers_existing_cif(self, tmp_path):
-        base_dir = tmp_path / "pdbs"
-        self._write_structure(base_dir, "abcd", [".cif", ".pdb"])
-
-        resolved = resolve_structure_path(base_dir / "abcd" / "abcd_final.cif")
-
-        assert resolved == base_dir / "abcd" / "abcd_final.cif"
-
-    def test_resolve_structure_path_falls_back_to_pdb(self, tmp_path):
-        base_dir = tmp_path / "pdbs"
-        self._write_structure(base_dir, "wxyz", [".pdb"])
-
-        resolved = resolve_structure_path(base_dir / "wxyz" / "wxyz_final.cif")
-
-        assert resolved == base_dir / "wxyz" / "wxyz_final.pdb"
-
-    def test_resolve_structure_path_returns_none_when_missing(self, tmp_path):
-        resolved = resolve_structure_path(tmp_path / "missing" / "missing_final.cif")
-
-        assert resolved is None
-
-    def test_parse_split_file_does_not_probe_filesystem(self, tmp_path, monkeypatch):
-        base_dir = tmp_path / "pdbs"
-        self._write_structure(base_dir, "scanfree", [".pdb"])
-
         split_file = tmp_path / "split.txt"
-        split_file.write_text("scanfree_final\n")
+        split_file.write_text(f"{pdb_id}_final\n")
+        return split_file, base_dir
 
-        def fail_exists(self):
-            raise AssertionError(
-                "Path.exists should not be called during split parsing"
-            )
-
-        monkeypatch.setattr(Path, "exists", fail_exists)
+    def test_prefers_existing_cif(self, tmp_path):
+        split_file, base_dir = self._write_split(tmp_path, "abcd", [".cif", ".pdb"])
 
         entries = parse_split_file(split_file, base_dir)
 
-        assert len(entries) == 1
-        assert entries[0]["pdb_path"] == (base_dir / "scanfree" / "scanfree_final.cif")
+        assert entries[0]["struc_path"] == base_dir / "abcd" / "abcd_final.cif"
+
+    def test_falls_back_to_pdb(self, tmp_path):
+        split_file, base_dir = self._write_split(tmp_path, "wxyz", [".pdb"])
+
+        entries = parse_split_file(split_file, base_dir)
+
+        assert entries[0]["struc_path"] == base_dir / "wxyz" / "wxyz_final.pdb"
+
+    def test_raises_when_structure_missing(self, tmp_path):
+        split_file, base_dir = self._write_split(tmp_path, "missing", [])
+
+        with pytest.raises(FileNotFoundError):
+            parse_split_file(split_file, base_dir)
 
 
 @pytest.mark.unit

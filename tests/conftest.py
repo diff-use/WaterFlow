@@ -21,64 +21,64 @@ def pdb_base_dir():
     return PDB_BASE_DIR
 
 
-def _resolve_pdb_path(pdb_id):
-    """Resolves a PDB path, raising an error if missing."""
-    path = PDB_BASE_DIR / pdb_id / f"{pdb_id}_final.pdb"
+def _resolve_test_path(pdb_id, suffix):
+    """Resolve a test input file (`{pdb_id}_final{suffix}`), raising if missing."""
+    path = PDB_BASE_DIR / pdb_id / f"{pdb_id}_final{suffix}"
     if not path.exists():
-        raise FileNotFoundError(f"PDB file not found: {path}")
-    return str(path)
-
-
-def _resolve_cif_path(pdb_id):
-    """Resolves a CIF path, raising an error if missing."""
-    path = PDB_BASE_DIR / pdb_id / f"{pdb_id}_final.cif"
-    if not path.exists():
-        raise FileNotFoundError(f"CIF file not found: {path}")
-    return str(path)
-
-
-def _resolve_edia_path(pdb_id):
-    """Resolves an EDIA JSON path, raising an error if missing."""
-    path = PDB_BASE_DIR / pdb_id / f"{pdb_id}_final.json"
-    if not path.exists():
-        raise FileNotFoundError(f"EDIA JSON file not found: {path}")
+        raise FileNotFoundError(f"Test file not found: {path}")
     return str(path)
 
 
 @pytest.fixture
 def pdb_6eey():
     """6eey - standard PDB that passes all quality checks."""
-    return _resolve_pdb_path("6eey")
+    return _resolve_test_path("6eey", ".pdb")
 
 
 @pytest.fixture
 def cif_6eey():
     """6eey - CIF format of standard test structure."""
-    return _resolve_cif_path("6eey")
+    return _resolve_test_path("6eey", ".cif")
+
+
+@pytest.fixture(scope="session")
+def parsed_pdb_6eey():
+    """Parsed (protein, water) atoms from the 6eey PDB, parsed once per session."""
+    from src.dataset import parse_asu_with_biotite
+
+    return parse_asu_with_biotite(_resolve_test_path("6eey", ".pdb"))
+
+
+@pytest.fixture(scope="session")
+def parsed_cif_6eey():
+    """Parsed (protein, water) atoms from the 6eey CIF, parsed once per session."""
+    from src.dataset import parse_asu_with_biotite
+
+    return parse_asu_with_biotite(_resolve_test_path("6eey", ".cif"))
 
 
 @pytest.fixture
 def edia_6eey():
     """6eey EDIA JSON file with water quality scores from PDB-REDO."""
-    return _resolve_edia_path("6eey")
+    return _resolve_test_path("6eey", ".json")
 
 
 @pytest.fixture
 def pdb_2b5w():
     """2b5w - fails COM distance check."""
-    return _resolve_pdb_path("2b5w")
+    return _resolve_test_path("2b5w", ".pdb")
 
 
 @pytest.fixture
 def pdb_8dzt():
     """8dzt - fails water clash check at 2% threshold with 2A distance."""
-    return _resolve_pdb_path("8dzt")
+    return _resolve_test_path("8dzt", ".pdb")
 
 
 @pytest.fixture
 def pdb_1deu():
     """1deu - has insertion codes (52 residues with ins_code='P')."""
-    return _resolve_pdb_path("1deu")
+    return _resolve_test_path("1deu", ".pdb")
 
 
 # ============== Shared encoder fixtures ==============

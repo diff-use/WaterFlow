@@ -62,7 +62,7 @@ def _read_structure(path: str | Path, extra_fields=None) -> bts.AtomArray:
 
 
 def parse_asu_with_biotite(
-    path: str,
+    path: str | Path,
 ) -> tuple[bts.AtomArray, bts.AtomArray]:
     """
     Parse PDB or CIF file and extract protein and water atoms.
@@ -96,7 +96,7 @@ def parse_asu_with_biotite(
 
 
 def get_crystal_contacts_pymol(
-    pdb_path: str, cutoff: float = 5.0
+    struc_path: str, cutoff: float = 5.0
 ) -> dict[str, np.ndarray | list]:
     """
     Extract ASU and symmetry mate atoms within crystal contact distance.
@@ -105,7 +105,7 @@ def get_crystal_contacts_pymol(
     interface atoms within the specified cutoff distance.
 
     Args:
-        pdb_path: Path to PDB file with crystal symmetry information
+        struc_path: Path to structure file (PDB/CIF) with crystal symmetry information
         cutoff: Distance cutoff in Angstroms for interface detection
 
     Returns:
@@ -120,7 +120,7 @@ def get_crystal_contacts_pymol(
         cmd.reinitialize()
         cmd.feedback("disable", "all", "everything")
         obj = "struct"
-        cmd.load(pdb_path, obj)
+        cmd.load(struc_path, obj)
         cmd.symexp("sym", obj, obj, cutoff)
         cmd.select("interface", f"byres (sym* within {cutoff} of {obj})")
 
@@ -492,7 +492,7 @@ def load_edia_for_pdb(
 
 
 def compute_normalized_bfactors(
-    pdb_path: str,
+    struc_path: str,
 ) -> tuple[dict[tuple[str, int, str], float] | None, np.ndarray | None]:
     """
     Extract and normalize B-factors for water molecules.
@@ -501,7 +501,7 @@ def compute_normalized_bfactors(
     in the selected structure.
 
     Args:
-        pdb_path: Path to PDB file
+        struc_path: Path to structure file (PDB/CIF)
 
     Returns:
         Tuple of:
@@ -510,7 +510,7 @@ def compute_normalized_bfactors(
         Returns (None, None) on error
     """
     try:
-        atoms = _read_structure(pdb_path, extra_fields=["b_factor"])
+        atoms = _read_structure(struc_path, extra_fields=["b_factor"])
 
         # filter for water molecules
         water_mask = (atoms.res_name == "HOH") | (atoms.res_name == "WAT")
@@ -519,7 +519,7 @@ def compute_normalized_bfactors(
         return _compute_normalized_bfactors_from_atoms(water_atoms)
 
     except Exception as e:
-        logger.warning(f"Warning: Could not extract B-factors from {pdb_path}: {e}")
+        logger.warning(f"Warning: Could not extract B-factors from {struc_path}: {e}")
         return None, None
 
 
@@ -822,7 +822,7 @@ class ProteinWaterDataset(Dataset):
         for pdb_id, cache_key in pdb_ids:
             subdir = self.base_pdb_dir / pdb_id
             cif_path = subdir / f"{pdb_id}_final.cif"
-            pdb_path = (
+            struc_path = (
                 cif_path if os.path.isfile(cif_path) else subdir / f"{pdb_id}_final.pdb"
             )
 
@@ -830,7 +830,7 @@ class ProteinWaterDataset(Dataset):
             entries.append(
                 {
                     "pdb_id": pdb_id,
-                    "pdb_path": pdb_path,
+                    "struc_path": struc_path,
                     "cache_key": cache_key,
                     "embedding_key": cache_key,  # Same as cache_key for embedding lookup
                 }
@@ -899,9 +899,9 @@ class ProteinWaterDataset(Dataset):
 
         Raises ValueError if structure fails quality filters.
         """
-        pdb_path = str(entry["pdb_path"])
+        struc_path = str(entry["struc_path"])
 
-        protein_atoms, water_atoms = parse_asu_with_biotite(pdb_path)
+        protein_atoms, water_atoms = parse_asu_with_biotite(struc_path)
 
         # check inter-chain interactions for multi-chain proteins
         chain_valid, chain_reason, _ = check_chain_interactions(
@@ -911,7 +911,7 @@ class ProteinWaterDataset(Dataset):
         if not chain_valid:
             raise ValueError(f"Quality filter failed: {chain_reason}")
 
-        crystal_data = get_crystal_contacts_pymol(pdb_path, self.cutoff)
+        crystal_data = get_crystal_contacts_pymol(struc_path, self.cutoff)
 
         # Ensure consistency between biotite and PyMOL parsing.
         # Both parse the same ASU, but may differ in altloc selection, hydrogen
@@ -938,7 +938,7 @@ class ProteinWaterDataset(Dataset):
             # load EDIA data only when the EDIA filter is active
             edia_lookup = None
             if use_edia_filter:
-                edia_json_path = Path(pdb_path).with_suffix(".json")
+                edia_json_path = Path(struc_path).with_suffix(".json")
                 edia_lookup = load_edia_for_pdb(edia_json_path)
                 if edia_lookup is None:
                     raise ValueError(

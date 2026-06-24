@@ -70,7 +70,6 @@ from src.dataset import parse_asu_with_biotite
 from src.utils import (
     normalize_ins_code,
     parse_split_file,
-    resolve_structure_path,
     setup_logging_for_tqdm,
 )
 
@@ -393,15 +392,9 @@ def main() -> None:
         for entry in entry_batch:
             cache_key = entry["cache_key"]
 
-            pdb_path = resolve_structure_path(entry["pdb_path"])
-            if pdb_path is None:
-                logger.error(f"Structure file not found: {entry['pdb_path']}")
-                failures.append((cache_key, "Structure file not found"))
-                continue
-
             try:
                 # protein_atoms: biotite AtomArray with num_atoms atoms
-                protein_atoms, _ = parse_asu_with_biotite(str(pdb_path))
+                protein_atoms, _ = parse_asu_with_biotite(str(entry["struc_path"]))
                 # coords: (num_residues, 37, 3) - atom37 coordinates
                 # residue_type: (num_residues,) - residue type indices
                 # chains: (num_residues,) - chain IDs
