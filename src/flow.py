@@ -68,10 +68,16 @@ def sample_waters_uniform_ball(
         torch.arange(num_graphs, device=device), num_waters.to(device)
     )
 
+    # offsets below assume protein atoms are grouped contiguously by graph;
+    # interleaved batch_p would pick anchors from the wrong graph.
+    batch_p = batch_p.to(device)
+    if batch_p.numel() > 1 and (batch_p[1:] < batch_p[:-1]).any():
+        raise ValueError("batch_p must be sorted (non-decreasing) by graph index.")
+
     # per-graph protein atom counts and cumulative offsets
     num_p_per_graph = scatter(
         torch.ones(batch_p.size(0), device=device, dtype=torch.long),
-        batch_p.to(device),
+        batch_p,
         dim=0,
         dim_size=num_graphs,
         reduce="sum",
