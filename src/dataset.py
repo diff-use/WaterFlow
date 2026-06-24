@@ -793,7 +793,9 @@ class ProteinWaterDataset(Dataset):
         Expected format:
         <pdb_id>_final  (e.g., "6eey_final")
 
-        Constructs path: {base_pdb_dir}/{pdb_id}/{pdb_id}_final.pdb
+        Resolves path in {base_pdb_dir}/{pdb_id}/, preferring
+        {pdb_id}_final.cif when present, otherwise falling back to
+        {pdb_id}_final.pdb.
         """
         entries = []
         logger.info(f"Parsing PDB list: {pdb_list_file}")

@@ -43,7 +43,12 @@ from tqdm import tqdm
 
 from src.constants import ONE_TO_THREE, THREE_TO_ONE
 from src.dataset import parse_asu_with_biotite
-from src.utils import normalize_ins_code, parse_split_file, setup_logging_for_tqdm
+from src.utils import (
+    normalize_ins_code,
+    parse_split_file,
+    resolve_structure_path,
+    setup_logging_for_tqdm,
+)
 
 
 def compute_esm_embeddings(
@@ -239,13 +244,13 @@ def main() -> None:
     failures = []
 
     for entry in tqdm(entries, desc="Computing ESM embeddings"):
-        pdb_path = entry["pdb_path"]
         cache_key = entry["cache_key"]
         cache_path = esm_cache_dir / f"{cache_key}.pt"
 
-        if not pdb_path.exists():
-            logger.error(f"PDB file not found: {pdb_path}")
-            failures.append((cache_key, "PDB file not found"))
+        pdb_path = resolve_structure_path(entry["pdb_path"])
+        if pdb_path is None:
+            logger.error(f"Structure file not found: {entry['pdb_path']}")
+            failures.append((cache_key, "Structure file not found"))
             continue
 
         result = compute_esm_embeddings(pdb_path, model)
