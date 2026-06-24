@@ -110,7 +110,8 @@ def test_cached_encoder_model_construction_succeeds(
     encoder = build_encoder(encoder_config, device)
     model = FlowWaterGVP(encoder=encoder)
 
-    assert model.encoder.output_dims == (128, 0)
+    # Cached encoder fuses the embedding + element one-hot to hidden_s width.
+    assert model.encoder.output_dims == (256, 0)
 
 
 def test_inference_build_model_from_config_uses_embedding_dim(device):

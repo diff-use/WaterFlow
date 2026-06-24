@@ -14,7 +14,6 @@ import torch
 from torch_cluster import radius_graph
 from torch_geometric.data import Data, HeteroData
 
-from src.constants import NODE_FEATURE_DIM
 from src.encoder_base import build_encoder, CachedEmbeddingEncoder, get_encoder_class
 from src.gvp_encoder import GVPEncoder, ProteinGVPEncoder
 
@@ -99,7 +98,7 @@ class TestPackageLevelImport:
         assert gvp_encoder.encoder_type == "gvp"
 
         slae_encoder = pkg_build_encoder(
-            {"encoder_type": "slae", "embedding_dim": 128}, device
+            {"encoder_type": "slae", "embedding_dim": 128, "hidden_s": 64}, device
         )
         assert slae_encoder.encoder_type == "slae"
 
@@ -146,24 +145,27 @@ class TestEncoderRegistry:
         config = {
             "encoder_type": "slae",
             "embedding_dim": 128,
+            "hidden_s": 64,
         }
         encoder = build_encoder(config, device)
 
         assert isinstance(encoder, CachedEmbeddingEncoder)
         assert encoder.encoder_type == "slae"
-        assert encoder.output_dims == (128, 0)
+        # output_dims is the fused width (= hidden_s), not the cached embedding_dim
+        assert encoder.output_dims == (64, 0)
 
     def test_build_encoder_esm(self, device):
         """build_encoder should construct ESM encoder from config."""
         config = {
             "encoder_type": "esm",
             "embedding_dim": 1536,
+            "hidden_s": 64,
         }
         encoder = build_encoder(config, device)
 
         assert isinstance(encoder, CachedEmbeddingEncoder)
         assert encoder.encoder_type == "esm"
-        assert encoder.output_dims == (1536, 0)
+        assert encoder.output_dims == (64, 0)
 
     def test_build_encoder_cached_requires_embedding_dim(self, device):
         """Cached encoders must fail clearly when embedding_dim is missing."""
@@ -207,17 +209,20 @@ class TestBaseEncoderInterface:
     ):
         """CachedEmbeddingEncoder should implement all required interface methods."""
         encoder = CachedEmbeddingEncoder(
-            embedding_key="embedding", encoder_type="slae", embedding_dim=128
+            embedding_key="embedding",
+            encoder_type="slae",
+            embedding_dim=128,
+            fusion_dim=64,
         ).to(device)
 
         assert isinstance(encoder.encoder_type, str)
-        # output_dims available immediately (embedding_dim is required at init)
-        assert encoder.output_dims == (128, 0)
+        # output_dims is the fused width, available immediately
+        assert encoder.output_dims == (64, 0)
 
         # Check forward returns (s, V, pp_edge_attr) tuple
         s, V, pp_edge_attr = encoder(sample_hetero_data_with_embedding)
         assert s.shape[0] == sample_hetero_data_with_embedding["protein"].num_nodes
-        assert s.shape[1] == 128
+        assert s.shape[1] == 64
         assert V.shape == (sample_hetero_data_with_embedding["protein"].num_nodes, 0, 3)
         # Cached embedding encoder should return None for edge features
         assert pp_edge_attr is None
@@ -230,15 +235,16 @@ class TestBaseEncoderInterface:
             "hidden_s": 64,
             "hidden_v": 16,
         }
-        slae_config = {"encoder_type": "slae", "embedding_dim": 128}
+        # hidden_s drives the cached encoder's fused output width (fusion_dim).
+        slae_config = {"encoder_type": "slae", "embedding_dim": 128, "hidden_s": 64}
 
         gvp_encoder = GVPEncoder.from_config(gvp_config, device)
         slae_encoder = CachedEmbeddingEncoder.from_config(slae_config, device)
 
         assert isinstance(gvp_encoder, GVPEncoder)
         assert isinstance(slae_encoder, CachedEmbeddingEncoder)
-        # output_dims available immediately for cached encoders
-        assert slae_encoder.output_dims == (128, 0)
+        # output_dims is the fused width (= hidden_s)
+        assert slae_encoder.output_dims == (64, 0)
 
 
 # ============== GVP Encoder Tests ==============
@@ -394,47 +400,60 @@ class TestGVPEncoderWrapper:
 class TestCachedEmbeddingEncoder:
     """Tests for CachedEmbeddingEncoder (handles both SLAE and ESM)."""
 
-    def test_output_dims_available_at_init(self, device):
-        """output_dims is available immediately since embedding_dim is required."""
+    def test_output_dims_is_fusion_dim(self, device):
+        """output_dims reflects the configured fusion_dim and is available at init."""
         encoder = CachedEmbeddingEncoder(
-            embedding_key="embedding", encoder_type="slae", embedding_dim=128
+            embedding_key="embedding",
+            encoder_type="slae",
+            embedding_dim=128,
+            fusion_dim=64,
         ).to(device)
-        assert encoder.output_dims == (128, 0)
+        assert encoder.output_dims == (64, 0)
 
     def test_slae_encoder_type(self, device):
         """SLAE encoder should return 'slae' as encoder_type."""
         encoder = CachedEmbeddingEncoder(
-            embedding_key="embedding", encoder_type="slae", embedding_dim=128
+            embedding_key="embedding",
+            encoder_type="slae",
+            embedding_dim=128,
+            fusion_dim=64,
         ).to(device)
         assert encoder.encoder_type == "slae"
 
     def test_esm_encoder_type(self, device):
         """ESM encoder should return 'esm' as encoder_type."""
         encoder = CachedEmbeddingEncoder(
-            embedding_key="embedding", encoder_type="esm", embedding_dim=1536
+            embedding_key="embedding",
+            encoder_type="esm",
+            embedding_dim=1536,
+            fusion_dim=64,
         ).to(device)
         assert encoder.encoder_type == "esm"
 
     def test_slae_forward(self, device, sample_hetero_data_with_embedding):
-        """SLAE forward pass should return (s, V, None) tuple with raw embeddings."""
+        """SLAE forward fuses embedding + element one-hot to (N, fusion_dim)."""
         encoder = CachedEmbeddingEncoder(
-            embedding_key="embedding", encoder_type="slae", embedding_dim=128
+            embedding_key="embedding",
+            encoder_type="slae",
+            embedding_dim=128,
+            fusion_dim=64,
         ).to(device)
 
         s, V, pp_edge_attr = encoder(sample_hetero_data_with_embedding)
 
         n_atoms = sample_hetero_data_with_embedding["protein"].num_nodes
-        assert s.shape == (n_atoms, 128)
+        assert s.shape == (n_atoms, 64)
         assert V.shape == (n_atoms, 0, 3)
-        # Raw embeddings should be identical to input
-        assert torch.allclose(s, sample_hetero_data_with_embedding["protein"].embedding)
         # Cached embedding encoder doesn't return edge features
         assert pp_edge_attr is None
 
     def test_esm_forward(self, device, sample_hetero_data):
-        """ESM forward pass should return (s, V, None) tuple with raw embeddings."""
+        """ESM forward fuses embedding + element one-hot to (N, fusion_dim)."""
         encoder = CachedEmbeddingEncoder(
-            embedding_key="embedding", encoder_type="esm", embedding_dim=1536
+            embedding_key="embedding",
+            encoder_type="esm",
+            embedding_dim=1536,
+            fusion_dim=64,
         ).to(device)
 
         # Add mock ESM embeddings using generic key
@@ -445,27 +464,46 @@ class TestCachedEmbeddingEncoder:
 
         s, V, pp_edge_attr = encoder(sample_hetero_data)
 
-        assert s.shape == (n_atoms, 1536)
+        assert s.shape == (n_atoms, 64)
         assert V.shape == (n_atoms, 0, 3)
-        # Raw embeddings should be identical to input
-        assert torch.allclose(s, sample_hetero_data["protein"].embedding)
-        # Cached embedding encoder doesn't return edge features
         assert pp_edge_attr is None
 
     def test_missing_embeddings_error(self, device, sample_hetero_data):
         """Should raise KeyError when embeddings are missing."""
         encoder = CachedEmbeddingEncoder(
-            embedding_key="embedding", encoder_type="slae", embedding_dim=128
+            embedding_key="embedding",
+            encoder_type="slae",
+            embedding_dim=128,
+            fusion_dim=64,
         ).to(device)
 
         # sample_hetero_data does NOT have embedding attribute
         with pytest.raises(KeyError, match="requires cached embeddings"):
             encoder(sample_hetero_data)
 
+    def test_embedding_width_mismatch_raises(self, device, sample_hetero_data):
+        """Cached embedding width must match the configured embedding_dim."""
+        encoder = CachedEmbeddingEncoder(
+            embedding_key="embedding",
+            encoder_type="slae",
+            embedding_dim=128,
+            fusion_dim=64,
+        ).to(device)
+        n_atoms = sample_hetero_data["protein"].num_nodes
+        # width 256 != configured embedding_dim 128
+        sample_hetero_data["protein"].embedding = torch.randn(
+            n_atoms, 256, device=device
+        )
+        with pytest.raises(ValueError, match="embedding_dim=128"):
+            encoder(sample_hetero_data)
+
     def test_encoder_no_nans(self, device, sample_hetero_data_with_embedding):
         """Output should not contain NaNs or Infs."""
         encoder = CachedEmbeddingEncoder(
-            embedding_key="embedding", encoder_type="slae", embedding_dim=128
+            embedding_key="embedding",
+            encoder_type="slae",
+            embedding_dim=128,
+            fusion_dim=64,
         ).to(device)
 
         s, V, _ = encoder(sample_hetero_data_with_embedding)
@@ -473,23 +511,35 @@ class TestCachedEmbeddingEncoder:
         assert not torch.isnan(s).any(), "Scalar output contains NaNs"
         assert not torch.isinf(s).any(), "Scalar output contains Infs"
 
-    def test_encoder_only_ligand_params(self, device):
-        """The encoder's only learnable params are the ligand projection.
+    def test_element_identity_affects_output(
+        self, device, sample_hetero_data_with_embedding
+    ):
+        """Nodes with identical embeddings but different element one-hots must fuse
+        to different features -- i.e. per-atom element identity is actually used."""
+        data = sample_hetero_data_with_embedding
+        # Two nodes share an embedding but differ in element one-hot.
+        data["protein"].embedding[1] = data["protein"].embedding[0]
+        x = torch.zeros_like(data["protein"].x)
+        x[0, 0] = 1.0  # element A
+        x[1, 1] = 1.0  # element B
+        data["protein"].x = x
 
-        Cached embeddings pass through unchanged; the single learnable component
-        is ligand_embed (Linear(NODE_FEATURE_DIM, embedding_dim, bias=False)).
-        """
-        embedding_dim = 128
         encoder = CachedEmbeddingEncoder(
-            embedding_key="embedding", encoder_type="slae", embedding_dim=embedding_dim
+            embedding_key="embedding",
+            encoder_type="slae",
+            embedding_dim=128,
+            fusion_dim=64,
         ).to(device)
-        expected = NODE_FEATURE_DIM * embedding_dim
-        assert sum(p.numel() for p in encoder.parameters()) == expected
+        s, _, _ = encoder(data)
+        assert not torch.allclose(s[0], s[1])
 
     def test_device_placement(self, device, sample_hetero_data):
         """Verify tensors are on the correct device."""
         encoder = CachedEmbeddingEncoder(
-            embedding_key="embedding", encoder_type="esm", embedding_dim=1536
+            embedding_key="embedding",
+            encoder_type="esm",
+            embedding_dim=1536,
+            fusion_dim=64,
         ).to(device)
 
         # Add mock embeddings on correct device
@@ -535,9 +585,12 @@ class TestEncoderInteroperability:
         )
 
         # SLAE encoder via CachedEmbeddingEncoder
-        # embedding_dim=128 matches the fixture's embedding shape
+        # embedding_dim=128 matches the fixture's embedding shape; fused to hidden_s
         slae_encoder = CachedEmbeddingEncoder(
-            embedding_key="embedding", encoder_type="slae", embedding_dim=128
+            embedding_key="embedding",
+            encoder_type="slae",
+            embedding_dim=128,
+            fusion_dim=hidden_dims[0],
         ).to(device)
 
         # Create flow models with each encoder
