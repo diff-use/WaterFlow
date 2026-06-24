@@ -182,8 +182,8 @@ class CachedEmbeddingEncoder(BaseProteinEncoder):
         # Learnable projection for ligand atoms (element one-hot -> embedding space).
         # Ligands have no ESM/SLAE embeddings; this replaces zero-padding with a
         # learned representation parameterized only by element type. Created here in
-        # __init__ (not forward) so its parameters are registered before the
-        # optimizer is built and are replicated/synchronized under DDP/FSDP.
+        # __init__ (not forward) so its parameters are registered as part of the
+        # module before the optimizer captures model.parameters().
         self.ligand_embed = nn.Linear(NODE_FEATURE_DIM, embedding_dim, bias=False)
 
     @property

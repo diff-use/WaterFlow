@@ -675,7 +675,7 @@ class ProteinWaterDataset(Dataset):
         base_pdb_dir: str = "/sb/wankowicz_lab/data/srivasv/pdb_redo_data",
         cutoff: float = 8.0,
         include_mates: bool = True,
-        include_ligands: bool = False,
+        include_ligands: bool = True,
         geometry_cache_name: str = "geometry",
         preprocess: bool = True,
         duplicate_single_sample: int = 1,
@@ -702,16 +702,17 @@ class ProteinWaterDataset(Dataset):
             base_pdb_dir: Base directory containing PDB subdirectories
             cutoff: Distance cutoff for PP edges and crystal contacts (Angstroms)
             include_mates: If True, include symmetry mate atoms as protein nodes
-            include_ligands: If True, include every non-protein, non-water heavy
-                             atom (small-molecule ligands, ions, cofactors, and
-                             nucleic acids) as protein-type nodes. They are appended
-                             after protein (and mate) atoms with a boolean is_ligand
-                             mask and residue_index = -1.
+            include_ligands: If True (default), include every non-protein,
+                             non-water heavy atom (small-molecule ligands, ions,
+                             cofactors, and nucleic acids) as protein-type nodes.
+                             They are appended after protein (and mate) atoms with a
+                             boolean is_ligand mask and residue_index = -1.
             geometry_cache_name: Base name for geometry cache directory. When
                                  include_mates=True, "_mates" is appended automatically.
-                                 When include_ligands=True, "_lig" is appended.
-                                 Default is "geometry", resulting in "geometry/" or
-                                 "geometry_mates/" subdirectories.
+                                 include_ligands does NOT affect the cache directory
+                                 name -- ligand inclusion is part of the dataset config,
+                                 not the cache path. Default is "geometry", yielding
+                                 "geometry/" or "geometry_mates/".
             preprocess: If True, run preprocessing on missing cached files
             duplicate_single_sample: If dataset has 1 sample, duplicate it this many times
             Quality checks (always active):
@@ -737,10 +738,10 @@ class ProteinWaterDataset(Dataset):
         """
 
         self.cache_dir = Path(processed_dir)
-        # Directory-based separation: geometry/ vs geometry_mates/ vs geometry_lig/ etc.
+        # Directory-based separation: geometry/ vs geometry_mates/. Ligand inclusion
+        # is governed by the include_ligands config flag, not the cache directory
+        # name, so the geometry cache name is unaffected by include_ligands.
         cache_suffix = "_mates" if include_mates else ""
-        if include_ligands:
-            cache_suffix += "_lig"
         self.geometry_dir = self.cache_dir / f"{geometry_cache_name}{cache_suffix}"
         self.base_pdb_dir = Path(base_pdb_dir)
         self.cutoff = cutoff

@@ -567,8 +567,8 @@ class TestLigandParsing:
 class TestLigandNodeIntegration:
     """Tests for ligand atoms folded into protein nodes (include_ligands=True)."""
 
-    def test_include_ligands_flag_off_by_default(self, pdb_4h0b, tmp_path):
-        """include_ligands defaults to False; ligand atoms must not appear in protein nodes."""
+    def test_include_ligands_disabled_excludes_ligands(self, pdb_4h0b, tmp_path):
+        """With include_ligands=False, ligand atoms must not appear in protein nodes."""
         list_file = tmp_path / "list.txt"
         list_file.write_text("4h0b_final\n")
         from pathlib import Path
