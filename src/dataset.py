@@ -22,6 +22,7 @@ import pymol2
 import torch
 import torch.nn.functional as F
 from biotite.structure.io.pdb import get_structure, PDBFile
+from biotite.structure.io.pdbx import CIFFile, get_structure as get_structure_cif
 from loguru import logger
 from scipy.spatial.distance import cdist
 from torch import Tensor
@@ -46,14 +47,28 @@ def element_onehot(symbols: list[str]) -> Tensor:
     return F.one_hot(indices, num_classes=other_idx + 1).float()
 
 
+def _read_structure(path: str | Path, extra_fields=None) -> bts.AtomArray:
+    """Read structure from PDB or CIF file, dispatching on extension."""
+    path = Path(path)
+    kw = dict(model=1, altloc="occupancy")
+    if extra_fields:
+        kw["extra_fields"] = extra_fields
+    if path.suffix == ".cif":
+        cif_file = CIFFile.read(path)
+        return get_structure_cif(cif_file, **kw)
+    else:
+        pdb_file = PDBFile.read(path)
+        return get_structure(pdb_file, **kw)
+
+
 def parse_asu_with_biotite(
-    path: str,
+    path: str | Path,
 ) -> tuple[bts.AtomArray, bts.AtomArray]:
     """
-    Parse PDB file and extract protein and water atoms.
+    Parse PDB or CIF file and extract protein and water atoms.
 
     Args:
-        path: Path to PDB file
+        path: Path to PDB or CIF file
 
     Returns:
         Tuple of (protein_atoms, water_atoms) as biotite AtomArrays.
@@ -64,9 +79,10 @@ def parse_asu_with_biotite(
         - altloc="occupancy": Selects highest-occupancy alternate conformation
         - Uses filter_amino_acids (not filter_canonical_amino_acids) to include
           modified residues like MSE, SEC that external encoders may handle
+        - b_factor is always read so the caller can compute normalized B-factors
+          without a second file read.
     """
-    pdb_file = PDBFile.read(path)
-    atoms = get_structure(pdb_file, model=1, altloc="occupancy")
+    atoms = _read_structure(path, extra_fields=["b_factor"])
 
     atoms = atoms[atoms.element != "H"]
 
@@ -80,7 +96,7 @@ def parse_asu_with_biotite(
 
 
 def get_crystal_contacts_pymol(
-    pdb_path: str, cutoff: float = 5.0
+    struc_path: str, cutoff: float = 5.0
 ) -> dict[str, np.ndarray | list]:
     """
     Extract ASU and symmetry mate atoms within crystal contact distance.
@@ -89,7 +105,7 @@ def get_crystal_contacts_pymol(
     interface atoms within the specified cutoff distance.
 
     Args:
-        pdb_path: Path to PDB file with crystal symmetry information
+        struc_path: Path to structure file (PDB/CIF) with crystal symmetry information
         cutoff: Distance cutoff in Angstroms for interface detection
 
     Returns:
@@ -104,7 +120,7 @@ def get_crystal_contacts_pymol(
         cmd.reinitialize()
         cmd.feedback("disable", "all", "everything")
         obj = "struct"
-        cmd.load(pdb_path, obj)
+        cmd.load(struc_path, obj)
         cmd.symexp("sym", obj, obj, cutoff)
         cmd.select("interface", f"byres (sym* within {cutoff} of {obj})")
 
@@ -492,7 +508,7 @@ def load_edia_for_pdb(
 
 
 def compute_normalized_bfactors(
-    pdb_path: str,
+    struc_path: str,
 ) -> tuple[dict[tuple[str, int, str], float] | None, np.ndarray | None]:
     """
     Extract and normalize B-factors for water molecules.
@@ -501,7 +517,7 @@ def compute_normalized_bfactors(
     in the selected structure.
 
     Args:
-        pdb_path: Path to PDB file
+        struc_path: Path to structure file (PDB/CIF)
 
     Returns:
         Tuple of:
@@ -510,34 +526,38 @@ def compute_normalized_bfactors(
         Returns (None, None) on error
     """
     try:
-        pdb_file = PDBFile.read(pdb_path)
-        atoms = pdb_file.get_structure(
-            model=1, altloc="occupancy", extra_fields=["b_factor"]
-        )
+        atoms = _read_structure(struc_path, extra_fields=["b_factor"])
 
         # filter for water molecules
         water_mask = (atoms.res_name == "HOH") | (atoms.res_name == "WAT")
         water_atoms = atoms[water_mask]
 
+        return _compute_normalized_bfactors_from_atoms(water_atoms)
+
+    except Exception as e:
+        logger.warning(f"Warning: Could not extract B-factors from {struc_path}: {e}")
+        return None, None
+
+
+def _compute_normalized_bfactors_from_atoms(
+    water_atoms: bts.AtomArray,
+) -> tuple[dict[tuple[str, int, str], float] | None, np.ndarray | None]:
+    """Compute normalized B-factors from an already-parsed water AtomArray."""
+    try:
         if not water_atoms:
             return None, None
 
-        # Normalize using water-only B-factor statistics.
         water_mean = np.mean(water_atoms.b_factor)
         water_std = np.std(water_atoms.b_factor)
 
-        # lookup dictionary with one entry per unique water residue
         bfactor_lookup = {}
-
         for i in range(len(water_atoms)):
             chain_id = str(water_atoms.chain_id[i])
             res_id = int(water_atoms.res_id[i])
             ins_code = normalize_ins_code(water_atoms.ins_code[i])
             key = (chain_id, res_id, ins_code)
-
             if key not in bfactor_lookup:
                 raw_bfactor = water_atoms.b_factor[i]
-                # If all water B-factors are identical, assign neutral z-score 0.0.
                 normalized = (
                     (raw_bfactor - water_mean) / max(water_std, 1e-3)
                     if water_std > 0
@@ -548,7 +568,7 @@ def compute_normalized_bfactors(
         return bfactor_lookup, water_atoms.b_factor
 
     except Exception as e:
-        logger.warning(f"Warning: Could not extract B-factors from {pdb_path}: {e}")
+        logger.warning(f"Warning: Could not compute B-factors from atoms: {e}")
         return None, None
 
 
@@ -806,15 +826,18 @@ class ProteinWaterDataset(Dataset):
         Expected format:
         <pdb_id>_final  (e.g., "6eey_final")
 
-        Constructs path: {base_pdb_dir}/{pdb_id}/{pdb_id}_final.pdb
+        Resolves path in {base_pdb_dir}/{pdb_id}/, preferring
+        {pdb_id}_final.cif when present, otherwise falling back to
+        {pdb_id}_final.pdb.
         """
         entries = []
+        logger.info(f"Parsing PDB list: {pdb_list_file}")
+        pdb_ids = []
         with open(pdb_list_file, "r") as f:
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
-
                 if not line.endswith("_final"):
                     logger.warning(f"Warning: Unexpected format: {line}")
                     continue
@@ -822,18 +845,28 @@ class ProteinWaterDataset(Dataset):
                 if not pdb_id:
                     logger.warning(f"Warning: Unexpected format: {line}")
                     continue
+                pdb_ids.append((pdb_id, line))
 
-                pdb_path = self.base_pdb_dir / pdb_id / f"{pdb_id}_final.pdb"
+        logger.info(
+            f"Read {len(pdb_ids)} IDs, resolving file paths for requested entries..."
+        )
 
-                # Cache key is just the base key - directory separation handles mates
-                entries.append(
-                    {
-                        "pdb_id": pdb_id,
-                        "pdb_path": pdb_path,
-                        "cache_key": line,
-                        "embedding_key": line,  # Same as cache_key for embedding lookup
-                    }
-                )
+        for pdb_id, cache_key in pdb_ids:
+            subdir = self.base_pdb_dir / pdb_id
+            cif_path = subdir / f"{pdb_id}_final.cif"
+            struc_path = (
+                cif_path if cif_path.is_file() else subdir / f"{pdb_id}_final.pdb"
+            )
+
+            # Cache key is just the base key - directory separation handles mates
+            entries.append(
+                {
+                    "pdb_id": pdb_id,
+                    "struc_path": struc_path,
+                    "cache_key": cache_key,
+                    "embedding_key": cache_key,  # Same as cache_key for embedding lookup
+                }
+            )
 
         logger.info(f"Loaded {len(entries)} entries from {pdb_list_file}")
         return entries
@@ -898,9 +931,9 @@ class ProteinWaterDataset(Dataset):
 
         Raises ValueError if structure fails quality filters.
         """
-        pdb_path = str(entry["pdb_path"])
+        struc_path = str(entry["struc_path"])
 
-        protein_atoms, water_atoms = parse_asu_with_biotite(pdb_path)
+        protein_atoms, water_atoms = parse_asu_with_biotite(struc_path)
 
         # check inter-chain interactions for multi-chain proteins
         chain_valid, chain_reason, _ = check_chain_interactions(
@@ -910,7 +943,7 @@ class ProteinWaterDataset(Dataset):
         if not chain_valid:
             raise ValueError(f"Quality filter failed: {chain_reason}")
 
-        crystal_data = get_crystal_contacts_pymol(pdb_path, self.cutoff)
+        crystal_data = get_crystal_contacts_pymol(struc_path, self.cutoff)
 
         # Ensure consistency between biotite and PyMOL parsing.
         # Both parse the same ASU, but may differ in altloc selection, hydrogen
@@ -937,7 +970,7 @@ class ProteinWaterDataset(Dataset):
             # load EDIA data only when the EDIA filter is active
             edia_lookup = None
             if use_edia_filter:
-                edia_json_path = Path(pdb_path).with_suffix(".json")
+                edia_json_path = Path(struc_path).with_suffix(".json")
                 edia_lookup = load_edia_for_pdb(edia_json_path)
                 if edia_lookup is None:
                     raise ValueError(
@@ -946,9 +979,10 @@ class ProteinWaterDataset(Dataset):
                     )
 
             # compute normalized B-factors only when the B-factor filter is active
+            # water_atoms already has b_factor from parse_asu_with_biotite — no second read needed
             bfactor_lookup = None
             if use_bfactor_filter:
-                bfactor_lookup, _ = compute_normalized_bfactors(pdb_path)
+                bfactor_lookup, _ = _compute_normalized_bfactors_from_atoms(water_atoms)
 
             # build water keys for filtering
             water_keys = list(

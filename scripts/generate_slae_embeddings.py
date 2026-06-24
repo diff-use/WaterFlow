@@ -390,17 +390,11 @@ def main() -> None:
         batch_info = []
 
         for entry in entry_batch:
-            pdb_path = entry["pdb_path"]
             cache_key = entry["cache_key"]
-
-            if not pdb_path.exists():
-                logger.error(f"PDB file not found: {pdb_path}")
-                failures.append((cache_key, "PDB file not found"))
-                continue
 
             try:
                 # protein_atoms: biotite AtomArray with num_atoms atoms
-                protein_atoms, _ = parse_asu_with_biotite(str(pdb_path))
+                protein_atoms, _ = parse_asu_with_biotite(str(entry["struc_path"]))
                 # coords: (num_residues, 37, 3) - atom37 coordinates
                 # residue_type: (num_residues,) - residue type indices
                 # chains: (num_residues,) - chain IDs
