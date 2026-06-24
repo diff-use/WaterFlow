@@ -271,6 +271,13 @@ class ProteinGVPEncoder(nn.Module):
         Returns:
             (num_residues, embed_dim) pooled residue embeddings
         """
+        # Ligand atoms carry residue_index = -1 (no parent residue). Drop them so
+        # scatter ops only ever see valid non-negative residue indices.
+        if (residue_index < 0).any():
+            valid = residue_index >= 0
+            atom_embed = atom_embed[valid]
+            residue_index = residue_index[valid]
+
         aggr = self.pool_aggr
         if aggr == "mean":
             return scatter_mean(atom_embed, residue_index, dim=0, dim_size=num_residues)

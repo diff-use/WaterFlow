@@ -69,7 +69,7 @@ def compute_esm_embeddings(
     """
     try:
         # Load ground truth atoms using geometry cache parser in src/dataset.py
-        protein_atoms, _ = parse_asu_with_biotite(str(pdb_path))
+        protein_atoms, _, _ = parse_asu_with_biotite(str(pdb_path))
         if len(protein_atoms) == 0:
             raise ValueError(f"No protein atoms found in {pdb_path}")
 

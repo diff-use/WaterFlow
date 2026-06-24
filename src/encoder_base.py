@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 
+from src.constants import NODE_FEATURE_DIM
+
 
 if TYPE_CHECKING:
     from torch_geometric.data import HeteroData
@@ -140,29 +142,39 @@ class BaseProteinEncoder(ABC, nn.Module):
 @register_encoder("slae")
 class CachedEmbeddingEncoder(BaseProteinEncoder):
     """
-    Encoder for pre-computed protein embeddings (ESM, SLAE, etc.).
+    Fusion encoder for pre-computed protein embeddings (ESM, SLAE, etc.).
 
-    This pass-through encoder reads embeddings stored in HeteroData under a
-    specified key and returns them as scalar features. No neural network
-    computation occurs; all geometric processing happens in downstream layers.
+    Each protein-type node is described by two modalities, both already present
+    on data['protein']:
+      - a cached sequence/structure embedding (`embedding`, width embedding_dim).
+        ASU protein atoms carry the real ESM/SLAE vector; symmetry mates and
+        ligand atoms are zero-padded (they have no residue embedding).
+      - a per-atom element one-hot (`x`, width NODE_FEATURE_DIM).
+
+    The two are each projected to fusion_dim, concatenated, and passed through a
+    small MLP to produce per-node scalar features. This gives every atom -- not
+    just ligands -- its own element identity (ESM is per-residue, so all atoms of
+    a residue otherwise share an identical vector), and handles ligands/mates
+    uniformly: their zero-ESM rows simply contribute nothing from esm_proj, so
+    their fused features are element-driven. No ligand/mate special-casing.
 
     Supported embedding types:
     - ESM: Evolutionary Scale Modeling embeddings (https://github.com/evolutionaryscale/esm)
     - SLAE: Strictly Local Atom-level Environment Embeddings (https://www.biorxiv.org/content/10.1101/2025.10.03.680398v1)
 
-    Embedding dimension is inferred from the data on first forward pass.
-    Accessing output_dims before forward() raises RuntimeError.
+    Memory: Cached embeddings are NOT loaded at initialization. The encoder
+    stores only the key name; actual embeddings are read from data at forward
+    time, allowing standard PyTorch batching/streaming.
 
-    Memory: Embeddings are NOT loaded at initialization. The encoder stores
-    only the key name; actual embeddings are read from data at forward time,
-    allowing standard PyTorch batching/streaming.
-
-    Note: Returns empty vector features (shape Nx0x3) since cached embeddings
-    are scalar-only.
+    Note: Returns empty vector features (shape Nx0x3); fused output is scalar-only.
     """
 
     def __init__(
-        self, embedding_key: str, encoder_type: str, embedding_dim: int | None = None
+        self,
+        embedding_key: str,
+        encoder_type: str,
+        embedding_dim: int,
+        fusion_dim: int,
     ):
         """
         Initialize CachedEmbeddingEncoder.
@@ -170,27 +182,33 @@ class CachedEmbeddingEncoder(BaseProteinEncoder):
         Args:
             embedding_key: Key to look up embeddings in data['protein']
             encoder_type: Encoder type identifier ('esm' or 'slae')
-            embedding_dim: Optional embedding dimension. If provided, output_dims is
-                available immediately. If None, dimension is inferred on first forward.
+            embedding_dim: Width of the cached embeddings (e.g. 1536 for ESM,
+                128 for SLAE). Validated against the data at forward time.
+            fusion_dim: Output width of the fused scalar features (output_dims[0]).
         """
         super().__init__()
-        self._embedding_dim: int | None = embedding_dim
+        self._embedding_dim: int = embedding_dim
+        self._fusion_dim: int = fusion_dim
         self._embedding_key = embedding_key
         self._encoder_type = encoder_type
+        # Project each modality to fusion_dim, LayerNorm each stream, then fuse.
+        # Separate projections + per-stream norm keep the 16-dim element signal from
+        # being swamped by the wide, large-norm ESM vector (raw ESM norms are ~1e3-1e4
+        # vs 1 for a one-hot), so both modalities enter the fuse MLP at comparable scale.
+        self.esm_proj = nn.Linear(embedding_dim, fusion_dim)
+        self.elem_proj = nn.Linear(NODE_FEATURE_DIM, fusion_dim)
+        self.esm_norm = nn.LayerNorm(fusion_dim)
+        self.elem_norm = nn.LayerNorm(fusion_dim)
+        self.fuse = nn.Sequential(
+            nn.Linear(2 * fusion_dim, fusion_dim),
+            nn.SiLU(),
+            nn.Linear(fusion_dim, fusion_dim),
+        )
 
     @property
     def output_dims(self) -> tuple[int, int]:
-        """Return (embedding_dim, 0) — scalars only.
-
-        Raises:
-            RuntimeError: If accessed before first forward pass (dimension not yet inferred)
-        """
-        if self._embedding_dim is None:
-            raise RuntimeError(
-                f"{self._encoder_type.upper()} encoder dimension not yet known. "
-                "Run a forward pass first to infer dimension from data."
-            )
-        return self._embedding_dim, 0
+        """Return (fusion_dim, 0) — scalars only."""
+        return self._fusion_dim, 0
 
     @property
     def encoder_type(self) -> str:
@@ -201,17 +219,16 @@ class CachedEmbeddingEncoder(BaseProteinEncoder):
         self, data: HeteroData
     ) -> tuple[torch.Tensor, torch.Tensor, tuple | None]:
         """
-        Read cached embeddings and return (s, V, None).
-
-        On first call, infers embedding dimension from the data.
+        Fuse the cached embedding with the element one-hot and return (s, V, None).
 
         Args:
-            data: HeteroData with cached embeddings in data['protein']
+            data: HeteroData with cached embeddings and element features in
+                data['protein'] ('embedding' and 'x').
 
         Returns:
-            s: (N, embedding_dim) — raw embeddings
-            V: (N, 0, 3)         — empty vector features
-            pp_edge_attr: None   — cached embedding encoders don't process edges
+            s: (N, fusion_dim) — fused scalar features
+            V: (N, 0, 3)       — empty vector features
+            pp_edge_attr: None — cached embedding encoders don't process edges
         """
         if self._embedding_key not in data["protein"]:
             raise KeyError(
@@ -221,12 +238,23 @@ class CachedEmbeddingEncoder(BaseProteinEncoder):
 
         embeddings = data["protein"][self._embedding_key]
 
-        # Infer dimension on first forward
-        if self._embedding_dim is None:
-            self._embedding_dim = embeddings.size(-1)
+        # Validate cached width against the configured embedding_dim, otherwise a
+        # mismatched cache fails inside esm_proj with an opaque shape error.
+        if embeddings.size(-1) != self._embedding_dim:
+            raise ValueError(
+                f"{self._encoder_type.upper()} encoder configured with "
+                f"embedding_dim={self._embedding_dim}, but cached "
+                f"'{self._embedding_key}' embeddings have width {embeddings.size(-1)}. "
+                f"Ensure the encoder config matches the cached embeddings."
+            )
 
-        V = embeddings.new_empty(embeddings.size(0), 0, 3)
-        return embeddings, V, None
+        x = data["protein"].x.to(embeddings.device)
+        esm = self.esm_norm(self.esm_proj(embeddings))
+        elem = self.elem_norm(self.elem_proj(x))
+        fused = self.fuse(torch.cat([esm, elem], dim=-1))
+
+        V = fused.new_empty(fused.size(0), 0, 3)
+        return fused, V, None
 
     @classmethod
     def from_config(cls, config: dict, device: torch.device) -> CachedEmbeddingEncoder:
@@ -237,13 +265,27 @@ class CachedEmbeddingEncoder(BaseProteinEncoder):
             config: Configuration dictionary with:
                 - encoder_type: 'esm' or 'slae' (required)
                 - embedding_key: Optional key name (defaults to 'embedding')
-                - embedding_dim: Optional embedding dimension (if known upfront)
+                - embedding_dim: Cached embedding width (required)
+                - hidden_s: Fused output width / scalar hidden dim (required)
             device: Device to place the encoder on
 
         Returns:
             Instantiated CachedEmbeddingEncoder
+
+        Raises:
+            ValueError: If 'embedding_dim' or 'hidden_s' is missing from config
         """
         encoder_type = config["encoder_type"]  # "esm" or "slae"
         embedding_key = config.get("embedding_key", "embedding")
         embedding_dim = config.get("embedding_dim")
-        return cls(embedding_key, encoder_type, embedding_dim).to(device)
+        if embedding_dim is None:
+            raise ValueError(
+                f"'{encoder_type}' encoder requires 'embedding_dim' in its config."
+            )
+        fusion_dim = config.get("hidden_s")
+        if fusion_dim is None:
+            raise ValueError(
+                f"'{encoder_type}' encoder requires 'hidden_s' (fused output width) "
+                f"in its config."
+            )
+        return cls(embedding_key, encoder_type, embedding_dim, fusion_dim).to(device)
