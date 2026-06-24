@@ -563,16 +563,6 @@ class TestWaterEdgeConnectivity:
             f"Only {len(water_nodes_with_edges)}/{n_water} waters have protein edges"
         )
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason=(
-            "build_knn_edges' src/dst argument-order fix changes self-graph (ww) "
-            "edge direction: row 0 now holds discovered neighbors rather than query "
-            "points, so a point that is nobody's k-nearest neighbor can be dropped "
-            "from coverage. Intermittent because it depends on random fixture positions. "
-            "Fixed structurally in the future edge-type-flags PR via radius-based edges."
-        ),
-    )
     def test_all_waters_have_water_edges(self, simple_hetero_data):
         """Ensure every water has at least one water-water edge (if multiple waters exist)."""
         updater = ProteinWaterUpdate(hidden_dims=(128, 16), layers=1)
@@ -583,22 +573,15 @@ class TestWaterEdgeConnectivity:
         n_water = simple_hetero_data["water"].num_nodes
 
         if n_water > 1:
-            # Check that all water nodes appear in the water-water edges
-            water_nodes_with_edges = torch.unique(ww_edges[0])
+            # WW edges are built per destination (knn query per water), so every
+            # water is guaranteed to appear as a destination (row 1); a water that
+            # is no other water's nearest neighbor would be missing from the source
+            # row (row 0). Assert coverage on the destination/query row.
+            water_nodes_with_edges = torch.unique(ww_edges[1])
             assert len(water_nodes_with_edges) == n_water, (
                 f"Only {len(water_nodes_with_edges)}/{n_water} waters have water-water edges"
             )
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason=(
-            "build_knn_edges' src/dst argument-order fix changes self-graph (ww) "
-            "edge direction: row 0 now holds discovered neighbors rather than query "
-            "points, so a point that is nobody's k-nearest neighbor can be dropped "
-            "from coverage. Intermittent because it depends on random fixture positions. "
-            "Fixed structurally in the edge-type-flags PR via radius-based edges."
-        ),
-    )
     def test_batched_waters_have_edges(self, batched_hetero_data):
         """Ensure all waters in a batched graph have edges."""
         updater = ProteinWaterUpdate(hidden_dims=(128, 16), layers=1)
@@ -615,9 +598,11 @@ class TestWaterEdgeConnectivity:
             f"Only {len(water_nodes_with_pw_edges)}/{n_water} waters have protein edges in batched data"
         )
 
-        # Check water-water edges
+        # Check water-water edges. WW edges are built per destination, so every
+        # water appears as a destination (row 1); assert coverage on the
+        # destination/query row rather than the source row.
         if n_water > 1:
-            water_nodes_with_ww_edges = torch.unique(ww_edges[0])
+            water_nodes_with_ww_edges = torch.unique(ww_edges[1])
             assert len(water_nodes_with_ww_edges) == n_water, (
                 f"Only {len(water_nodes_with_ww_edges)}/{n_water} waters have water-water edges in batched data"
             )
