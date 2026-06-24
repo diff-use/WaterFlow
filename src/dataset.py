@@ -855,7 +855,7 @@ class ProteinWaterDataset(Dataset):
             subdir = self.base_pdb_dir / pdb_id
             cif_path = subdir / f"{pdb_id}_final.cif"
             struc_path = (
-                cif_path if os.path.isfile(cif_path) else subdir / f"{pdb_id}_final.pdb"
+                cif_path if cif_path.is_file() else subdir / f"{pdb_id}_final.pdb"
             )
 
             # Cache key is just the base key - directory separation handles mates

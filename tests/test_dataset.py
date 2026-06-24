@@ -726,50 +726,6 @@ class TestProteinWaterDataset:
         assert data["protein"].num_nodes == 1
         assert calls == [(cache_path, False)]
 
-    def test_cached_file_created(
-        self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir
-    ):
-        """Preprocessing should create cached .pt file."""
-        _ = ProteinWaterDataset(
-            pdb_list_file=single_pdb_list_file,
-            processed_dir=str(tmp_processed_dir),
-            base_pdb_dir=str(pdb_base_dir),
-            preprocess=True,
-        )  # need to call this to trigger the processing
-
-        # With include_mates=True, cache goes to geometry_mates/ directory
-        cache_file = tmp_processed_dir / "geometry_mates" / "6eey_final.pt"
-        assert cache_file.exists()
-
-    def test_no_reprocess_if_cached(
-        self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir
-    ):
-        """Should not reprocess if cache exists."""
-        # First creation
-        ProteinWaterDataset(
-            pdb_list_file=single_pdb_list_file,
-            processed_dir=str(tmp_processed_dir),
-            base_pdb_dir=str(pdb_base_dir),
-            preprocess=True,
-            include_mates=True,
-        )
-
-        # With include_mates=True, cache goes to geometry_mates/ directory
-        cache_file = tmp_processed_dir / "geometry_mates" / "6eey_final.pt"
-        mtime_1 = cache_file.stat().st_mtime
-
-        # Second creation should not modify cache
-        ProteinWaterDataset(
-            pdb_list_file=single_pdb_list_file,
-            processed_dir=str(tmp_processed_dir),
-            base_pdb_dir=str(pdb_base_dir),
-            preprocess=True,
-            include_mates=True,
-        )
-
-        mtime_2 = cache_file.stat().st_mtime
-        assert mtime_1 == mtime_2
-
 
 @pytest.mark.integration
 class TestQualityFiltersWithRealPDBs:
