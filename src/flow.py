@@ -76,6 +76,19 @@ def sample_waters_uniform_ball(
         dim_size=num_graphs,
         reduce="sum",
     )
+
+    # fail fast: a graph that requests waters must have at least one protein atom.
+    # Otherwise graph_sizes is 0 and graph_offsets + local_idx would index into a
+    # neighbouring graph's atoms (or out of bounds) when picking anchors below.
+    num_waters_dev = num_waters.to(device)
+    empty_protein = (num_waters_dev > 0) & (num_p_per_graph == 0)
+    if empty_protein.any():
+        bad = torch.nonzero(empty_protein, as_tuple=False).flatten().tolist()
+        raise ValueError(
+            f"Cannot sample waters for graph(s) {bad}: requested "
+            f"{num_waters_dev[bad].tolist()} water(s) but they have zero protein atoms."
+        )
+
     offsets = torch.zeros(num_graphs + 1, dtype=torch.long, device=device)
     offsets[1:] = num_p_per_graph.cumsum(dim=0)
 
@@ -585,8 +598,8 @@ class FlowMatcher:
     High level class for flow matching training, validation, and numerical integration
     """
 
-    SAMPLING_STRATEGIES = {"uniform_ball", "scaled_gaussian"}
-    DYNAMIC_EDGE_POLICIES = {"auto", "radius", "knn_if_isolated"}
+    SAMPLING_STRATEGIES = ("uniform_ball", "scaled_gaussian")
+    DYNAMIC_EDGE_POLICIES = ("auto", "radius", "knn_if_isolated")
 
     def __init__(
         self,
@@ -943,6 +956,9 @@ class FlowMatcher:
             x: (N_water_total, 3) initial noise positions
             batch_w: (N_water_total,) batch indices
         """
+        if water_count < 0:
+            raise ValueError(f"water_count must be >= 0, got {water_count}")
+
         num_residues = g["protein"].num_residues  # (num_graphs,)
         num_graphs = num_residues.size(0)
 
@@ -995,7 +1011,8 @@ class FlowMatcher:
         Returns:
             List of dicts, one per input graph, each with keys:
                 'protein_pos': (Np, 3) - includes both ASU and mate atoms
-                'water_true': (Nw, 3) - None if water_ratio/water_count is used
+                'water_true': (Nw, 3) ground-truth waters (always returned; when
+                        water_ratio/water_count is set its count may differ from water_pred)
                 'water_pred': (Nw, 3) final prediction
                 'pdb_id': PDB identifier
         """
@@ -1038,6 +1055,9 @@ class FlowMatcher:
                 reduce="sum",
             )
             x, batch_w = self._sample_waters(g, num_waters, device)
+            # keep the graph's water batch in sync with the resampled layout so
+            # the model expands t against the correct per-water graph indices
+            g["water"].batch = batch_w
 
         x1_pred_ema = x.clone()
 
@@ -1116,7 +1136,8 @@ class FlowMatcher:
         Returns:
             List of dicts, one per input graph, each with keys:
                 'protein_pos': (Np, 3) - includes both ASU and mate atoms
-                'water_true': (Nw, 3) - None if water_ratio/water_count is used
+                'water_true': (Nw, 3) ground-truth waters (always returned; when
+                        water_ratio/water_count is set its count may differ from water_pred)
                 'water_pred': (Nw, 3) final prediction
                 'trajectory': list of (Nw, 3) at each step (if return_trajectory=True)
         """
@@ -1159,6 +1180,9 @@ class FlowMatcher:
                 reduce="sum",
             )
             x, batch_w = self._sample_waters(g, num_waters, device)
+            # keep the graph's water batch in sync with the resampled layout so
+            # the model expands t against the correct per-water graph indices
+            g["water"].batch = batch_w
 
         x1_pred_ema = x.clone()
 

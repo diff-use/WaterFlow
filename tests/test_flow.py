@@ -535,6 +535,22 @@ class TestUniformBallSampling:
         assert pos.shape == (0, 3)
         assert batch_w.shape == (0,)
 
+    def test_zero_protein_graph_raises(self, device):
+        """Requesting waters for a graph with no protein atoms fails fast."""
+        # graph 0 has protein atoms, graph 1 has none but requests waters
+        protein_pos = torch.randn(5, 3, device=device)
+        batch_p = torch.zeros(5, dtype=torch.long, device=device)
+        num_waters = torch.tensor([3, 4], dtype=torch.long, device=device)
+
+        with pytest.raises(ValueError, match="zero protein atoms"):
+            sample_waters_uniform_ball(
+                protein_pos=protein_pos,
+                batch_p=batch_p,
+                num_waters=num_waters,
+                cutoff=8.0,
+                device=device,
+            )
+
     def test_large_spread_protein_succeeds(self, device):
         """The scenario that crashes truncated Gaussian (sigma~50) works here."""
         torch.manual_seed(0)
@@ -553,6 +569,7 @@ class TestUniformBallSampling:
         assert pos.shape == (301, 3)
         assert batch_w.shape == (301,)
 
+    @pytest.mark.slow
     def test_real_structure_cutoff_and_batch(self, device, pdb_6eey):
         """Cutoff guarantee holds on real protein geometry; batch indexing is correct
         when two structures with different water counts are packed into one call."""
@@ -637,6 +654,17 @@ class TestScaledGaussianSampling:
 
         assert pos.shape == (0, 3)
         assert batch_w.shape == (0,)
+
+
+@pytest.mark.unit
+class TestWaterCountValidation:
+    def test_negative_water_count_raises(self, device):
+        """A negative water_count is rejected before any sampling work."""
+        fm = FlowMatcher(model=Mock(cutoff=8.0))
+        g = HeteroData()  # guard fires before touching graph contents
+
+        with pytest.raises(ValueError, match="water_count must be >= 0"):
+            fm._setup_water_nodes_from_count(g, -1, device)
 
 
 # ============== Tests for distortion ==============
