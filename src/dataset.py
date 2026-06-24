@@ -76,12 +76,9 @@ def parse_asu_with_biotite(
 
     protein_mask = bts.filter_amino_acids(atoms)
     water_mask = (atoms.res_name == "HOH") | (atoms.res_name == "WAT")
-    # "Ligand" here is broad: every non-protein, non-water heavy atom. This
-    # intentionally includes small-molecule ligands, ions, cofactors AND
-    # non-amino-acid polymers such as nucleic acids (ATOM records, not HETATM),
-    # which are kept as element-typed context nodes rather than dropped. We do not
-    # key on atoms.hetero for that reason. Modified residues are kept as protein
-    # via filter_amino_acids and excluded here by ~protein_mask.
+
+    # "ligand" here is broad: every non-protein, non-water heavy atom.
+    # includes small-molecule ligands, ions, cofactors and even nucleic acids
     ligand_mask = ~protein_mask & ~water_mask
 
     protein_atoms = atoms[protein_mask]
@@ -1075,14 +1072,10 @@ class ProteinWaterDataset(Dataset):
         # is_ligand mask marks which protein-type nodes are ligand atoms.
         # Ligands always go last so num_asu_protein and mate counts are unaffected,
         # preserving ESM/SLAE embedding alignment via _pad_atom_embeddings_for_mates.
-        #
-        # TODO(ligands+mates): this only adds ASU ligands. Once dev_crystal_mates
-        # lands, mates are restricted to polymer.protein, so a ligand sitting in a
-        # crystal contact is dropped from the mate side -> the ASU sees its own
-        # ligands but neighbor/contact ligands are invisible (asymmetric context).
-        # For consistency, also include ligand het atoms from the symmetry mates:
-        # keep them in get_crystal_contacts_pymol (don't filter to polymer.protein),
-        # run them through dedup_mate_atoms, and append with is_ligand=True like here.
+        
+        # TODO(ligands+mates): this only adds ASU ligands. Until dev_crystal_mates
+        # is opened for a PR, mates are restricted to polymer.protein, so a ligand sitting in a
+        # crystal contact is dropped from the mates
         if self.include_ligands and len(ligand_atoms) > 0:
             ligand_pos = torch.tensor(ligand_atoms.coord, dtype=torch.float32) - center
             ligand_elements = [str(e).upper() for e in ligand_atoms.element]

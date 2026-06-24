@@ -222,13 +222,15 @@ class CachedEmbeddingEncoder(BaseProteinEncoder):
 
         embeddings = data["protein"][self._embedding_key]
 
-        # Replace zero-padded ligand rows with learned element projection
+        # Move the mask and node features onto the embeddings' device first:
+        # boolean indexing requires the mask and indexed tensor to share a device,
+        # which may not hold if a caller moved only embeddings (e.g. to GPU).
         lig_mask = getattr(data["protein"], "is_ligand", None)
         if lig_mask is not None and lig_mask.any():
+            lig_mask = lig_mask.to(embeddings.device)
+            x = data["protein"].x.to(embeddings.device)
             embeddings = embeddings.clone()
-            embeddings[lig_mask] = self.ligand_embed(
-                data["protein"].x[lig_mask].to(embeddings.device)
-            )
+            embeddings[lig_mask] = self.ligand_embed(x[lig_mask])
 
         V = embeddings.new_empty(embeddings.size(0), 0, 3)
         return embeddings, V, None
