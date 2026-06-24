@@ -1072,7 +1072,7 @@ class ProteinWaterDataset(Dataset):
         # is_ligand mask marks which protein-type nodes are ligand atoms.
         # Ligands always go last so num_asu_protein and mate counts are unaffected,
         # preserving ESM/SLAE embedding alignment via _pad_atom_embeddings_for_mates.
-        
+
         # TODO(ligands+mates): this only adds ASU ligands. Until dev_crystal_mates
         # is opened for a PR, mates are restricted to polymer.protein, so a ligand sitting in a
         # crystal contact is dropped from the mates
