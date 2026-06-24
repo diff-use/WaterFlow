@@ -745,6 +745,8 @@ class ProteinWaterDataset(Dataset):
 
         if sample_cache_size < 0:
             raise ValueError("sample_cache_size must be >= 0")
+        if max_neighbors < 1:
+            raise ValueError("max_neighbors must be >= 1")
 
         self.cache_dir = Path(processed_dir)
         # Directory-based separation: geometry/ vs geometry_mates/
