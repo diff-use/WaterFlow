@@ -249,6 +249,18 @@ def parse_args():
         action="store_true",
         help="Keep workers alive between epochs",
     )
+    p.add_argument(
+        "--sample_cache_size",
+        type=int,
+        default=0,
+        help="Per-worker in-process dataset sample LRU cache size (0 disables caching)",
+    )
+    p.add_argument(
+        "--cache_load_mmap",
+        action="store_true",
+        default=False,
+        help="Use mmap-backed torch.load for dataset cache files when supported",
+    )
 
     # scheduler
     p.add_argument(
@@ -305,6 +317,8 @@ def parse_args():
     args = p.parse_args()
     if args.encoder_type == "gvp" and args.embedding_dim is not None:
         p.error("--embedding_dim is only valid for cached encoders: slae or esm")
+    if args.sample_cache_size < 0:
+        p.error("--sample_cache_size must be >= 0")
     return args
 
 
@@ -351,6 +365,8 @@ def _build_dataset_config(args: argparse.Namespace) -> tuple[dict, dict, dict]:
         "base_pdb_dir": args.base_pdb_dir,
         "geometry_cache_name": args.geometry_cache_name,
         "include_mates": args.include_mates,
+        "sample_cache_size": args.sample_cache_size,
+        "cache_load_mmap": args.cache_load_mmap,
         **quality_kwargs,
         **water_filter_kwargs,
     }
