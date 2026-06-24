@@ -30,10 +30,16 @@ from torch_cluster import radius_graph
 from torch_geometric.data import Batch, HeteroData
 from tqdm import tqdm
 
-from src.constants import EDGE_PP, ELEM_IDX, ELEMENT_VOCAB, NUM_RBF
+from src.constants import (
+    EDGE_PP,
+    ELEM_IDX,
+    ELEMENT_VOCAB,
+    NUM_RBF,
+)
 from src.utils import (
     compute_edge_features,
     normalize_ins_code,
+    sanitize_res_names_for_esm,
 )
 
 
@@ -141,7 +147,7 @@ def match_atoms_to_coords(
     Returns:
         List of indices into atoms array for matched atoms
     """
-    if target_coords.shape[0] == 0:
+    if target_coords.shape[0] == 0 or len(atoms) == 0:
         return []
 
     matched = []
@@ -666,7 +672,7 @@ def filter_waters_by_quality(
 
 class ProteinWaterDataset(Dataset):
     """
-    Dataset for protein crystal contact prediction.
+    Dataset for predicting water positions in protein crystal structures.
 
     Returns HeteroData with:
     - 'protein' node type: ASU protein atoms + optionally symmetry mates
@@ -1010,20 +1016,22 @@ class ProteinWaterDataset(Dataset):
         protein_elements = [str(e).upper() for e in protein_atoms.element]
         protein_x = element_onehot(protein_elements)
 
-        # compute residue indices (including ins_code to match ESM/SLAE residue counting)
-        res_id = protein_atoms.res_id
-        chain_id_arr = protein_atoms.chain_id
-        ins_code_arr = np.array(
-            [normalize_ins_code(x) for x in protein_atoms.ins_code], dtype=object
+        # Residue indices must match the ESM embedding script's residue counting.
+        # get_residue_starts splits on res_name and ins_code, so normalize both
+        # the same way the ESM script does (sanitize_res_names_for_esm for names,
+        # normalize_ins_code for insertion codes) to stay aligned with the stored
+        # embeddings.
+        sanitized_for_idx = sanitize_res_names_for_esm(protein_atoms)
+        for i in range(len(sanitized_for_idx)):
+            sanitized_for_idx.ins_code[i] = normalize_ins_code(
+                sanitized_for_idx.ins_code[i]
+            )
+        res_starts = bts.get_residue_starts(sanitized_for_idx)
+        num_residues = len(res_starts)
+        atom_res_idx = (
+            np.searchsorted(res_starts, np.arange(len(protein_atoms)), side="right") - 1
         )
-        residue_keys = list(zip(chain_id_arr, res_id, ins_code_arr))
-        unique_res = {k: i for i, k in enumerate(dict.fromkeys(residue_keys))}
-        protein_res_idx = torch.tensor(
-            [unique_res[k] for k in residue_keys], dtype=torch.long
-        )
-
-        # check water/residue ratio
-        num_residues = len(unique_res)
+        protein_res_idx = torch.from_numpy(atom_res_idx.astype(np.int64))
         num_waters = len(water_atoms)
         ratio_valid, ratio_reason = check_water_residue_ratio(
             num_waters,

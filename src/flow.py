@@ -34,12 +34,37 @@ def build_knn_edges(
     batch_dst: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
-    KNN edges from src -> dst (source indices in row 0, dest in row 1).
+    Build KNN edges from src -> dst (source indices in row 0, dest in row 1).
+
+    The KNN query is performed *per destination*: for each point in ``dst_pos``
+    we look up its ``k`` nearest neighbors in ``src_pos`` (``knn(x=src_pos,
+    y=dst_pos, ...)``) and emit them as incoming edges. As a consequence every
+    destination node is guaranteed to have up to ``k`` incoming edges (and so
+    appears in row 1), whereas a source node that is no destination's nearest
+    neighbor may not appear in row 0 at all. Coverage checks ("every node has an
+    edge") must therefore be made against the destination row (row 1).
+
+    For a homogeneous graph (``src_pos is dst_pos``) self-edges are dropped.
+
+    Args:
+        src_pos: (N_src, 3) source node positions.
+        dst_pos: (N_dst, 3) destination node positions.
+        k: Number of nearest source neighbors to find per destination node.
+        batch_src: (N_src,) batch assignment for source nodes, or None.
+        batch_dst: (N_dst,) batch assignment for destination nodes, or None.
+
+    Returns:
+        (2, E) edge index tensor with source indices in row 0, destination in
+        row 1.
     """
     if src_pos.numel() == 0 or dst_pos.numel() == 0:
         return torch.empty(2, 0, dtype=torch.long, device=src_pos.device)
 
-    idx = knn(x=dst_pos, y=src_pos, k=k, batch_x=batch_dst, batch_y=batch_src)
+    # knn(x=src_pos, y=dst_pos) returns row 0 = dst (query) indices, row 1 = src
+    # (neighbor) indices; swap so the result follows the src(row 0)->dst(row 1)
+    # edge_index convention.
+    idx = knn(x=src_pos, y=dst_pos, k=k, batch_x=batch_src, batch_y=batch_dst)
+    idx = torch.stack((idx[1], idx[0]), dim=0)
 
     # remove self-edges if homogeneous
     if src_pos.data_ptr() == dst_pos.data_ptr():

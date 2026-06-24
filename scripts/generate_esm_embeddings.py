@@ -41,9 +41,14 @@ from esm.utils.structure.protein_complex import ProteinComplex
 from loguru import logger
 from tqdm import tqdm
 
-from src.constants import ONE_TO_THREE, THREE_TO_ONE
+from src.constants import THREE_TO_ONE
 from src.dataset import parse_asu_with_biotite
-from src.utils import normalize_ins_code, parse_split_file, setup_logging_for_tqdm
+from src.utils import (
+    normalize_ins_code,
+    parse_split_file,
+    sanitize_res_names_for_esm,
+    setup_logging_for_tqdm,
+)
 
 
 def compute_esm_embeddings(
@@ -95,13 +100,11 @@ def compute_esm_embeddings(
         ]
         num_residues = len(biotite_seq)
 
-        # Sanitize the AtomArray so ESM accepts all residues
+        # Sanitize the AtomArray so ESM accepts all residues. Uses the shared
+        # helper so residue-name canonicalization stays identical to the residue
+        # indexing in src/dataset.py.
+        protein_atoms = sanitize_res_names_for_esm(protein_atoms)
         protein_atoms.hetero[:] = False
-        for i in range(len(protein_atoms)):
-            orig_res = protein_atoms.res_name[i]
-            # Map to 1-letter code, then convert back to 3-letter
-            aa1 = THREE_TO_ONE.get(orig_res, "X")
-            protein_atoms.res_name[i] = ONE_TO_THREE.get(aa1, "UNK")
 
         # Write sanitized array to an in-memory buffer
         sanitized_pdb = PDBFile()
