@@ -16,6 +16,8 @@ from src.flow import (
     FlowMatcher,
     FlowWaterGVP,
     ProteinWaterUpdate,
+    sample_waters_scaled_gaussian,
+    sample_waters_uniform_ball,
 )
 from src.gvp_encoder import GVPEncoder, make_gvp_encoder_data, ProteinGVPEncoder
 
@@ -400,6 +402,23 @@ class TestFlowMatcher:
         assert "rmsd" in result
         assert result["loss"] >= 0
 
+    def test_scaled_gaussian_auto_policy_enables_knn_fallback(
+        self, device, gvp_encoder
+    ):
+        model = FlowWaterGVP(
+            encoder=gvp_encoder,
+            hidden_dims=(64, 8),
+            layers=1,
+        ).to(device)
+
+        flow_matcher = FlowMatcher(
+            model,
+            sampling_strategy="scaled_gaussian",
+            dynamic_edge_policy="auto",
+        )
+
+        assert flow_matcher._effective_dynamic_edge_policy() == "knn_if_isolated"
+
     @pytest.mark.slow
     def test_euler_integrate(self, flow_matcher, simple_hetero_data, device):
         results = flow_matcher.euler_integrate(
@@ -450,6 +469,202 @@ class TestFlowMatcher:
 
         n_water = simple_hetero_data["water"].num_nodes
         assert water_pred.shape == (n_water, 3)
+
+
+# ============== Tests for water sampling strategies ==============
+
+
+@pytest.mark.unit
+class TestUniformBallSampling:
+    def test_shapes_and_counts(self, device):
+        torch.manual_seed(0)
+        protein_pos = torch.tensor(
+            [[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [0.0, 0.0, 0.0], [0.5, 0.0, 0.0]],
+            device=device,
+        )
+        batch_p = torch.tensor([0, 0, 1, 1], dtype=torch.long, device=device)
+        num_waters = torch.tensor([4, 3], dtype=torch.long, device=device)
+
+        pos, batch_w = sample_waters_uniform_ball(
+            protein_pos=protein_pos,
+            batch_p=batch_p,
+            num_waters=num_waters,
+            cutoff=2.0,
+            device=device,
+        )
+
+        assert pos.shape == (7, 3)
+        assert batch_w.shape == (7,)
+        assert (batch_w == 0).sum().item() == 4
+        assert (batch_w == 1).sum().item() == 3
+
+    def test_all_within_cutoff(self, device):
+        torch.manual_seed(42)
+        protein_pos = torch.randn(20, 3, device=device) * 50
+        batch_p = torch.cat([torch.zeros(10), torch.ones(10)]).long().to(device)
+        num_waters = torch.tensor([50, 50], dtype=torch.long, device=device)
+        cutoff = 8.0
+
+        pos, batch_w = sample_waters_uniform_ball(
+            protein_pos=protein_pos,
+            batch_p=batch_p,
+            num_waters=num_waters,
+            cutoff=cutoff,
+            device=device,
+        )
+
+        for g in range(2):
+            g_waters = pos[batch_w == g]
+            g_protein = protein_pos[batch_p == g]
+            dists = torch.cdist(g_waters, g_protein)
+            assert dists.min(dim=1).values.max().item() <= cutoff + 1e-5
+
+    def test_empty_waters(self, device):
+        protein_pos = torch.randn(5, 3, device=device)
+        batch_p = torch.zeros(5, dtype=torch.long, device=device)
+        num_waters = torch.tensor([0], dtype=torch.long, device=device)
+
+        pos, batch_w = sample_waters_uniform_ball(
+            protein_pos=protein_pos,
+            batch_p=batch_p,
+            num_waters=num_waters,
+            cutoff=8.0,
+            device=device,
+        )
+
+        assert pos.shape == (0, 3)
+        assert batch_w.shape == (0,)
+
+    def test_zero_protein_graph_raises(self, device):
+        """Requesting waters for a graph with no protein atoms fails fast."""
+        # graph 0 has protein atoms, graph 1 has none but requests waters
+        protein_pos = torch.randn(5, 3, device=device)
+        batch_p = torch.zeros(5, dtype=torch.long, device=device)
+        num_waters = torch.tensor([3, 4], dtype=torch.long, device=device)
+
+        with pytest.raises(ValueError, match="zero protein atoms"):
+            sample_waters_uniform_ball(
+                protein_pos=protein_pos,
+                batch_p=batch_p,
+                num_waters=num_waters,
+                cutoff=8.0,
+                device=device,
+            )
+
+    def test_large_spread_protein_succeeds(self, device):
+        """The scenario that crashes truncated Gaussian (sigma~50) works here."""
+        torch.manual_seed(0)
+        protein_pos = torch.randn(500, 3, device=device) * 50
+        batch_p = torch.zeros(500, dtype=torch.long, device=device)
+        num_waters = torch.tensor([301], dtype=torch.long, device=device)
+
+        pos, batch_w = sample_waters_uniform_ball(
+            protein_pos=protein_pos,
+            batch_p=batch_p,
+            num_waters=num_waters,
+            cutoff=8.0,
+            device=device,
+        )
+
+        assert pos.shape == (301, 3)
+        assert batch_w.shape == (301,)
+
+    @pytest.mark.slow
+    def test_real_structure_cutoff_and_batch(self, device, pdb_6eey):
+        """Cutoff guarantee holds on real protein geometry; batch indexing is correct
+        when two structures with different water counts are packed into one call."""
+        import biotite.structure as bts
+        from biotite.structure.io.pdb import get_structure, PDBFile
+
+        pdb_file = PDBFile.read(pdb_6eey)
+        atoms = get_structure(pdb_file, model=1, altloc="occupancy")
+        atoms = atoms[atoms.element != "H"]
+        protein_atoms = atoms[bts.filter_amino_acids(atoms)]
+
+        protein_pos_np = protein_atoms.coord  # (N, 3) float64
+        n_atoms = len(protein_pos_np)
+
+        # batch two copies: graph 0 gets 50 waters, graph 1 gets 30
+        protein_pos = torch.tensor(protein_pos_np, dtype=torch.float32, device=device)
+        protein_pos_both = torch.cat([protein_pos, protein_pos], dim=0)
+        batch_p = torch.cat(
+            [
+                torch.zeros(n_atoms, dtype=torch.long, device=device),
+                torch.ones(n_atoms, dtype=torch.long, device=device),
+            ]
+        )
+        num_waters = torch.tensor([50, 30], dtype=torch.long, device=device)
+        cutoff = 8.0
+
+        pos, batch_w = sample_waters_uniform_ball(
+            protein_pos=protein_pos_both,
+            batch_p=batch_p,
+            num_waters=num_waters,
+            cutoff=cutoff,
+            device=device,
+        )
+
+        # correct total count and per-graph split
+        assert pos.shape == (80, 3)
+        assert batch_w.shape == (80,)
+        assert (batch_w == 0).sum().item() == 50
+        assert (batch_w == 1).sum().item() == 30
+
+        # every water must be within cutoff of at least one protein atom in its graph
+        for g, n_w in enumerate(num_waters.tolist()):
+            g_waters = pos[batch_w == g]  # (n_w, 3)
+            g_protein = protein_pos_both[batch_p == g]  # (n_atoms, 3)
+            dists = torch.cdist(g_waters, g_protein)  # (n_w, n_atoms)
+            min_dists = dists.min(dim=1).values  # (n_w,)
+            assert min_dists.max().item() <= cutoff + 1e-4, (
+                f"Graph {g}: water too far from protein "
+                f"(max dist {min_dists.max().item():.4f} > {cutoff})"
+            )
+
+
+@pytest.mark.unit
+class TestScaledGaussianSampling:
+    def test_shapes_and_counts(self, device):
+        torch.manual_seed(0)
+        num_waters = torch.tensor([4, 3], dtype=torch.long, device=device)
+        sigma = torch.tensor([1.0, 2.0], device=device)
+
+        pos, batch_w = sample_waters_scaled_gaussian(
+            num_waters=num_waters,
+            sigma_per_graph=sigma,
+            device=device,
+            dtype=torch.float32,
+        )
+
+        assert pos.shape == (7, 3)
+        assert batch_w.shape == (7,)
+        assert (batch_w == 0).sum().item() == 4
+        assert (batch_w == 1).sum().item() == 3
+
+    def test_empty_waters(self, device):
+        num_waters = torch.tensor([0], dtype=torch.long, device=device)
+        sigma = torch.tensor([1.0], device=device)
+
+        pos, batch_w = sample_waters_scaled_gaussian(
+            num_waters=num_waters,
+            sigma_per_graph=sigma,
+            device=device,
+            dtype=torch.float32,
+        )
+
+        assert pos.shape == (0, 3)
+        assert batch_w.shape == (0,)
+
+
+@pytest.mark.unit
+class TestWaterCountValidation:
+    def test_negative_water_count_raises(self, device):
+        """A negative water_count is rejected before any sampling work."""
+        fm = FlowMatcher(model=Mock(cutoff=8.0))
+        g = HeteroData()  # guard fires before touching graph contents
+
+        with pytest.raises(ValueError, match="water_count must be >= 0"):
+            fm._setup_water_nodes_from_count(g, -1, device)
 
 
 # ============== Tests for distortion ==============
