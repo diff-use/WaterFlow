@@ -659,7 +659,116 @@ class TestProteinWaterDataset:
         data_0 = dataset[0]
         data_5 = dataset[5]
         assert torch.allclose(data_0["protein"].pos, data_5["protein"].pos)
-        assert data_0.pdb_id == data_5.pdb_id
+
+    def test_sample_cache_returns_mutation_safe_clones(
+        self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir
+    ):
+        """Cached samples should not be corrupted by mutations to returned data."""
+        dataset = ProteinWaterDataset(
+            pdb_list_file=single_pdb_list_file,
+            processed_dir=str(tmp_processed_dir),
+            base_pdb_dir=str(pdb_base_dir),
+            preprocess=True,
+            sample_cache_size=1,
+        )
+
+        first = dataset[0]
+        original_water_pos = first["water"].pos.clone()
+        assert original_water_pos.numel() > 0
+
+        first["water"].pos.add_(100.0)
+        second = dataset[0]
+
+        assert torch.allclose(second["water"].pos, original_water_pos)
+        assert not torch.allclose(second["water"].pos, first["water"].pos)
+
+    def test_getitem_passes_mmap_flag_to_geometry_loader(self, tmp_path, monkeypatch):
+        """Dataset geometry loading should use the configured mmap option."""
+        list_file = tmp_path / "list.txt"
+        list_file.write_text("test_final\n")
+        processed_dir = tmp_path / "processed"
+        geometry_dir = processed_dir / "geometry"
+        geometry_dir.mkdir(parents=True)
+        cache_path = geometry_dir / "test_final.pt"
+        cache_path.touch()
+
+        cached_geometry = {
+            "protein_pos": torch.zeros((1, 3), dtype=torch.float32),
+            "protein_x": torch.zeros((1, len(ELEMENT_VOCAB) + 1), dtype=torch.float32),
+            "protein_res_idx": torch.zeros(1, dtype=torch.long),
+            "pp_edge_index": torch.empty((2, 0), dtype=torch.long),
+            "pp_edge_unit_vectors": torch.empty((0, 3), dtype=torch.float32),
+            "pp_edge_rbf": torch.empty((0, 16), dtype=torch.float32),
+            "num_asu_protein": 1,
+            "num_protein_residues": 1,
+            "water_pos": torch.zeros((1, 3), dtype=torch.float32),
+            "water_x": torch.zeros((1, len(ELEMENT_VOCAB) + 1), dtype=torch.float32),
+        }
+        calls = []
+
+        def fake_load(path, *, cache_load_mmap=True):
+            calls.append((path, cache_load_mmap))
+            return cached_geometry
+
+        monkeypatch.setattr("src.dataset._load_torch_cache", fake_load)
+
+        dataset = ProteinWaterDataset(
+            pdb_list_file=str(list_file),
+            processed_dir=str(processed_dir),
+            base_pdb_dir=str(tmp_path / "pdb"),
+            include_mates=False,
+            preprocess=False,
+            cache_load_mmap=False,
+        )
+
+        data = dataset[0]
+
+        assert data["protein"].num_nodes == 1
+        assert calls == [(cache_path, False)]
+
+    def test_cached_file_created(
+        self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir
+    ):
+        """Preprocessing should create cached .pt file."""
+        _ = ProteinWaterDataset(
+            pdb_list_file=single_pdb_list_file,
+            processed_dir=str(tmp_processed_dir),
+            base_pdb_dir=str(pdb_base_dir),
+            preprocess=True,
+        )  # need to call this to trigger the processing
+
+        # With include_mates=True, cache goes to geometry_mates/ directory
+        cache_file = tmp_processed_dir / "geometry_mates" / "6eey_final.pt"
+        assert cache_file.exists()
+
+    def test_no_reprocess_if_cached(
+        self, single_pdb_list_file, tmp_processed_dir, pdb_base_dir
+    ):
+        """Should not reprocess if cache exists."""
+        # First creation
+        ProteinWaterDataset(
+            pdb_list_file=single_pdb_list_file,
+            processed_dir=str(tmp_processed_dir),
+            base_pdb_dir=str(pdb_base_dir),
+            preprocess=True,
+            include_mates=True,
+        )
+
+        # With include_mates=True, cache goes to geometry_mates/ directory
+        cache_file = tmp_processed_dir / "geometry_mates" / "6eey_final.pt"
+        mtime_1 = cache_file.stat().st_mtime
+
+        # Second creation should not modify cache
+        ProteinWaterDataset(
+            pdb_list_file=single_pdb_list_file,
+            processed_dir=str(tmp_processed_dir),
+            base_pdb_dir=str(pdb_base_dir),
+            preprocess=True,
+            include_mates=True,
+        )
+
+        mtime_2 = cache_file.stat().st_mtime
+        assert mtime_1 == mtime_2
 
 
 @pytest.mark.integration

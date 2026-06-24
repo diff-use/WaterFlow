@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import itertools
 import json
-import os
+from collections import OrderedDict
 from pathlib import Path
 
 import biotite.structure as bts
@@ -208,11 +208,24 @@ def _pad_atom_embeddings_for_mates(
     return torch.cat([asu_embedding, pad], dim=0)
 
 
+def _load_torch_cache(path: Path, cache_load_mmap: bool = True) -> dict:
+    """Load a torch cache file, using mmap when supported by the file/runtime."""
+    if not cache_load_mmap:
+        return torch.load(path, weights_only=False)
+
+    try:
+        return torch.load(path, weights_only=False, mmap=True)
+    except (TypeError, ValueError, RuntimeError, OSError) as exc:
+        logger.debug(f"mmap torch.load failed for {path}; falling back: {exc}")
+        return torch.load(path, weights_only=False)
+
+
 def load_slae_embedding(
     embedding_dir: Path,
     cache_key: str,
     num_asu_protein: int,
     total_num_atoms: int,
+    cache_load_mmap: bool = True,
 ) -> torch.Tensor:
     """
     Load SLAE atom-level embeddings from cache.
@@ -224,6 +237,7 @@ def load_slae_embedding(
         cache_key: Identifier for the cached embedding file
         num_asu_protein: Expected number of ASU protein atoms
         total_num_atoms: Total protein atoms including symmetry mates
+        cache_load_mmap: Use mmap-backed torch.load when supported
 
     Returns:
         (total_num_atoms, slae_dim) tensor with zeros padded for mate atoms
@@ -238,7 +252,7 @@ def load_slae_embedding(
             f"SLAE cache file not found: {slae_cache_path}. "
             "Generate embeddings with scripts/generate_slae_embeddings.py."
         )
-    slae_cached = torch.load(slae_cache_path, weights_only=False)
+    slae_cached = _load_torch_cache(slae_cache_path, cache_load_mmap=cache_load_mmap)
     if "node_embeddings" not in slae_cached:
         raise KeyError(f"Missing 'node_embeddings' in SLAE cache: {slae_cache_path}")
     slae_emb = slae_cached["node_embeddings"]
@@ -254,6 +268,7 @@ def load_esm_embedding(
     embedding_dir: Path,
     cache_key: str,
     num_protein_residues: int,
+    cache_load_mmap: bool = True,
 ) -> torch.Tensor:
     """
     Load ESM residue-level embeddings from cache.
@@ -265,6 +280,7 @@ def load_esm_embedding(
         embedding_dir: Directory containing cached embedding files
         cache_key: Identifier for the cached embedding file
         num_protein_residues: Expected number of unique residues
+        cache_load_mmap: Use mmap-backed torch.load when supported
 
     Returns:
         (num_protein_residues, esm_dim) tensor of residue embeddings
@@ -279,7 +295,7 @@ def load_esm_embedding(
             f"ESM cache file not found: {esm_cache_path}. "
             "Generate embeddings with scripts/generate_esm_embeddings.py."
         )
-    esm_cached = torch.load(esm_cache_path, weights_only=False)
+    esm_cached = _load_torch_cache(esm_cache_path, cache_load_mmap=cache_load_mmap)
     if "residue_embeddings" not in esm_cached:
         raise KeyError(f"Missing 'residue_embeddings' in ESM cache: {esm_cache_path}")
     residue_embeddings = esm_cached["residue_embeddings"]
@@ -685,6 +701,7 @@ class ProteinWaterDataset(Dataset):
         encoder_type: str = "gvp",
         base_pdb_dir: str = "/sb/wankowicz_lab/data/srivasv/pdb_redo_data",
         cutoff: float = 8.0,
+        max_neighbors: int = 256,
         include_mates: bool = True,
         geometry_cache_name: str = "geometry",
         preprocess: bool = True,
@@ -700,6 +717,8 @@ class ProteinWaterDataset(Dataset):
         filter_by_distance: bool = True,
         filter_by_edia: bool = True,
         filter_by_bfactor: bool = True,
+        sample_cache_size: int = 0,
+        cache_load_mmap: bool = False,
     ):
         """
         Args:
@@ -711,6 +730,7 @@ class ProteinWaterDataset(Dataset):
                           Embeddings are loaded only for the selected type.
             base_pdb_dir: Base directory containing PDB subdirectories
             cutoff: Distance cutoff for PP edges and crystal contacts (Angstroms)
+            max_neighbors: Maximum neighbors per node for radius graph construction.
             include_mates: If True, include symmetry mate atoms as protein nodes
             geometry_cache_name: Base name for geometry cache directory. When
                                  include_mates=True, "_mates" is appended automatically.
@@ -738,7 +758,15 @@ class ProteinWaterDataset(Dataset):
             filter_by_edia: Enable/disable EDIA score filtering.
             filter_by_bfactor: Enable/disable B-factor z-score filtering.
                               If a per-water filter is disabled, its threshold is ignored.
+            sample_cache_size: Number of fully built HeteroData samples to keep in a
+                               per-process LRU cache. 0 disables sample caching.
+            cache_load_mmap: Use mmap-backed torch.load for cache files when supported.
         """
+
+        if sample_cache_size < 0:
+            raise ValueError("sample_cache_size must be >= 0")
+        if max_neighbors < 1:
+            raise ValueError("max_neighbors must be >= 1")
 
         self.cache_dir = Path(processed_dir)
         # Directory-based separation: geometry/ vs geometry_mates/
@@ -746,6 +774,7 @@ class ProteinWaterDataset(Dataset):
         self.geometry_dir = self.cache_dir / f"{geometry_cache_name}{cache_suffix}"
         self.base_pdb_dir = Path(base_pdb_dir)
         self.cutoff = cutoff
+        self.max_neighbors = max_neighbors
         self.encoder_type = encoder_type
         if self.encoder_type in ("slae", "esm"):
             self.embedding_dir = self.cache_dir / self.encoder_type
@@ -766,6 +795,9 @@ class ProteinWaterDataset(Dataset):
         self.filter_by_distance = filter_by_distance
         self.filter_by_edia = filter_by_edia
         self.filter_by_bfactor = filter_by_bfactor
+        self.sample_cache_size = int(sample_cache_size)
+        self.cache_load_mmap = bool(cache_load_mmap)
+        self._sample_cache: OrderedDict[tuple[int, str], HeteroData] = OrderedDict()
 
         if self.encoder_type not in {"gvp", "slae", "esm"}:
             raise ValueError(
@@ -1083,7 +1115,12 @@ class ProteinWaterDataset(Dataset):
 
         # Compute PP edges and features
         if final_protein_pos.size(0) > 0:
-            pp_edge_index = radius_graph(final_protein_pos, r=self.cutoff, loop=False)
+            pp_edge_index = radius_graph(
+                final_protein_pos,
+                r=self.cutoff,
+                loop=False,
+                max_num_neighbors=self.max_neighbors,
+            )
             pp_edge_index = _make_undirected(pp_edge_index)
             pp_edge_unit_vectors, pp_edge_rbf = compute_edge_features(
                 final_protein_pos,
@@ -1115,6 +1152,7 @@ class ProteinWaterDataset(Dataset):
                 # Metadata
                 "num_asu_protein": num_asu_protein,
                 "num_protein_residues": num_residues,
+                "max_neighbors": self.max_neighbors,
             },
             cache_path,
         )
@@ -1151,6 +1189,7 @@ class ProteinWaterDataset(Dataset):
                 cache_key=cache_key,
                 num_asu_protein=num_asu_protein,
                 total_num_atoms=data["protein"].num_nodes,
+                cache_load_mmap=self.cache_load_mmap,
             )
             data["protein"].embedding_type = "slae"
         elif self.encoder_type == "esm":
@@ -1159,6 +1198,7 @@ class ProteinWaterDataset(Dataset):
                 embedding_dir=self.embedding_dir,
                 cache_key=cache_key,
                 num_protein_residues=num_protein_residues,
+                cache_load_mmap=self.cache_load_mmap,
             )
             esm_atom_emb = residue_embeddings[asu_protein_res_idx]
             data["protein"].embedding = _pad_atom_embeddings_for_mates(
@@ -1185,6 +1225,13 @@ class ProteinWaterDataset(Dataset):
 
         actual_idx = idx % len(self.entries)
         entry = self.entries[actual_idx]
+        sample_cache_key = (actual_idx, entry["cache_key"])
+        if self.sample_cache_size > 0:
+            cached_sample = self._sample_cache.get(sample_cache_key)
+            if cached_sample is not None:
+                self._sample_cache.move_to_end(sample_cache_key)
+                return cached_sample.clone()
+
         cache_path = self.geometry_dir / f"{entry['cache_key']}.pt"
 
         if not cache_path.exists():
@@ -1193,7 +1240,7 @@ class ProteinWaterDataset(Dataset):
                 f"Run with preprocess=True to generate it."
             )
 
-        cached = torch.load(cache_path, weights_only=False)
+        cached = _load_torch_cache(cache_path, cache_load_mmap=self.cache_load_mmap)
 
         # load all data directly from cache (already includes mates if applicable)
         protein_pos = cached["protein_pos"]
@@ -1244,6 +1291,13 @@ class ProteinWaterDataset(Dataset):
         # store metadata (use embedding_key for consistency with existing code)
         data.pdb_id = entry["embedding_key"]
         data.num_asu_protein_atoms = num_asu_protein
+
+        if self.sample_cache_size > 0:
+            self._sample_cache[sample_cache_key] = data
+            self._sample_cache.move_to_end(sample_cache_key)
+            while len(self._sample_cache) > self.sample_cache_size:
+                self._sample_cache.popitem(last=False)
+            return data.clone()
 
         return data
 
