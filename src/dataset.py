@@ -34,12 +34,11 @@ from src.constants import (
     ELEM_IDX,
     ELEMENT_VOCAB,
     NUM_RBF,
-    ONE_TO_THREE,
-    THREE_TO_ONE,
 )
 from src.utils import (
     compute_edge_features,
     normalize_ins_code,
+    sanitize_res_names_for_esm,
 )
 
 
@@ -984,16 +983,16 @@ class ProteinWaterDataset(Dataset):
         protein_elements = [str(e).upper() for e in protein_atoms.element]
         protein_x = element_onehot(protein_elements)
 
-        # Compute residue indices matching ESM's sanitized residue counting.
-        # The ESM generation script renames non-canonical residues to their canonical
-        # 3-letter equivalent (unknowns -> UNK), which can merge two residues that
-        # share (chain, resid, ins_code) but had different res_names (e.g. Q2K + QIP
-        # both -> UNK at the same position). Apply the same renaming here so the
-        # residue count and indices align with the stored ESM embeddings.
-        sanitized_for_idx = protein_atoms.copy()
+        # Residue indices must match the ESM embedding script's residue counting.
+        # get_residue_starts splits on res_name and ins_code, so normalize both
+        # the same way the ESM script does (sanitize_res_names_for_esm for names,
+        # normalize_ins_code for insertion codes) to stay aligned with the stored
+        # embeddings.
+        sanitized_for_idx = sanitize_res_names_for_esm(protein_atoms)
         for _i in range(len(sanitized_for_idx)):
-            _aa1 = THREE_TO_ONE.get(sanitized_for_idx.res_name[_i], "X")
-            sanitized_for_idx.res_name[_i] = ONE_TO_THREE.get(_aa1, "UNK")
+            sanitized_for_idx.ins_code[_i] = normalize_ins_code(
+                sanitized_for_idx.ins_code[_i]
+            )
         res_starts = bts.get_residue_starts(sanitized_for_idx)
         num_residues = len(res_starts)
         protein_res_idx_np = np.zeros(len(protein_atoms), dtype=np.int64)

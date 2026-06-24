@@ -710,8 +710,11 @@ class TestWaterEdgeConnectivity:
         n_water = simple_hetero_data["water"].num_nodes
 
         if n_water > 1:
-            # Check that all water nodes appear in the water-water edges
-            water_nodes_with_edges = torch.unique(ww_edges[0])
+            # Assert coverage on the destination/query row (row 1), per the
+            # edge_index contract: radius edges are symmetric, but the KNN
+            # fallback for isolated nodes is directional (isolated node = dst),
+            # so row 1 is the row guaranteed to contain every water.
+            water_nodes_with_edges = torch.unique(ww_edges[1])
             assert len(water_nodes_with_edges) == n_water, (
                 f"Only {len(water_nodes_with_edges)}/{n_water} waters have water-water edges"
             )
@@ -732,9 +735,10 @@ class TestWaterEdgeConnectivity:
             f"Only {len(water_nodes_with_pw_edges)}/{n_water} waters have protein edges in batched data"
         )
 
-        # Check water-water edges
+        # Check water-water edges. Assert coverage on the destination/query row
+        # (row 1) per the edge_index contract (see test_all_waters_have_water_edges).
         if n_water > 1:
-            water_nodes_with_ww_edges = torch.unique(ww_edges[0])
+            water_nodes_with_ww_edges = torch.unique(ww_edges[1])
             assert len(water_nodes_with_ww_edges) == n_water, (
                 f"Only {len(water_nodes_with_ww_edges)}/{n_water} waters have water-water edges in batched data"
             )
