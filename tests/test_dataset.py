@@ -545,6 +545,19 @@ class TestCIFParsing:
         assert len(cif_protein) == len(pdb_protein)
         assert len(cif_water) == len(pdb_water)
 
+    def test_accepts_path_objects(self, pdb_6eey, cif_6eey):
+        """_read_structure must accept Path inputs (suffix dispatch), not just str.
+
+        Regression: a previous str-only .endswith(".cif") dispatch raised
+        AttributeError on Path inputs.
+        """
+        pdb_protein, _ = parse_asu_with_biotite(Path(pdb_6eey))
+        cif_protein, _ = parse_asu_with_biotite(Path(cif_6eey))
+
+        assert len(pdb_protein) > 0
+        assert len(cif_protein) > 0
+        assert len(cif_protein) == len(pdb_protein)
+
 
 @pytest.mark.integration
 class TestGetCrystalContactsPymol:

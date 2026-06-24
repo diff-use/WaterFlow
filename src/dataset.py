@@ -47,12 +47,13 @@ def element_onehot(symbols: list[str]) -> Tensor:
     return F.one_hot(indices, num_classes=other_idx + 1).float()
 
 
-def _read_structure(path: str, extra_fields=None) -> bts.AtomArray:
+def _read_structure(path: str | Path, extra_fields=None) -> bts.AtomArray:
     """Read structure from PDB or CIF file, dispatching on extension."""
+    path = Path(path)
     kw = dict(model=1, altloc="occupancy")
     if extra_fields:
         kw["extra_fields"] = extra_fields
-    if path.endswith(".cif"):
+    if path.suffix == ".cif":
         cif_file = CIFFile.read(path)
         return get_structure_cif(cif_file, **kw)
     else:
