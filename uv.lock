@@ -1426,21 +1426,6 @@ wheels = [
 ]
 
 [[package]]
-name = "rdkit"
-version = "2025.9.6"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "numpy" },
-    { name = "pillow" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/43/3c/599c81d456ab2eb3e8d6af1f2f8275689eec3a7c836c3ca6e4c75fb98607/rdkit-2025.9.6-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:95350eeb5d70c5576eca748caf59106ebeea259278ff05c3812adb12c5c4dc10", size = 29558443, upload-time = "2026-03-02T18:08:58.506Z" },
-    { url = "https://files.pythonhosted.org/packages/9a/5f/54a2d040d5ec2f21182da61d67145dd6b0cc3abf2db6737368b8bb3883ef/rdkit-2025.9.6-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:7e8cda5243d586356c2a66bdf70fea3cb3fd552200556efe375da64efb047f73", size = 35119461, upload-time = "2026-03-02T18:09:03.765Z" },
-    { url = "https://files.pythonhosted.org/packages/43/8c/42dde9df1a665e3589eeeaea463b11ec89c9d0c0e82db22d8128e3e14490/rdkit-2025.9.6-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:6be95b735c428ba27badf39e92078133d3a505f872d0a31467ba577d73c57676", size = 36664387, upload-time = "2026-03-02T18:09:08.01Z" },
-    { url = "https://files.pythonhosted.org/packages/27/45/69077326d9969bbf7958b7f6ef03a3111de83ddf8800d5c7dc390041bf36/rdkit-2025.9.6-cp312-cp312-win_amd64.whl", hash = "sha256:80c1fe3d1cc88540f2495272f32f02b4ec58a73db53649c9e4249087deeb62dc", size = 24315769, upload-time = "2026-03-02T18:09:11.987Z" },
-]
-
-[[package]]
 name = "regex"
 version = "2025.11.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1715,8 +1700,8 @@ dependencies = [
     { name = "typing-extensions" },
 ]
 wheels = [
-    { url = "https://download.pytorch.org/whl/cu126/torch-2.8.0%2Bcu126-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:ce6e6a1f4803ad62d1fe51cec3fe5ca14bcd8bc7cace7b09d5590f8147fa16ad" },
-    { url = "https://download.pytorch.org/whl/cu126/torch-2.8.0%2Bcu126-cp312-cp312-win_amd64.whl", hash = "sha256:f6c79eac0018f9d131479ee1b7a68edb030619a316bfbc69275043aa4f338e4c" },
+    { url = "https://download-r2.pytorch.org/whl/cu126/torch-2.8.0%2Bcu126-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:ce6e6a1f4803ad62d1fe51cec3fe5ca14bcd8bc7cace7b09d5590f8147fa16ad", upload-time = "2025-10-01T23:40:02Z" },
+    { url = "https://download-r2.pytorch.org/whl/cu126/torch-2.8.0%2Bcu126-cp312-cp312-win_amd64.whl", hash = "sha256:f6c79eac0018f9d131479ee1b7a68edb030619a316bfbc69275043aa4f338e4c", upload-time = "2025-10-01T23:40:33Z" },
 ]
 
 [[package]]
@@ -1962,7 +1947,6 @@ dependencies = [
     { name = "pillow" },
     { name = "pyg-lib" },
     { name = "pymol-open-source-whl" },
-    { name = "rdkit" },
     { name = "scipy" },
     { name = "torch" },
     { name = "torch-cluster" },
@@ -1994,7 +1978,6 @@ requires-dist = [
     { name = "pillow" },
     { name = "pyg-lib", index = "https://data.pyg.org/whl/torch-2.8.0+cu126.html" },
     { name = "pymol-open-source-whl", specifier = ">=3.1.0.4" },
-    { name = "rdkit" },
     { name = "scipy" },
     { name = "torch", specifier = "==2.8.0", index = "https://download.pytorch.org/whl/cu126" },
     { name = "torch-cluster", index = "https://data.pyg.org/whl/torch-2.8.0+cu126.html" },

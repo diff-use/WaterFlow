@@ -15,7 +15,6 @@ dependencies = [
   "scipy",
   "pandas",
   "numpy",
-  "rdkit",
   "matplotlib",
   "pillow",
   "loguru",

@@ -144,63 +144,51 @@ class CachedEmbeddingEncoder(BaseProteinEncoder):
     """
     Encoder for pre-computed protein embeddings (ESM, SLAE, etc.).
 
-    This pass-through encoder reads embeddings stored in HeteroData under a
-    specified key and returns them as scalar features. No neural network
-    computation occurs; all geometric processing happens in downstream layers.
+    This near pass-through encoder reads embeddings stored in HeteroData under a
+    specified key and returns them as scalar features. The only learnable
+    component is ligand_embed, a projection applied to ligand atoms (which have
+    no cached embedding); all geometric processing happens in downstream layers.
 
     Supported embedding types:
     - ESM: Evolutionary Scale Modeling embeddings (https://github.com/evolutionaryscale/esm)
     - SLAE: Strictly Local Atom-level Environment Embeddings (https://www.biorxiv.org/content/10.1101/2025.10.03.680398v1)
 
-    Embedding dimension is inferred from the data on first forward pass.
-    Accessing output_dims before forward() raises RuntimeError.
+    Embedding dimension must be provided at construction so output_dims is
+    available immediately and ligand_embed can be created in __init__.
 
-    Memory: Embeddings are NOT loaded at initialization. The encoder stores
-    only the key name; actual embeddings are read from data at forward time,
-    allowing standard PyTorch batching/streaming.
+    Memory: Cached embeddings are NOT loaded at initialization. The encoder
+    stores only the key name; actual embeddings are read from data at forward
+    time, allowing standard PyTorch batching/streaming.
 
     Note: Returns empty vector features (shape Nx0x3) since cached embeddings
     are scalar-only.
     """
 
-    def __init__(
-        self, embedding_key: str, encoder_type: str, embedding_dim: int | None = None
-    ):
+    def __init__(self, embedding_key: str, encoder_type: str, embedding_dim: int):
         """
         Initialize CachedEmbeddingEncoder.
 
         Args:
             embedding_key: Key to look up embeddings in data['protein']
             encoder_type: Encoder type identifier ('esm' or 'slae')
-            embedding_dim: Optional embedding dimension. If provided, output_dims is
-                available immediately. If None, dimension is inferred on first forward.
+            embedding_dim: Dimension of the cached embeddings. Required so that
+                output_dims is available immediately and the ligand projection can
+                be created in __init__ (see ligand_embed below).
         """
         super().__init__()
-        self._embedding_dim: int | None = embedding_dim
+        self._embedding_dim: int = embedding_dim
         self._embedding_key = embedding_key
         self._encoder_type = encoder_type
         # Learnable projection for ligand atoms (element one-hot -> embedding space).
         # Ligands have no ESM/SLAE embeddings; this replaces zero-padding with a
-        # learned representation parameterized only by element type.
-        # Lazily initialized on first forward when embedding_dim becomes known.
-        self.ligand_embed: nn.Linear | None = (
-            nn.Linear(NODE_FEATURE_DIM, embedding_dim, bias=False)
-            if embedding_dim is not None
-            else None
-        )
+        # learned representation parameterized only by element type. Created here in
+        # __init__ (not forward) so its parameters are registered before the
+        # optimizer is built and are replicated/synchronized under DDP/FSDP.
+        self.ligand_embed = nn.Linear(NODE_FEATURE_DIM, embedding_dim, bias=False)
 
     @property
     def output_dims(self) -> tuple[int, int]:
-        """Return (embedding_dim, 0) — scalars only.
-
-        Raises:
-            RuntimeError: If accessed before first forward pass (dimension not yet inferred)
-        """
-        if self._embedding_dim is None:
-            raise RuntimeError(
-                f"{self._encoder_type.upper()} encoder dimension not yet known. "
-                "Run a forward pass first to infer dimension from data."
-            )
+        """Return (embedding_dim, 0) — scalars only."""
         return self._embedding_dim, 0
 
     @property
@@ -214,9 +202,9 @@ class CachedEmbeddingEncoder(BaseProteinEncoder):
         """
         Read cached embeddings and return (s, V, None).
 
-        On first call, infers embedding dimension from the data. If ligand atoms
-        are present (data['protein'].is_ligand), their zero-padded embedding rows
-        are replaced with a learned projection from element one-hot features.
+        If ligand atoms are present (data['protein'].is_ligand), their zero-padded
+        embedding rows are replaced with a learned projection from element one-hot
+        features.
 
         Args:
             data: HeteroData with cached embeddings in data['protein']
@@ -233,13 +221,6 @@ class CachedEmbeddingEncoder(BaseProteinEncoder):
             )
 
         embeddings = data["protein"][self._embedding_key]
-
-        # Infer dimension on first forward and lazily init ligand head
-        if self._embedding_dim is None:
-            self._embedding_dim = embeddings.size(-1)
-            self.ligand_embed = nn.Linear(
-                NODE_FEATURE_DIM, self._embedding_dim, bias=False
-            ).to(embeddings.device)
 
         # Replace zero-padded ligand rows with learned element projection
         lig_mask = getattr(data["protein"], "is_ligand", None)
@@ -261,13 +242,20 @@ class CachedEmbeddingEncoder(BaseProteinEncoder):
             config: Configuration dictionary with:
                 - encoder_type: 'esm' or 'slae' (required)
                 - embedding_key: Optional key name (defaults to 'embedding')
-                - embedding_dim: Optional embedding dimension (if known upfront)
+                - embedding_dim: Embedding dimension (required)
             device: Device to place the encoder on
 
         Returns:
             Instantiated CachedEmbeddingEncoder
+
+        Raises:
+            ValueError: If 'embedding_dim' is missing from config
         """
         encoder_type = config["encoder_type"]  # "esm" or "slae"
         embedding_key = config.get("embedding_key", "embedding")
         embedding_dim = config.get("embedding_dim")
+        if embedding_dim is None:
+            raise ValueError(
+                f"'{encoder_type}' encoder requires 'embedding_dim' in its config."
+            )
         return cls(embedding_key, encoder_type, embedding_dim).to(device)

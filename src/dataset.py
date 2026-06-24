@@ -56,8 +56,12 @@ def parse_asu_with_biotite(
 
     Returns:
         Tuple of (protein_atoms, water_atoms, ligand_atoms) as biotite AtomArrays.
-        Hydrogen atoms are excluded. ligand_atoms contains all non-protein, non-water
-        HETATM records (small molecules, ions, cofactors).
+        Hydrogen atoms are excluded. ligand_atoms contains every non-protein,
+        non-water heavy atom: small-molecule ligands, ions, cofactors, AND
+        non-amino-acid polymers such as nucleic acids (DNA/RNA). It is deliberately
+        NOT restricted to HETATM records -- nucleic acids are written as ATOM
+        records but are kept here as context (their surfaces, especially the
+        phosphate backbone, order nearby water).
 
     Notes:
         - model=1: Uses first model in PDB (standard for X-ray structures)
@@ -72,6 +76,12 @@ def parse_asu_with_biotite(
 
     protein_mask = bts.filter_amino_acids(atoms)
     water_mask = (atoms.res_name == "HOH") | (atoms.res_name == "WAT")
+    # "Ligand" here is broad: every non-protein, non-water heavy atom. This
+    # intentionally includes small-molecule ligands, ions, cofactors AND
+    # non-amino-acid polymers such as nucleic acids (ATOM records, not HETATM),
+    # which are kept as element-typed context nodes rather than dropped. We do not
+    # key on atoms.hetero for that reason. Modified residues are kept as protein
+    # via filter_amino_acids and excluded here by ~protein_mask.
     ligand_mask = ~protein_mask & ~water_mask
 
     protein_atoms = atoms[protein_mask]
@@ -695,9 +705,11 @@ class ProteinWaterDataset(Dataset):
             base_pdb_dir: Base directory containing PDB subdirectories
             cutoff: Distance cutoff for PP edges and crystal contacts (Angstroms)
             include_mates: If True, include symmetry mate atoms as protein nodes
-            include_ligands: If True, include non-water het atoms (ligands, ions,
-                             cofactors) as protein nodes. They are appended after
-                             protein (and mate) atoms with a boolean is_ligand mask.
+            include_ligands: If True, include every non-protein, non-water heavy
+                             atom (small-molecule ligands, ions, cofactors, and
+                             nucleic acids) as protein-type nodes. They are appended
+                             after protein (and mate) atoms with a boolean is_ligand
+                             mask and residue_index = -1.
             geometry_cache_name: Base name for geometry cache directory. When
                                  include_mates=True, "_mates" is appended automatically.
                                  When include_ligands=True, "_lig" is appended.
@@ -1071,13 +1083,15 @@ class ProteinWaterDataset(Dataset):
         # For consistency, also include ligand het atoms from the symmetry mates:
         # keep them in get_crystal_contacts_pymol (don't filter to polymer.protein),
         # run them through dedup_mate_atoms, and append with is_ligand=True like here.
-        if self.include_ligands and ligand_atoms:
+        if self.include_ligands and len(ligand_atoms) > 0:
             ligand_pos = torch.tensor(ligand_atoms.coord, dtype=torch.float32) - center
             ligand_elements = [str(e).upper() for e in ligand_atoms.element]
             ligand_x = element_onehot(ligand_elements)
             final_protein_pos = torch.cat([final_protein_pos, ligand_pos], dim=0)
             final_protein_x = torch.cat([final_protein_x, ligand_x], dim=0)
-            # Ligand atoms get residue_index = -1 (sentinel; no residue embedding)
+            # Ligand atoms get residue_index = -1 (sentinel; no residue embedding).
+            # The is_ligand mask identifies them; residue-pooling masks out these
+            # negative indices before any scatter (see GVPEncoder._pool_by_residue).
             ligand_res_idx = torch.full((len(ligand_atoms),), -1, dtype=torch.long)
             final_protein_res_idx = torch.cat(
                 [final_protein_res_idx, ligand_res_idx], dim=0
@@ -1206,10 +1220,7 @@ class ProteinWaterDataset(Dataset):
         protein_pos = cached["protein_pos"]
         protein_x = cached["protein_x"]
         protein_res_idx = cached["protein_res_idx"]
-        # is_ligand may be absent in older caches (backward compat: all False)
-        is_ligand = cached.get(
-            "is_ligand", torch.zeros(protein_pos.size(0), dtype=torch.bool)
-        )
+        is_ligand = cached["is_ligand"]
         pp_edge_index = cached["pp_edge_index"]
         pp_edge_unit_vectors = cached["pp_edge_unit_vectors"]
         pp_edge_rbf = cached["pp_edge_rbf"]

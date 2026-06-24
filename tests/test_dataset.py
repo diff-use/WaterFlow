@@ -511,7 +511,7 @@ class TestParseAsuWithBiotite:
 
 @pytest.mark.integration
 class TestLigandParsing:
-    """Tests for ligand (non-water HETATM) parsing via parse_asu_with_biotite."""
+    """Tests for ligand (non-protein, non-water heavy atom) parsing via parse_asu_with_biotite."""
 
     def test_returns_three_arrays(self, pdb_4h0b):
         """parse_asu_with_biotite should return (protein, water, ligand) 3-tuple."""
