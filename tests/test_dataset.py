@@ -878,7 +878,9 @@ class TestPdbListParsing:
         )
 
         assert len(dataset.entries) == 1
-        assert dataset.entries[0]["struc_path"] == (base_dir / "abcd" / "abcd_final.cif")
+        assert dataset.entries[0]["struc_path"] == (
+            base_dir / "abcd" / "abcd_final.cif"
+        )
         assert dataset.entries[0]["cache_key"] == "abcd_final"
         assert dataset.entries[0]["embedding_key"] == "abcd_final"
 
@@ -898,7 +900,9 @@ class TestPdbListParsing:
         )
 
         assert len(dataset.entries) == 1
-        assert dataset.entries[0]["struc_path"] == (base_dir / "wxyz" / "wxyz_final.pdb")
+        assert dataset.entries[0]["struc_path"] == (
+            base_dir / "wxyz" / "wxyz_final.pdb"
+        )
 
     def test_only_requested_ids_are_added(self, tmp_path):
         """Only IDs listed in the split file should produce entries."""

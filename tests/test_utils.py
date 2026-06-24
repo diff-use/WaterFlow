@@ -139,7 +139,9 @@ class TestSplitFileParsing:
     """Tests for parse_split_file CIF/PDB structure-path resolution."""
 
     @staticmethod
-    def _write_split(tmp_path: Path, pdb_id: str, suffixes: list[str]) -> tuple[Path, Path]:
+    def _write_split(
+        tmp_path: Path, pdb_id: str, suffixes: list[str]
+    ) -> tuple[Path, Path]:
         """Write a structure dir (with the given suffixes) and a one-line split file."""
         base_dir = tmp_path / "pdbs"
         structure_dir = base_dir / pdb_id
