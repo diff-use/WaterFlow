@@ -1,0 +1,66 @@
+name: Astera ACTL Docker image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile.astera
+      - .github/workflows/astera-docker.yml
+  workflow_dispatch:
+
+env:
+  ASTERA_REGISTRY: harbor.astera.sh
+  ASTERA_IMAGE_NAME: library/waterflow
+  ACTL_VERSION_TAG: main-actl-2026-06-09
+  WATERFLOW_BASE_IMAGE: ${{ vars.WATERFLOW_BASE_IMAGE || 'docker.io/diffuseproject/waterflow:latest@sha256:cfa4d600c88adf5223814e2c1861de85bf6047fe279c0df44f44cb4a8e6c65dc' }}
+
+jobs:
+  astera:
+    name: Build Astera ACTL image
+    runs-on: astera-sh-builder
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to Harbor
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.ASTERA_REGISTRY }}
+          username: ${{ secrets.HARBOR_USERNAME }}
+          password: ${{ secrets.HARBOR_PASSWORD }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.ASTERA_REGISTRY }}/${{ env.ASTERA_IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ env.ACTL_VERSION_TAG }}
+            type=raw,value=main-actl
+            type=raw,value=actl
+            type=sha,prefix=sha-
+
+      - name: Build and push Astera image
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.astera
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            WATERFLOW_BASE_IMAGE=${{ env.WATERFLOW_BASE_IMAGE }}
+          cache-from: type=registry,ref=${{ env.ASTERA_REGISTRY }}/${{ env.ASTERA_IMAGE_NAME }}:buildcache
+          cache-to: type=registry,ref=${{ env.ASTERA_REGISTRY }}/${{ env.ASTERA_IMAGE_NAME }}:buildcache,mode=max
+          provenance: false
+
+      - name: Image digest
+        run: echo "Astera WaterFlow image pushed with digest ${{ steps.build.outputs.digest }}"

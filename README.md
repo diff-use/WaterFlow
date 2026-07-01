@@ -2,6 +2,63 @@
 
 Predicting water molecule placements on protein surfaces using flow matching conditioned on learned protein structure embeddings.
 
+## Running on ACTL
+
+The Astera ACTL overlay image is published as:
+
+```bash
+harbor.astera.sh/library/waterflow:main-actl-2026-06-09
+```
+
+Once the ACTL catalog alias is available, launch from this checkout with:
+
+```bash
+actl pod profiles -n diffuse
+actl pod up waterflow --profile single --image waterflow --pvc-size 100Gi -n diffuse --yes
+```
+
+Before the alias lands, use the full image reference:
+
+```bash
+actl pod up waterflow --profile single \
+  --image harbor.astera.sh/library/waterflow:main-actl-2026-06-09 \
+  --pvc-size 100Gi -n diffuse --yes
+```
+
+The selected diffuse profile auto-mounts the shared volume at `/mnt/diffuse-shared`. The ACTL image exposes `/mnt/diffuse-shared/waterflow` as `/data`, so the container defaults are persistent:
+
+```text
+/data/pdb          # input PDB tree
+/data/cache        # preprocessed geometry/ESM/SLAE caches
+/data/checkpoints  # training checkpoints
+/data/outputs      # inference outputs
+/data/logs         # W&B/offline logs
+/data/splits       # train/val/test split files
+```
+
+Inside the ACTL shell:
+
+```bash
+waterflow train \
+  --encoder_type gvp \
+  --train_list /data/splits/train_list_0.95.txt \
+  --val_list /data/splits/valid_list_0.05.txt \
+  --batch_size 4
+```
+
+`waterflow` uses the synced checkout under `/home/dev/workspace` when available,
+so edits to `src/` and `scripts/` are picked up without rebuilding the image.
+
+To build the ACTL overlay locally:
+
+```bash
+docker buildx build --platform linux/amd64 \
+  -f Dockerfile.astera \
+  --build-arg WATERFLOW_BASE_IMAGE=docker.io/diffuseproject/waterflow:latest@sha256:cfa4d600c88adf5223814e2c1861de85bf6047fe279c0df44f44cb4a8e6c65dc \
+  -t harbor.astera.sh/library/waterflow:main-actl-2026-06-09 \
+  .
+```
+
 ## Project Structure
 
 ```

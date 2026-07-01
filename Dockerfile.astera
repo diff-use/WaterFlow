@@ -1,0 +1,132 @@
+# syntax=docker/dockerfile:1
+# WaterFlow - Astera ACTL overlay.
+#
+# The public diffuseproject/waterflow image bakes the scientific stack and the
+# gated ESM3 model. This overlay keeps that stack intact and only adds ACTL
+# workspace conventions: /home/dev as the persisted home, editor/sync tooling,
+# a shell-friendly command, and shared-volume data defaults.
+#
+# Build locally:
+#   docker buildx build --platform linux/amd64 \
+#     -f Dockerfile.astera \
+#     --build-arg WATERFLOW_BASE_IMAGE=docker.io/diffuseproject/waterflow:latest@sha256:cfa4d600c88adf5223814e2c1861de85bf6047fe279c0df44f44cb4a8e6c65dc \
+#     -t harbor.astera.sh/library/waterflow:main-actl-2026-06-09 \
+#     .
+
+ARG WATERFLOW_BASE_IMAGE=docker.io/diffuseproject/waterflow:latest@sha256:cfa4d600c88adf5223814e2c1861de85bf6047fe279c0df44f44cb4a8e6c65dc
+FROM ${WATERFLOW_BASE_IMAGE} AS astera
+
+USER root
+
+ARG ACTL_PACKAGES="bash ca-certificates curl wget rsync tini vim nano emacs-nox git zsh htop tmux ncdu iputils-ping dnsutils"
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    HOME=/home/dev \
+    XDG_CONFIG_HOME=/home/dev/.config \
+    XDG_CACHE_HOME=/home/dev/.cache \
+    XDG_DATA_HOME=/home/dev/.local/share \
+    SHELL=/bin/bash \
+    VIRTUAL_ENV=/app/.venv \
+    PYTHONPATH=/home/dev/workspace:/app \
+    PATH="/app/.venv/bin:${PATH}" \
+    WATERFLOW_DATA_DIR=/mnt/diffuse-shared/waterflow \
+    WATERFLOW_PDB_DIR=/data/pdb \
+    WATERFLOW_CACHE_DIR=/data/cache \
+    WATERFLOW_CHECKPOINT_DIR=/data/checkpoints \
+    WATERFLOW_OUTPUT_DIR=/data/outputs \
+    WATERFLOW_LOG_DIR=/data/logs \
+    WATERFLOW_SPLITS_DIR=/data/splits
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ${ACTL_PACKAGES} \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean \
+    && mkdir -p \
+        /home/dev/.config \
+        /home/dev/.cache \
+        /home/dev/.local/share \
+        /home/dev/workspace \
+        /mnt/diffuse-shared/waterflow/pdb \
+        /mnt/diffuse-shared/waterflow/cache \
+        /mnt/diffuse-shared/waterflow/checkpoints \
+        /mnt/diffuse-shared/waterflow/outputs \
+        /mnt/diffuse-shared/waterflow/logs \
+        /mnt/diffuse-shared/waterflow/splits \
+        /etc/zsh \
+    && rm -rf /data \
+    && ln -s /mnt/diffuse-shared/waterflow /data \
+    && cat > /usr/local/bin/waterflow <<'EOF'
+#!/usr/bin/env bash
+if [ -d /mnt/diffuse-shared ]; then
+  mkdir -p \
+    /mnt/diffuse-shared/waterflow/pdb \
+    /mnt/diffuse-shared/waterflow/cache \
+    /mnt/diffuse-shared/waterflow/checkpoints \
+    /mnt/diffuse-shared/waterflow/outputs \
+    /mnt/diffuse-shared/waterflow/logs \
+    /mnt/diffuse-shared/waterflow/splits 2>/dev/null || true
+fi
+entrypoint=/app/entrypoint.sh
+if [ -x /home/dev/workspace/docker/entrypoint.sh ] && [ -d /home/dev/workspace/scripts ]; then
+  export WATERFLOW_APP_DIR=/home/dev/workspace
+  entrypoint=/home/dev/workspace/docker/entrypoint.sh
+fi
+exec "${entrypoint}" "$@"
+EOF
+RUN chmod 0755 /usr/local/bin/waterflow \
+    && cat > /usr/local/share/actl-waterflow-shell-init.sh <<'EOF'
+# Keep the baked WaterFlow virtualenv active while letting ACTL's synced checkout
+# at /home/dev/workspace override the baked /app source for edits.
+if [ -d /app/.venv/bin ]; then
+  VIRTUAL_ENV=/app/.venv
+  export VIRTUAL_ENV
+  case ":${PATH}:" in
+    *:/app/.venv/bin:*) ;;
+    *) PATH="/app/.venv/bin:${PATH}" ;;
+  esac
+  export PATH
+fi
+
+if [ -d /home/dev/workspace ]; then
+  case ":${PYTHONPATH:-}:" in
+    *:/home/dev/workspace:*) ;;
+    *) PYTHONPATH="/home/dev/workspace${PYTHONPATH:+:${PYTHONPATH}}" ;;
+  esac
+fi
+if [ -d /app ]; then
+  case ":${PYTHONPATH:-}:" in
+    *:/app:*) ;;
+    *) PYTHONPATH="${PYTHONPATH:+${PYTHONPATH}:}/app" ;;
+  esac
+fi
+export PYTHONPATH
+
+if [ -d /mnt/diffuse-shared ]; then
+  mkdir -p \
+    /mnt/diffuse-shared/waterflow/pdb \
+    /mnt/diffuse-shared/waterflow/cache \
+    /mnt/diffuse-shared/waterflow/checkpoints \
+    /mnt/diffuse-shared/waterflow/outputs \
+    /mnt/diffuse-shared/waterflow/logs \
+    /mnt/diffuse-shared/waterflow/splits 2>/dev/null || true
+fi
+
+case "$-" in
+  *i*)
+    if [ -d /home/dev/workspace ]; then
+      cd /home/dev/workspace || true
+    fi
+    ;;
+esac
+EOF
+RUN chmod 0644 /usr/local/share/actl-waterflow-shell-init.sh \
+    && printf '\n# Astera WaterFlow environment\n[ -r /usr/local/share/actl-waterflow-shell-init.sh ] && . /usr/local/share/actl-waterflow-shell-init.sh\n' >> /etc/bash.bashrc \
+    && printf '\n# Astera WaterFlow environment\n[ -r /usr/local/share/actl-waterflow-shell-init.sh ] && . /usr/local/share/actl-waterflow-shell-init.sh\n' >> /etc/zsh/zshrc \
+    && for cmd in \
+        waterflow python curl wget rsync tini vim nano emacs git zsh htop tmux ncdu ping dig; do \
+          command -v "${cmd}" >/dev/null; \
+        done
+
+WORKDIR /home/dev
+ENTRYPOINT []
+CMD ["bash"]
