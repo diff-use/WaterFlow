@@ -14,6 +14,7 @@ Utility functions organized by category:
 
 from collections.abc import Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -27,6 +28,10 @@ from torch import Tensor
 from tqdm import tqdm
 
 from src.constants import NUM_RBF, ONE_TO_THREE, RBF_CUTOFF, THREE_TO_ONE
+
+
+if TYPE_CHECKING:
+    import biotite.structure as bts
 
 
 def setup_logging_for_tqdm(
@@ -82,7 +87,7 @@ def normalize_ins_code(value) -> str:
     return ins
 
 
-def sanitize_res_names_for_esm(atoms):
+def sanitize_res_names_for_esm(atoms: bts.AtomArray) -> bts.AtomArray:
     """
     Return a copy of an AtomArray with residue names canonicalized to match the
     ESM embedding pipeline.

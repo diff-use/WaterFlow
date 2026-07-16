@@ -163,15 +163,18 @@ def match_atoms_to_coords(
     atoms: bts.AtomArray, target_coords: np.ndarray, tolerance: float = 0.01
 ) -> list[int]:
     """
-    Match biotite atoms to target coordinates by nearest neighbor. (needed for mates when parsing with PyMOL)
+    Match biotite atoms to coordinates from a second parse of the same structure.
+
+    Used to reconcile biotite and PyMOL, which can disagree on altlocs and
+    hydrogens. The caller drops whatever does not match.
 
     Args:
         atoms: Biotite AtomArray with coord attribute
-        target_coords: (N, 3) array of target coordinates to match
+        target_coords: (N, 3) coordinates to match against
         tolerance: Maximum distance in Angstroms for a valid match
 
     Returns:
-        List of indices into atoms array for matched atoms
+        Indices into atoms lying within tolerance of some target coordinate.
     """
     if target_coords.shape[0] == 0 or len(atoms) == 0:
         return []
@@ -182,6 +185,14 @@ def match_atoms_to_coords(
         min_idx = np.argmin(dists)
         if dists[min_idx] < tolerance:
             matched.append(min_idx)
+
+    # A wholesale miss means the parses disagree (frame, cell, altloc). Warn, or
+    # the caller's drop looks like clean data.
+    if len(set(matched)) < len(atoms) // 2:
+        logger.warning(
+            f"Only {len(set(matched))}/{len(atoms)} atoms matched within "
+            f"{tolerance}A; parses may disagree. Unmatched atoms are dropped."
+        )
     return matched
 
 
@@ -1073,22 +1084,19 @@ class ProteinWaterDataset(Dataset):
         protein_elements = [str(e).upper() for e in protein_atoms.element]
         protein_x = element_onehot(protein_elements)
 
-        # Residue indices must match the ESM embedding script's residue counting.
-        # get_residue_starts splits on res_name and ins_code, so normalize both
-        # the same way the ESM script does (sanitize_res_names_for_esm for names,
-        # normalize_ins_code for insertion codes) to stay aligned with the stored
-        # embeddings.
+        # protein_res_idx indexes cached ESM embedding rows, so it uses biotite's
+        # residue segmentation, not res_id (not 0-based, not contiguous, repeats
+        # across chains). Sanitize names and normalize ins_codes first so residues
+        # split exactly where the ESM script splits them.
         sanitized_for_idx = sanitize_res_names_for_esm(protein_atoms)
         for i in range(len(sanitized_for_idx)):
             sanitized_for_idx.ins_code[i] = normalize_ins_code(
                 sanitized_for_idx.ins_code[i]
             )
-        res_starts = bts.get_residue_starts(sanitized_for_idx)
-        num_residues = len(res_starts)
-        atom_res_idx = (
-            np.searchsorted(res_starts, np.arange(len(protein_atoms)), side="right") - 1
-        )
-        protein_res_idx = torch.from_numpy(atom_res_idx.astype(np.int64))
+        num_residues = bts.get_residue_count(sanitized_for_idx)
+        protein_res_idx = torch.from_numpy(
+            bts.spread_residue_wise(sanitized_for_idx, np.arange(num_residues))
+        ).long()
         num_waters = len(water_atoms)
         ratio_valid, ratio_reason = check_water_residue_ratio(
             num_waters,

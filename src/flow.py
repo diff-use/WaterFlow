@@ -60,9 +60,10 @@ def build_knn_edges(
     if src_pos.numel() == 0 or dst_pos.numel() == 0:
         return torch.empty(2, 0, dtype=torch.long, device=src_pos.device)
 
-    # knn(x=src_pos, y=dst_pos) returns row 0 = dst (query) indices, row 1 = src
-    # (neighbor) indices; swap so the result follows the src(row 0)->dst(row 1)
-    # edge_index convention.
+    # knn(x, y) returns row 0 = y (query), row 1 = x (neighbor); swap for this
+    # repo's src(row 0)->dst(row 1) convention.
+    # NOTE: that row order is undocumented and differs in torch_geometric >2.7.0.
+    # Pinned by tests/test_flow.py::TestBuildKnnEdgesDirection.
     idx = knn(x=src_pos, y=dst_pos, k=k, batch_x=batch_src, batch_y=batch_dst)
     idx = torch.stack((idx[1], idx[0]), dim=0)
 
