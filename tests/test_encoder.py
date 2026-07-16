@@ -14,7 +14,7 @@ import torch
 from torch_cluster import radius_graph
 from torch_geometric.data import Data, HeteroData
 
-from src.constants import ESM_EMBEDDING_DIM, SLAE_EMBEDDING_DIM
+from src.constants import ESM_EMBEDDING_DIM, NODE_FEATURE_DIM, SLAE_EMBEDDING_DIM
 from src.encoder_base import build_encoder, CachedEmbeddingEncoder, get_encoder_class
 from src.gvp_encoder import GVPEncoder, ProteinGVPEncoder
 
@@ -490,6 +490,63 @@ class TestCachedEmbeddingEncoder:
         # sample_hetero_data does NOT have embedding attribute
         with pytest.raises(KeyError, match="requires cached embeddings"):
             encoder(sample_hetero_data)
+
+    def test_missing_element_features_error(
+        self, device, sample_hetero_data_with_embedding
+    ):
+        """Should raise KeyError when the element one-hot features are missing."""
+        data = sample_hetero_data_with_embedding
+        del data["protein"].x
+
+        encoder = CachedEmbeddingEncoder(
+            embedding_key="embedding",
+            encoder_type="slae",
+            embedding_dim=SLAE_EMBEDDING_DIM,
+            fusion_dim=64,
+        ).to(device)
+
+        with pytest.raises(KeyError, match="requires per-atom element features"):
+            encoder(data)
+
+    def test_element_width_mismatch_raises(
+        self, device, sample_hetero_data_with_embedding
+    ):
+        """Element one-hot width must match NODE_FEATURE_DIM."""
+        data = sample_hetero_data_with_embedding
+        n_atoms = data["protein"].num_nodes
+        data["protein"].x = torch.randn(n_atoms, NODE_FEATURE_DIM + 1, device=device)
+
+        encoder = CachedEmbeddingEncoder(
+            embedding_key="embedding",
+            encoder_type="slae",
+            embedding_dim=SLAE_EMBEDDING_DIM,
+            fusion_dim=64,
+        ).to(device)
+
+        with pytest.raises(ValueError, match="element one-hot features of width"):
+            encoder(data)
+
+    def test_integer_element_features_are_cast(
+        self, device, sample_hetero_data_with_embedding
+    ):
+        """Integer element one-hots should be cast to the embedding dtype, not crash."""
+        data = sample_hetero_data_with_embedding
+        n_atoms = data["protein"].num_nodes
+        data["protein"].x = torch.zeros(
+            n_atoms, NODE_FEATURE_DIM, dtype=torch.long, device=device
+        )
+        data["protein"].x[:, 0] = 1
+
+        encoder = CachedEmbeddingEncoder(
+            embedding_key="embedding",
+            encoder_type="slae",
+            embedding_dim=SLAE_EMBEDDING_DIM,
+            fusion_dim=64,
+        ).to(device)
+        s, _, _ = encoder(data)
+
+        assert s.shape == (n_atoms, 64)
+        assert not torch.isnan(s).any()
 
     def test_embedding_width_mismatch_raises(self, device, sample_hetero_data):
         """Cached embedding width must match the configured embedding_dim."""

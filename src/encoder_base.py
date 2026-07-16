@@ -251,7 +251,25 @@ class CachedEmbeddingEncoder(BaseProteinEncoder):
                 f"Ensure the encoder config matches the cached embeddings."
             )
 
-        x = data["protein"].x.to(embeddings.device)
+        if "x" not in data["protein"]:
+            raise KeyError(
+                f"{self._encoder_type.upper()} encoder requires per-atom element "
+                "features. Please provide 'x' in data['protein']."
+            )
+
+        x = data["protein"].x
+        # Validate element width too, otherwise a mismatch fails inside elem_proj
+        # with the same opaque shape error the embedding check above avoids.
+        if x.size(-1) != NODE_FEATURE_DIM:
+            raise ValueError(
+                f"{self._encoder_type.upper()} encoder expects element one-hot "
+                f"features of width {NODE_FEATURE_DIM}, but data['protein'].x has "
+                f"width {x.size(-1)}."
+            )
+
+        # Match the embedding stream so a differing device/dtype (e.g. integer
+        # one-hots) doesn't surface as a dtype error inside elem_proj.
+        x = x.to(device=embeddings.device, dtype=embeddings.dtype)
         esm = self.esm_norm(self.esm_proj(embeddings))
         elem = self.elem_norm(self.elem_proj(x))
         fused = self.fuse(torch.cat([esm, elem], dim=-1))

@@ -1066,8 +1066,15 @@ class ProteinWaterDataset(Dataset):
             water_x = torch.zeros((0, len(ELEMENT_VOCAB) + 1), dtype=torch.float32)
 
         # process symmetry mate atoms
-        # NOTE(ligands+mates): mate ligand het atoms belong here too when
-        # include_ligands is set -- see TODO at the ASU ligand-append block below.
+        #
+        # TODO(mates): the mate atom set is unfiltered and inconsistent with the ASU
+        # path. get_crystal_contacts_pymol runs symexp over the whole object and
+        # selects "sym* and interface" with no polymer filter, so mate_atoms carries
+        # het atoms and waters as well as protein, and every one of them becomes a
+        # protein-type node below. Consequences: mate ligands are already included
+        # but never marked in is_ligand (unlike ASU ligands) and are not gated by
+        # include_ligands; mate waters -- symmetry images of the prediction target --
+        # enter as protein context. Fix in dev_crystal_mates.
         mate_coords = crystal_data["mate_coords"]
         if mate_coords.shape[0] > 0:
             mate_pos = torch.tensor(mate_coords, dtype=torch.float32) - center
@@ -1108,11 +1115,8 @@ class ProteinWaterDataset(Dataset):
         # is_ligand mask marks which protein-type nodes are ligand atoms.
         # Ligands always go last so num_asu_protein and mate counts are unaffected,
         # preserving ESM/SLAE embedding alignment via _pad_atom_embeddings_for_mates.
-        #
-        # TODO(ligands+mates): mate ligands should be included as protein-type nodes
-        # too, but are not yet. Mate generation is restricted to polymer.protein, so a
-        # ligand sitting in a crystal contact is currently dropped. Extending mate
-        # generation to het atoms is deferred to dev_crystal_mates.
+        # Only ASU ligands are handled here -- mate het atoms come in unfiltered via
+        # the mate block above, see TODO(mates) there.
         if self.include_ligands and len(ligand_atoms) > 0:
             ligand_pos = torch.tensor(ligand_atoms.coord, dtype=torch.float32) - center
             ligand_elements = [str(e).upper() for e in ligand_atoms.element]
