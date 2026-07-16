@@ -155,8 +155,11 @@ class CachedEmbeddingEncoder(BaseProteinEncoder):
     small MLP to produce per-node scalar features. This gives every atom -- not
     just ligands -- its own element identity (ESM is per-residue, so all atoms of
     a residue otherwise share an identical vector), and handles ligands/mates
-    uniformly: their zero-ESM rows simply contribute nothing from esm_proj, so
-    their fused features are element-driven. No ligand/mate special-casing.
+    uniformly with no special-casing: esm_proj and esm_norm are both affine, so a
+    zero-padded row does not yield zero out of that stream -- it yields a learned
+    constant, identical for every zero row. Zero-padded rows are therefore
+    distinguished from one another only by element, and the shared constant acts
+    as a learned "no cached embedding" marker.
 
     Supported embedding types:
     - ESM: Evolutionary Scale Modeling embeddings (https://github.com/evolutionaryscale/esm)
