@@ -119,7 +119,7 @@ def normalize_ins_code(value) -> str:
 
 def parse_split_file(split_file: Path, base_pdb_dir: Path) -> list[dict]:
     """
-    Parse split file and construct entries with paths.
+    Parse split file and construct entries with resolved structure paths.
 
     Split file format: one entry per line, e.g., '6eey_final' or '6eey_final_A'.
     Lines must contain at least one underscore; the first part is the PDB ID.
@@ -129,37 +129,45 @@ def parse_split_file(split_file: Path, base_pdb_dir: Path) -> list[dict]:
         base_pdb_dir: Base directory containing PDB subdirectories
 
     Returns:
-        List of entry dicts with keys: pdb_id, pdb_path, cache_key
+        List of entry dicts with keys: pdb_id, struc_path, cache_key.
+        `struc_path` is the resolved structure file, preferring the `.cif`
+        and falling back to the `.pdb` sibling.
 
     Raises:
-        ValueError: If split_file contains only malformed lines
+        FileNotFoundError: If an entry has neither a `.cif` nor a `.pdb` file.
     """
     from loguru import logger
 
     entries = []
-    with open(split_file, "r") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-
-            parts = line.split("_")
-            if len(parts) < 2:
+    for line in open(split_file, "r"):
+        parts = line.strip().split("_")
+        if len(parts) < 2 or not parts[0]:
+            if line.strip():  # warn only on non-blank malformed lines
                 logger.warning(
-                    f"Skipping malformed line (expected format 'pdbid_*'): {line}"
+                    f"Skipping malformed line (expected 'pdbid_*'): {line.strip()}"
                 )
-                continue
+            continue
 
-            pdb_id = parts[0]
-            pdb_path = base_pdb_dir / pdb_id / f"{pdb_id}_final.pdb"
-
-            entries.append(
-                {
-                    "pdb_id": pdb_id,
-                    "pdb_path": pdb_path,
-                    "cache_key": line,
-                }
+        pdb_id = parts[0]
+        # Prefer the CIF, fall back to the PDB sibling, error if neither exists.
+        struc_dir = base_pdb_dir / pdb_id
+        for ext in (".cif", ".pdb"):
+            struc_path = struc_dir / f"{pdb_id}_final{ext}"
+            if struc_path.is_file():
+                break
+        else:
+            raise FileNotFoundError(
+                f"No structure file found for '{pdb_id}' in {struc_dir} "
+                f"(looked for {pdb_id}_final.cif and {pdb_id}_final.pdb)"
             )
+
+        entries.append(
+            {
+                "pdb_id": pdb_id,
+                "struc_path": struc_path,
+                "cache_key": "_".join(parts),
+            }
+        )
 
     return entries
 
