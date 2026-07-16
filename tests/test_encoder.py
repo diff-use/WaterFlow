@@ -14,6 +14,7 @@ import torch
 from torch_cluster import radius_graph
 from torch_geometric.data import Data, HeteroData
 
+from src.constants import ESM_EMBEDDING_DIM, SLAE_EMBEDDING_DIM
 from src.encoder_base import build_encoder, CachedEmbeddingEncoder, get_encoder_class
 from src.gvp_encoder import GVPEncoder, ProteinGVPEncoder
 
@@ -68,7 +69,7 @@ def sample_hetero_data_with_embedding(sample_hetero_data):
     data = sample_hetero_data
     num_protein = data["protein"].num_nodes
     data["protein"].embedding = torch.randn(
-        num_protein, 128, device=data["protein"].pos.device
+        num_protein, SLAE_EMBEDDING_DIM, device=data["protein"].pos.device
     )
     data["protein"].embedding_type = "slae"
     return data
@@ -98,7 +99,12 @@ class TestPackageLevelImport:
         assert gvp_encoder.encoder_type == "gvp"
 
         slae_encoder = pkg_build_encoder(
-            {"encoder_type": "slae", "embedding_dim": 128, "hidden_s": 64}, device
+            {
+                "encoder_type": "slae",
+                "embedding_dim": SLAE_EMBEDDING_DIM,
+                "hidden_s": 64,
+            },
+            device,
         )
         assert slae_encoder.encoder_type == "slae"
 
@@ -144,7 +150,7 @@ class TestEncoderRegistry:
         """build_encoder should construct SLAE encoder from config."""
         config = {
             "encoder_type": "slae",
-            "embedding_dim": 128,
+            "embedding_dim": SLAE_EMBEDDING_DIM,
             "hidden_s": 64,
         }
         encoder = build_encoder(config, device)
@@ -158,7 +164,7 @@ class TestEncoderRegistry:
         """build_encoder should construct ESM encoder from config."""
         config = {
             "encoder_type": "esm",
-            "embedding_dim": 1536,
+            "embedding_dim": ESM_EMBEDDING_DIM,
             "hidden_s": 64,
         }
         encoder = build_encoder(config, device)
@@ -211,7 +217,7 @@ class TestBaseEncoderInterface:
         encoder = CachedEmbeddingEncoder(
             embedding_key="embedding",
             encoder_type="slae",
-            embedding_dim=128,
+            embedding_dim=SLAE_EMBEDDING_DIM,
             fusion_dim=64,
         ).to(device)
 
@@ -236,7 +242,11 @@ class TestBaseEncoderInterface:
             "hidden_v": 16,
         }
         # hidden_s drives the cached encoder's fused output width (fusion_dim).
-        slae_config = {"encoder_type": "slae", "embedding_dim": 128, "hidden_s": 64}
+        slae_config = {
+            "encoder_type": "slae",
+            "embedding_dim": SLAE_EMBEDDING_DIM,
+            "hidden_s": 64,
+        }
 
         gvp_encoder = GVPEncoder.from_config(gvp_config, device)
         slae_encoder = CachedEmbeddingEncoder.from_config(slae_config, device)
@@ -405,7 +415,7 @@ class TestCachedEmbeddingEncoder:
         encoder = CachedEmbeddingEncoder(
             embedding_key="embedding",
             encoder_type="slae",
-            embedding_dim=128,
+            embedding_dim=SLAE_EMBEDDING_DIM,
             fusion_dim=64,
         ).to(device)
         assert encoder.output_dims == (64, 0)
@@ -415,7 +425,7 @@ class TestCachedEmbeddingEncoder:
         encoder = CachedEmbeddingEncoder(
             embedding_key="embedding",
             encoder_type="slae",
-            embedding_dim=128,
+            embedding_dim=SLAE_EMBEDDING_DIM,
             fusion_dim=64,
         ).to(device)
         assert encoder.encoder_type == "slae"
@@ -425,7 +435,7 @@ class TestCachedEmbeddingEncoder:
         encoder = CachedEmbeddingEncoder(
             embedding_key="embedding",
             encoder_type="esm",
-            embedding_dim=1536,
+            embedding_dim=ESM_EMBEDDING_DIM,
             fusion_dim=64,
         ).to(device)
         assert encoder.encoder_type == "esm"
@@ -435,7 +445,7 @@ class TestCachedEmbeddingEncoder:
         encoder = CachedEmbeddingEncoder(
             embedding_key="embedding",
             encoder_type="slae",
-            embedding_dim=128,
+            embedding_dim=SLAE_EMBEDDING_DIM,
             fusion_dim=64,
         ).to(device)
 
@@ -452,14 +462,14 @@ class TestCachedEmbeddingEncoder:
         encoder = CachedEmbeddingEncoder(
             embedding_key="embedding",
             encoder_type="esm",
-            embedding_dim=1536,
+            embedding_dim=ESM_EMBEDDING_DIM,
             fusion_dim=64,
         ).to(device)
 
         # Add mock ESM embeddings using generic key
         n_atoms = sample_hetero_data["protein"].num_nodes
         sample_hetero_data["protein"].embedding = torch.randn(
-            n_atoms, 1536, device=device
+            n_atoms, ESM_EMBEDDING_DIM, device=device
         )
 
         s, V, pp_edge_attr = encoder(sample_hetero_data)
@@ -473,7 +483,7 @@ class TestCachedEmbeddingEncoder:
         encoder = CachedEmbeddingEncoder(
             embedding_key="embedding",
             encoder_type="slae",
-            embedding_dim=128,
+            embedding_dim=SLAE_EMBEDDING_DIM,
             fusion_dim=64,
         ).to(device)
 
@@ -486,15 +496,15 @@ class TestCachedEmbeddingEncoder:
         encoder = CachedEmbeddingEncoder(
             embedding_key="embedding",
             encoder_type="slae",
-            embedding_dim=128,
+            embedding_dim=SLAE_EMBEDDING_DIM,
             fusion_dim=64,
         ).to(device)
         n_atoms = sample_hetero_data["protein"].num_nodes
-        # width 256 != configured embedding_dim 128
+        # deliberately wrong width: 2x the configured embedding_dim
         sample_hetero_data["protein"].embedding = torch.randn(
-            n_atoms, 256, device=device
+            n_atoms, 2 * SLAE_EMBEDDING_DIM, device=device
         )
-        with pytest.raises(ValueError, match="embedding_dim=128"):
+        with pytest.raises(ValueError, match=f"embedding_dim={SLAE_EMBEDDING_DIM}"):
             encoder(sample_hetero_data)
 
     def test_encoder_no_nans(self, device, sample_hetero_data_with_embedding):
@@ -502,7 +512,7 @@ class TestCachedEmbeddingEncoder:
         encoder = CachedEmbeddingEncoder(
             embedding_key="embedding",
             encoder_type="slae",
-            embedding_dim=128,
+            embedding_dim=SLAE_EMBEDDING_DIM,
             fusion_dim=64,
         ).to(device)
 
@@ -527,7 +537,7 @@ class TestCachedEmbeddingEncoder:
         encoder = CachedEmbeddingEncoder(
             embedding_key="embedding",
             encoder_type="slae",
-            embedding_dim=128,
+            embedding_dim=SLAE_EMBEDDING_DIM,
             fusion_dim=64,
         ).to(device)
         s, _, _ = encoder(data)
@@ -538,14 +548,14 @@ class TestCachedEmbeddingEncoder:
         encoder = CachedEmbeddingEncoder(
             embedding_key="embedding",
             encoder_type="esm",
-            embedding_dim=1536,
+            embedding_dim=ESM_EMBEDDING_DIM,
             fusion_dim=64,
         ).to(device)
 
         # Add mock embeddings on correct device
         n_atoms = sample_hetero_data["protein"].num_nodes
         sample_hetero_data["protein"].embedding = torch.randn(
-            n_atoms, 1536, device=device
+            n_atoms, ESM_EMBEDDING_DIM, device=device
         )
 
         s, V, _ = encoder(sample_hetero_data)
@@ -585,11 +595,11 @@ class TestEncoderInteroperability:
         )
 
         # SLAE encoder via CachedEmbeddingEncoder
-        # embedding_dim=128 matches the fixture's embedding shape; fused to hidden_s
+        # embedding_dim matches the fixture's embedding shape; fused to hidden_s
         slae_encoder = CachedEmbeddingEncoder(
             embedding_key="embedding",
             encoder_type="slae",
-            embedding_dim=128,
+            embedding_dim=SLAE_EMBEDDING_DIM,
             fusion_dim=hidden_dims[0],
         ).to(device)
 

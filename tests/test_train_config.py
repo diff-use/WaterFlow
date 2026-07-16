@@ -172,6 +172,7 @@ def test_dataset_defaults_match_train_defaults(monkeypatch):
     assert args.min_water_residue_ratio == dataset_defaults["min_water_residue_ratio"]
     assert args.max_protein_dist == dataset_defaults["max_protein_dist"]
     assert args.max_com_dist == dataset_defaults["max_com_dist"]
+    assert args.include_ligands == dataset_defaults["include_ligands"]
 
 
 def test_inference_extracts_filter_config_from_training_config():

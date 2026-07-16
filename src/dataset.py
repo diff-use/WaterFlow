@@ -671,8 +671,8 @@ class ProteinWaterDataset(Dataset):
         self,
         pdb_list_file: str,
         processed_dir: str,
+        base_pdb_dir: str,
         encoder_type: str = "gvp",
-        base_pdb_dir: str = "/sb/wankowicz_lab/data/srivasv/pdb_redo_data",
         cutoff: float = 8.0,
         include_mates: bool = True,
         include_ligands: bool = True,
@@ -695,11 +695,11 @@ class ProteinWaterDataset(Dataset):
         Args:
             pdb_list_file: Text file with lines like "<pdb_id>_final"
             processed_dir: Cache root directory. Geometry caches are stored in
-                           {processed_dir}/{geometry_cache_name}[_mates] and embedding
-                           caches in {processed_dir}/{encoder_name}.
+                           {processed_dir}/{geometry_cache_name}[_mates][_noligands]
+                           and embedding caches in {processed_dir}/{encoder_name}.
+            base_pdb_dir: Base directory containing PDB subdirectories
             encoder_type: Encoder used downstream ('gvp', 'slae', or 'esm').
                           Embeddings are loaded only for the selected type.
-            base_pdb_dir: Base directory containing PDB subdirectories
             cutoff: Distance cutoff for PP edges and crystal contacts (Angstroms)
             include_mates: If True, include symmetry mate atoms as protein nodes
             include_ligands: If True (default), include every non-protein,
@@ -707,12 +707,12 @@ class ProteinWaterDataset(Dataset):
                              cofactors, and nucleic acids) as protein-type nodes.
                              They are appended after protein (and mate) atoms with a
                              boolean is_ligand mask and residue_index = -1.
-            geometry_cache_name: Base name for geometry cache directory. When
-                                 include_mates=True, "_mates" is appended automatically.
-                                 include_ligands does NOT affect the cache directory
-                                 name -- ligand inclusion is part of the dataset config,
-                                 not the cache path. Default is "geometry", yielding
-                                 "geometry/" or "geometry_mates/".
+            geometry_cache_name: Base name for geometry cache directory. Flags that
+                                 change the cached node set are appended to it:
+                                 "_mates" when include_mates=True, "_noligands" when
+                                 include_ligands=False. Default is "geometry", yielding
+                                 "geometry_mates/" for the default config or e.g.
+                                 "geometry_mates_noligands/" with ligands excluded.
             preprocess: If True, run preprocessing on missing cached files
             duplicate_single_sample: If dataset has 1 sample, duplicate it this many times
             Quality checks (always active):
@@ -738,10 +738,12 @@ class ProteinWaterDataset(Dataset):
         """
 
         self.cache_dir = Path(processed_dir)
-        # Directory-based separation: geometry/ vs geometry_mates/. Ligand inclusion
-        # is governed by the include_ligands config flag, not the cache directory
-        # name, so the geometry cache name is unaffected by include_ligands.
+        # Directory-based separation: geometry/ vs geometry_mates/. Both flags change
+        # the cached node set, so both are encoded in the directory name -- otherwise
+        # toggling one would silently reuse geometry built under the other setting.
         cache_suffix = "_mates" if include_mates else ""
+        if not include_ligands:
+            cache_suffix += "_noligands"
         self.geometry_dir = self.cache_dir / f"{geometry_cache_name}{cache_suffix}"
         self.base_pdb_dir = Path(base_pdb_dir)
         self.cutoff = cutoff
@@ -1069,14 +1071,15 @@ class ProteinWaterDataset(Dataset):
             final_protein_x = protein_x
             final_protein_res_idx = protein_res_idx
 
-        # Append ligand atoms after protein (and mate) atoms when enabled.
+        # Append ASU ligand atoms after protein (and mate) atoms when enabled.
         # is_ligand mask marks which protein-type nodes are ligand atoms.
         # Ligands always go last so num_asu_protein and mate counts are unaffected,
         # preserving ESM/SLAE embedding alignment via _pad_atom_embeddings_for_mates.
-
-        # TODO(ligands+mates): this only adds ASU ligands. Until dev_crystal_mates
-        # is opened for a PR, mates are restricted to polymer.protein, so a ligand sitting in a
-        # crystal contact is dropped from the mates
+        #
+        # TODO(ligands+mates): mate ligands should be included as protein-type nodes
+        # too, but are not yet. Mate generation is restricted to polymer.protein, so a
+        # ligand sitting in a crystal contact is currently dropped. Extending mate
+        # generation to het atoms is deferred to dev_crystal_mates.
         if self.include_ligands and len(ligand_atoms) > 0:
             ligand_pos = torch.tensor(ligand_atoms.coord, dtype=torch.float32) - center
             ligand_elements = [str(e).upper() for e in ligand_atoms.element]

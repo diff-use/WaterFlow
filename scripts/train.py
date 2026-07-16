@@ -105,6 +105,16 @@ def parse_args():
         help="Include symmetry mate atoms as protein nodes",
     )
     p.add_argument(
+        "--include_ligands",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Include ligand, ion, cofactor and nucleic acid heavy atoms as protein "
+            "nodes. Disabling appends '_noligands' to the geometry cache directory, "
+            "so the two configs cache separately."
+        ),
+    )
+    p.add_argument(
         "--duplicate_single_sample",
         type=int,
         default=1,
@@ -351,6 +361,7 @@ def _build_dataset_config(args: argparse.Namespace) -> tuple[dict, dict, dict]:
         "base_pdb_dir": args.base_pdb_dir,
         "geometry_cache_name": args.geometry_cache_name,
         "include_mates": args.include_mates,
+        "include_ligands": args.include_ligands,
         **quality_kwargs,
         **water_filter_kwargs,
     }

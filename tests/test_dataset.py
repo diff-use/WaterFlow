@@ -26,7 +26,12 @@ import numpy as np
 import pytest
 import torch
 
-from src.constants import ELEM_IDX, ELEMENT_VOCAB
+from src.constants import (
+    ELEM_IDX,
+    ELEMENT_VOCAB,
+    ESM_EMBEDDING_DIM,
+    SLAE_EMBEDDING_DIM,
+)
 from src.dataset import (
     _make_undirected,
     _pad_atom_embeddings_for_mates,
@@ -479,7 +484,7 @@ class TestCheckChainInteractions:
 class TestParseAsuWithBiotite:
     """Tests for PDB parsing with biotite."""
 
-    def test_parse_returns_protein_and_water(self, pdb_6eey):
+    def test_parse_returns_protein_water_and_ligands(self, pdb_6eey):
         """Should return protein, water, and ligand atom arrays."""
         protein_atoms, water_atoms, ligand_atoms = parse_asu_with_biotite(pdb_6eey)
 
@@ -2009,7 +2014,8 @@ class TestLoadEncoderEmbeddings:
         slae_dir = tmp_path / "processed" / "slae"
         slae_dir.mkdir(parents=True, exist_ok=True)
         torch.save(
-            {"node_embeddings": torch.randn(100, 64)}, slae_dir / "test_final.pt"
+            {"node_embeddings": torch.randn(100, SLAE_EMBEDDING_DIM)},
+            slae_dir / "test_final.pt",
         )
 
         data = HeteroData()
@@ -2024,7 +2030,7 @@ class TestLoadEncoderEmbeddings:
         )
 
         assert hasattr(data["protein"], "embedding")
-        assert data["protein"].embedding.shape == (100, 64)
+        assert data["protein"].embedding.shape == (100, SLAE_EMBEDDING_DIM)
         assert data["protein"].embedding_type == "slae"
 
     def test_esm_encoder_loads_esm(self, tmp_path, pdb_base_dir):
@@ -2046,7 +2052,8 @@ class TestLoadEncoderEmbeddings:
         esm_dir = tmp_path / "processed" / "esm"
         esm_dir.mkdir(parents=True, exist_ok=True)
         torch.save(
-            {"residue_embeddings": torch.randn(10, 1280)}, esm_dir / "test_final.pt"
+            {"residue_embeddings": torch.randn(10, ESM_EMBEDDING_DIM)},
+            esm_dir / "test_final.pt",
         )
 
         data = HeteroData()
@@ -2064,8 +2071,94 @@ class TestLoadEncoderEmbeddings:
         )
 
         assert hasattr(data["protein"], "embedding")
-        assert data["protein"].embedding.shape == (50, 1280)
+        assert data["protein"].embedding.shape == (50, ESM_EMBEDDING_DIM)
         assert data["protein"].embedding_type == "esm"
+
+    def test_slae_zero_pads_mate_and_ligand_atoms(self, tmp_path, pdb_base_dir):
+        """ASU atoms keep their cached SLAE vectors; mate and ligand atoms have no
+        cached embedding and must be zero-padded at the end, in that node order."""
+        from torch_geometric.data import HeteroData
+
+        num_asu, num_mate, num_ligand = 20, 8, 4
+
+        list_file = tmp_path / "list.txt"
+        list_file.write_text("6eey_final\n")
+        dataset = ProteinWaterDataset(
+            pdb_list_file=str(list_file),
+            processed_dir=str(tmp_path / "processed"),
+            base_pdb_dir=str(pdb_base_dir),
+            encoder_type="slae",
+            preprocess=False,
+        )
+
+        slae_dir = tmp_path / "processed" / "slae"
+        slae_dir.mkdir(parents=True, exist_ok=True)
+        asu_emb = torch.randn(num_asu, SLAE_EMBEDDING_DIM)
+        torch.save({"node_embeddings": asu_emb}, slae_dir / "test_final.pt")
+
+        data = HeteroData()
+        data["protein"].num_nodes = num_asu + num_mate + num_ligand
+
+        dataset._annotate_data_with_embeddings(
+            data=data,
+            cache_key="test_final",
+            asu_protein_res_idx=torch.zeros(num_asu, dtype=torch.long),
+            num_asu_protein=num_asu,
+            num_protein_residues=1,
+        )
+
+        emb = data["protein"].embedding
+        assert emb.shape == (num_asu + num_mate + num_ligand, SLAE_EMBEDDING_DIM)
+        assert torch.equal(emb[:num_asu], asu_emb), "ASU rows must be left untouched"
+        assert (emb[num_asu:] == 0).all(), "mate and ligand rows must be zero-padded"
+
+    def test_esm_zero_pads_mate_and_ligand_atoms(self, tmp_path, pdb_base_dir):
+        """ESM residue embeddings broadcast to ASU atoms only. Mate and ligand atoms
+        are zero-padded -- ligands carry residue_index=-1 and must never be used to
+        index the residue embedding table."""
+        from torch_geometric.data import HeteroData
+
+        num_residues = 4
+        atoms_per_residue = 5
+        num_asu = num_residues * atoms_per_residue
+        num_mate, num_ligand = 6, 3
+
+        list_file = tmp_path / "list.txt"
+        list_file.write_text("6eey_final\n")
+        dataset = ProteinWaterDataset(
+            pdb_list_file=str(list_file),
+            processed_dir=str(tmp_path / "processed"),
+            base_pdb_dir=str(pdb_base_dir),
+            encoder_type="esm",
+            preprocess=False,
+        )
+
+        esm_dir = tmp_path / "processed" / "esm"
+        esm_dir.mkdir(parents=True, exist_ok=True)
+        residue_emb = torch.randn(num_residues, ESM_EMBEDDING_DIM)
+        torch.save({"residue_embeddings": residue_emb}, esm_dir / "test_final.pt")
+
+        data = HeteroData()
+        data["protein"].num_nodes = num_asu + num_mate + num_ligand
+
+        # ASU res idx only -- ligand sentinels (-1) live past num_asu_protein and are
+        # sliced off by __getitem__ before this call.
+        asu_res_idx = torch.arange(num_residues).repeat_interleave(atoms_per_residue)
+
+        dataset._annotate_data_with_embeddings(
+            data=data,
+            cache_key="test_final",
+            asu_protein_res_idx=asu_res_idx,
+            num_asu_protein=num_asu,
+            num_protein_residues=num_residues,
+        )
+
+        emb = data["protein"].embedding
+        assert emb.shape == (num_asu + num_mate + num_ligand, ESM_EMBEDDING_DIM)
+        assert torch.equal(emb[:num_asu], residue_emb[asu_res_idx]), (
+            "each ASU atom must carry its own residue's embedding"
+        )
+        assert (emb[num_asu:] == 0).all(), "mate and ligand rows must be zero-padded"
 
 
 # ============== Tests for caching behavior ==============
