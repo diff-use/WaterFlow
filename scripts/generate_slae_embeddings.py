@@ -1,6 +1,10 @@
 """
 Precompute SLAE embeddings for protein structures and save to separate cache files.
 
+NOTE: This SLAE encoder is legacy and is NOT currently used. We primarily use the
+ESM encoder (see scripts/generate_esm_embeddings.py). This script is retained for
+reference/reproducibility only.
+
 This script:
 1. Reads a split file containing PDB entries
 2. For each entry, loads the PDB and converts to atom37 representation
@@ -400,7 +404,7 @@ def main() -> None:
 
             try:
                 # protein_atoms: biotite AtomArray with num_atoms atoms
-                protein_atoms, _ = parse_asu_with_biotite(str(pdb_path))
+                protein_atoms, _, _ = parse_asu_with_biotite(str(pdb_path))
                 # coords: (num_residues, 37, 3) - atom37 coordinates
                 # residue_type: (num_residues,) - residue type indices
                 # chains: (num_residues,) - chain IDs
