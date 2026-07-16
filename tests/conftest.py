@@ -81,6 +81,12 @@ def pdb_1deu():
     return _resolve_test_path("1deu", ".pdb")
 
 
+@pytest.fixture
+def pdb_4h0b():
+    """4h0b - has non-water ligand HETATMs for ligand support tests."""
+    return _resolve_pdb_path("4h0b")
+
+
 # ============== Shared encoder fixtures ==============
 
 

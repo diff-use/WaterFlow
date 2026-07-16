@@ -66,13 +66,22 @@ def parse_asu_with_biotite(
 ) -> tuple[bts.AtomArray, bts.AtomArray]:
     """
     Parse PDB or CIF file and extract protein and water atoms.
+    path: str,
+) -> tuple[bts.AtomArray, bts.AtomArray, bts.AtomArray]:
+    """
+    Parse PDB file and extract protein, water, and ligand atoms.
 
     Args:
         path: Path to PDB or CIF file
 
     Returns:
-        Tuple of (protein_atoms, water_atoms) as biotite AtomArrays.
-        Hydrogen atoms are excluded.
+        Tuple of (protein_atoms, water_atoms, ligand_atoms) as biotite AtomArrays.
+        Hydrogen atoms are excluded. ligand_atoms contains every non-protein,
+        non-water heavy atom: small-molecule ligands, ions, cofactors, AND
+        non-amino-acid polymers such as nucleic acids (DNA/RNA). It is deliberately
+        NOT restricted to HETATM records -- nucleic acids are written as ATOM
+        records but are kept here as context (their surfaces, especially the
+        phosphate backbone, order nearby water).
 
     Notes:
         - model=1: Uses first model in PDB (standard for X-ray structures)
@@ -89,10 +98,15 @@ def parse_asu_with_biotite(
     protein_mask = bts.filter_amino_acids(atoms)
     water_mask = (atoms.res_name == "HOH") | (atoms.res_name == "WAT")
 
+    # "ligand" here is broad: every non-protein, non-water heavy atom.
+    # includes small-molecule ligands, ions, cofactors and even nucleic acids
+    ligand_mask = ~protein_mask & ~water_mask
+
     protein_atoms = atoms[protein_mask]
     water_atoms = atoms[water_mask]
+    ligand_atoms = atoms[ligand_mask]
 
-    return protein_atoms, water_atoms
+    return protein_atoms, water_atoms, ligand_atoms
 
 
 def get_crystal_contacts_pymol(
@@ -698,11 +712,12 @@ class ProteinWaterDataset(Dataset):
         self,
         pdb_list_file: str,
         processed_dir: str,
+        base_pdb_dir: str,
         encoder_type: str = "gvp",
-        base_pdb_dir: str = "/sb/wankowicz_lab/data/srivasv/pdb_redo_data",
         cutoff: float = 8.0,
         max_neighbors: int = 256,
         include_mates: bool = True,
+        include_ligands: bool = True,
         geometry_cache_name: str = "geometry",
         preprocess: bool = True,
         duplicate_single_sample: int = 1,
@@ -724,18 +739,25 @@ class ProteinWaterDataset(Dataset):
         Args:
             pdb_list_file: Text file with lines like "<pdb_id>_final"
             processed_dir: Cache root directory. Geometry caches are stored in
-                           {processed_dir}/{geometry_cache_name}[_mates] and embedding
-                           caches in {processed_dir}/{encoder_name}.
+                           {processed_dir}/{geometry_cache_name}[_mates][_noligands]
+                           and embedding caches in {processed_dir}/{encoder_name}.
+            base_pdb_dir: Base directory containing PDB subdirectories
             encoder_type: Encoder used downstream ('gvp', 'slae', or 'esm').
                           Embeddings are loaded only for the selected type.
-            base_pdb_dir: Base directory containing PDB subdirectories
             cutoff: Distance cutoff for PP edges and crystal contacts (Angstroms)
             max_neighbors: Maximum neighbors per node for radius graph construction.
             include_mates: If True, include symmetry mate atoms as protein nodes
-            geometry_cache_name: Base name for geometry cache directory. When
-                                 include_mates=True, "_mates" is appended automatically.
-                                 Default is "geometry", resulting in "geometry/" or
-                                 "geometry_mates/" subdirectories.
+            include_ligands: If True (default), include every non-protein,
+                             non-water heavy atom (small-molecule ligands, ions,
+                             cofactors, and nucleic acids) as protein-type nodes.
+                             They are appended after protein (and mate) atoms with a
+                             boolean is_ligand mask and residue_index = -1.
+            geometry_cache_name: Base name for geometry cache directory. Flags that
+                                 change the cached node set are appended to it:
+                                 "_mates" when include_mates=True, "_noligands" when
+                                 include_ligands=False. Default is "geometry", yielding
+                                 "geometry_mates/" for the default config or e.g.
+                                 "geometry_mates_noligands/" with ligands excluded.
             preprocess: If True, run preprocessing on missing cached files
             duplicate_single_sample: If dataset has 1 sample, duplicate it this many times
             Quality checks (always active):
@@ -769,8 +791,12 @@ class ProteinWaterDataset(Dataset):
             raise ValueError("max_neighbors must be >= 1")
 
         self.cache_dir = Path(processed_dir)
-        # Directory-based separation: geometry/ vs geometry_mates/
+        # Directory-based separation: geometry/ vs geometry_mates/. Both flags change
+        # the cached node set, so both are encoded in the directory name -- otherwise
+        # toggling one would silently reuse geometry built under the other setting.
         cache_suffix = "_mates" if include_mates else ""
+        if not include_ligands:
+            cache_suffix += "_noligands"
         self.geometry_dir = self.cache_dir / f"{geometry_cache_name}{cache_suffix}"
         self.base_pdb_dir = Path(base_pdb_dir)
         self.cutoff = cutoff
@@ -781,6 +807,7 @@ class ProteinWaterDataset(Dataset):
         else:
             self.embedding_dir = None
         self.include_mates = include_mates
+        self.include_ligands = include_ligands
         self.duplicate_single_sample = duplicate_single_sample
 
         self.max_com_dist = max_com_dist
@@ -933,7 +960,7 @@ class ProteinWaterDataset(Dataset):
         """
         struc_path = str(entry["struc_path"])
 
-        protein_atoms, water_atoms = parse_asu_with_biotite(struc_path)
+        protein_atoms, water_atoms, ligand_atoms = parse_asu_with_biotite(pdb_path)
 
         # check inter-chain interactions for multi-chain proteins
         chain_valid, chain_reason, _ = check_chain_interactions(
@@ -1077,6 +1104,15 @@ class ProteinWaterDataset(Dataset):
             water_x = torch.zeros((0, len(ELEMENT_VOCAB) + 1), dtype=torch.float32)
 
         # process symmetry mate atoms
+        #
+        # TODO(mates): the mate atom set is unfiltered and inconsistent with the ASU
+        # path. get_crystal_contacts_pymol runs symexp over the whole object and
+        # selects "sym* and interface" with no polymer filter, so mate_atoms carries
+        # het atoms and waters as well as protein, and every one of them becomes a
+        # protein-type node below. Consequences: mate ligands are already included
+        # but never marked in is_ligand (unlike ASU ligands) and are not gated by
+        # include_ligands; mate waters -- symmetry images of the prediction target --
+        # enter as protein context. Fix in dev_crystal_mates.
         mate_coords = crystal_data["mate_coords"]
         if mate_coords.shape[0] > 0:
             mate_pos = torch.tensor(mate_coords, dtype=torch.float32) - center
@@ -1113,6 +1149,30 @@ class ProteinWaterDataset(Dataset):
             final_protein_x = protein_x
             final_protein_res_idx = protein_res_idx
 
+        # Append ASU ligand atoms after protein (and mate) atoms when enabled.
+        # is_ligand mask marks which protein-type nodes are ligand atoms.
+        # Ligands always go last so num_asu_protein and mate counts are unaffected,
+        # preserving ESM/SLAE embedding alignment via _pad_atom_embeddings_for_mates.
+        # Only ASU ligands are handled here -- mate het atoms come in unfiltered via
+        # the mate block above, see TODO(mates) there.
+        if self.include_ligands and len(ligand_atoms) > 0:
+            ligand_pos = torch.tensor(ligand_atoms.coord, dtype=torch.float32) - center
+            ligand_elements = [str(e).upper() for e in ligand_atoms.element]
+            ligand_x = element_onehot(ligand_elements)
+            final_protein_pos = torch.cat([final_protein_pos, ligand_pos], dim=0)
+            final_protein_x = torch.cat([final_protein_x, ligand_x], dim=0)
+            # Ligand atoms get residue_index = -1 (sentinel; no residue embedding).
+            # The is_ligand mask identifies them; residue-pooling masks out these
+            # negative indices before any scatter (see GVPEncoder._pool_by_residue).
+            ligand_res_idx = torch.full((len(ligand_atoms),), -1, dtype=torch.long)
+            final_protein_res_idx = torch.cat(
+                [final_protein_res_idx, ligand_res_idx], dim=0
+            )
+            is_ligand = torch.zeros(final_protein_pos.size(0), dtype=torch.bool)
+            is_ligand[-len(ligand_atoms) :] = True
+        else:
+            is_ligand = torch.zeros(final_protein_pos.size(0), dtype=torch.bool)
+
         # Compute PP edges and features
         if final_protein_pos.size(0) > 0:
             pp_edge_index = radius_graph(
@@ -1143,6 +1203,7 @@ class ProteinWaterDataset(Dataset):
                 "protein_pos": final_protein_pos,
                 "protein_x": final_protein_x,
                 "protein_res_idx": final_protein_res_idx,
+                "is_ligand": is_ligand,
                 "water_pos": water_pos,
                 "water_x": water_x,
                 # PP topology and features (precomputed)
@@ -1246,6 +1307,7 @@ class ProteinWaterDataset(Dataset):
         protein_pos = cached["protein_pos"]
         protein_x = cached["protein_x"]
         protein_res_idx = cached["protein_res_idx"]
+        is_ligand = cached["is_ligand"]
         pp_edge_index = cached["pp_edge_index"]
         pp_edge_unit_vectors = cached["pp_edge_unit_vectors"]
         pp_edge_rbf = cached["pp_edge_rbf"]
@@ -1267,6 +1329,7 @@ class ProteinWaterDataset(Dataset):
         data["protein"].x = protein_x
         data["protein"].pos = protein_pos
         data["protein"].residue_index = protein_res_idx
+        data["protein"].is_ligand = is_ligand
         data["protein"].num_nodes = protein_pos.size(0)
         data["protein"].num_residues = num_residues
         data["protein"].num_protein_residues = num_protein_residues
@@ -1305,6 +1368,7 @@ class ProteinWaterDataset(Dataset):
 def get_dataloader(
     pdb_list_file: str,
     processed_dir: str,
+    base_pdb_dir: str,
     batch_size: int = 8,
     shuffle: bool = True,
     num_workers: int = 8,
@@ -1321,6 +1385,7 @@ def get_dataloader(
         processed_dir: Cache root directory. Uses:
                       - {processed_dir}/geometry for geometry caches
                       - {processed_dir}/{encoder_name} for embedding caches
+        base_pdb_dir: Base directory containing PDB subdirectories
         encoder_type: Encoder used downstream ('gvp', 'slae', or 'esm').
                       Embeddings are loaded only for this type.
         batch_size: Number of graphs per batch
@@ -1341,7 +1406,10 @@ def get_dataloader(
         - Then batch_size works normally
     """
     dataset = ProteinWaterDataset(
-        pdb_list_file=pdb_list_file, processed_dir=processed_dir, **dataset_kwargs
+        pdb_list_file=pdb_list_file,
+        processed_dir=processed_dir,
+        base_pdb_dir=base_pdb_dir,
+        **dataset_kwargs,
     )
 
     loader = DataLoader(
