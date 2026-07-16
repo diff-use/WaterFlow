@@ -72,7 +72,8 @@ WaterFlow processes PDB files through several stages to create training-ready gr
 
 **Graph Representation**
 - Node types: `protein` (ASU + symmetry mates + ligands), `water` (ground truth)
-- Ligand atoms are appended after ASU and mate atoms and carry the boolean `is_ligand` mask plus `residue_index = -1` (they have no residue embedding, so residue pooling masks them out)
+- ASU ligand atoms are appended after ASU and mate atoms and carry the boolean `is_ligand` mask plus `residue_index = -1` (they have no residue embedding, so residue pooling masks them out)
+- `is_ligand` marks **ASU ligands only**. Symmetry-mate generation is currently unfiltered, so mate nodes can include HETATM and water atoms that `is_ligand` does not mark — see `TODO(mates)` in `ProteinWaterDataset._preprocess_one`. Don't treat `is_ligand` as an exhaustive ligand selector
 - Edge types (defined in `src/constants.py`):
   - `('protein', 'pp', 'protein')`: protein-protein edges
   - `('protein', 'pw', 'water')`: protein to water
@@ -107,15 +108,20 @@ Preprocessed data is cached under `--processed_dir` in a three-layer architectur
 │       - protein_pos: centered protein coordinates (N, 3)
 │       - protein_x: element one-hot encoding (N, 16)
 │       - protein_res_idx: residue indices for grouping
-│       - is_ligand: bool mask over protein nodes marking ligand atoms (N,)
+│       - is_ligand: bool mask marking the appended ASU ligand atoms (N,)
 │       - water_pos, water_x: water coordinates and features
 │       - num_asu_protein: ASU atom count (mate boundary metadata)
 │       # Note: When include_mates=True, mate atoms are concatenated into
-│       # protein_pos/protein_x, and ligand atoms are appended after those.
-│       # Node order is [ASU protein | mates | ligands]. Recover boundaries via:
-│       #   ASU atoms    = protein_pos[:num_asu_protein]
-│       #   Ligand atoms = protein_pos[is_ligand]              # always last
-│       #   Mate atoms   = protein_pos[num_asu_protein:][~is_ligand[num_asu_protein:]]
+│       # protein_pos/protein_x, and ASU ligand atoms are appended after those.
+│       # Node order is [ASU protein | mates | ASU ligands]. Recover blocks via:
+│       #   ASU protein atoms = protein_pos[:num_asu_protein]
+│       #   ASU ligand atoms  = protein_pos[is_ligand]          # always last
+│       #   Mate atoms        = protein_pos[num_asu_protein:][~is_ligand[num_asu_protein:]]
+│       #
+│       # is_ligand marks ASU ligands ONLY -- it is not an exhaustive ligand
+│       # selector. The mate block is unfiltered (see TODO(mates) in
+│       # _preprocess_one), so mate atoms may include HETATM/ligand/water atoms
+│       # that are NOT marked by is_ligand.
 ├── esm/                   # ESM embeddings (per-residue)
 │   └── <pdb_id>_final.pt
 │       - residue_embeddings: ESM3 embeddings (N_res, embed_dim)

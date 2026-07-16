@@ -1330,6 +1330,7 @@ class ProteinWaterDataset(Dataset):
 def get_dataloader(
     pdb_list_file: str,
     processed_dir: str,
+    base_pdb_dir: str,
     batch_size: int = 8,
     shuffle: bool = True,
     num_workers: int = 8,
@@ -1346,6 +1347,7 @@ def get_dataloader(
         processed_dir: Cache root directory. Uses:
                       - {processed_dir}/geometry for geometry caches
                       - {processed_dir}/{encoder_name} for embedding caches
+        base_pdb_dir: Base directory containing PDB subdirectories
         encoder_type: Encoder used downstream ('gvp', 'slae', or 'esm').
                       Embeddings are loaded only for this type.
         batch_size: Number of graphs per batch
@@ -1366,7 +1368,10 @@ def get_dataloader(
         - Then batch_size works normally
     """
     dataset = ProteinWaterDataset(
-        pdb_list_file=pdb_list_file, processed_dir=processed_dir, **dataset_kwargs
+        pdb_list_file=pdb_list_file,
+        processed_dir=processed_dir,
+        base_pdb_dir=base_pdb_dir,
+        **dataset_kwargs,
     )
 
     loader = DataLoader(
