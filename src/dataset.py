@@ -63,13 +63,9 @@ def _read_structure(path: str | Path, extra_fields=None) -> bts.AtomArray:
 
 def parse_asu_with_biotite(
     path: str | Path,
-) -> tuple[bts.AtomArray, bts.AtomArray]:
-    """
-    Parse PDB or CIF file and extract protein and water atoms.
-    path: str,
 ) -> tuple[bts.AtomArray, bts.AtomArray, bts.AtomArray]:
     """
-    Parse PDB file and extract protein, water, and ligand atoms.
+    Parse PDB or CIF file and extract protein, water, and ligand atoms.
 
     Args:
         path: Path to PDB or CIF file
@@ -960,7 +956,7 @@ class ProteinWaterDataset(Dataset):
         """
         struc_path = str(entry["struc_path"])
 
-        protein_atoms, water_atoms, ligand_atoms = parse_asu_with_biotite(pdb_path)
+        protein_atoms, water_atoms, ligand_atoms = parse_asu_with_biotite(struc_path)
 
         # check inter-chain interactions for multi-chain proteins
         chain_valid, chain_reason, _ = check_chain_interactions(

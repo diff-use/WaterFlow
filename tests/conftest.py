@@ -43,7 +43,7 @@ def cif_6eey():
 
 @pytest.fixture(scope="session")
 def parsed_pdb_6eey():
-    """Parsed (protein, water) atoms from the 6eey PDB, parsed once per session."""
+    """Parsed (protein, water, ligand) atoms from the 6eey PDB, once per session."""
     from src.dataset import parse_asu_with_biotite
 
     return parse_asu_with_biotite(_resolve_test_path("6eey", ".pdb"))
@@ -51,7 +51,7 @@ def parsed_pdb_6eey():
 
 @pytest.fixture(scope="session")
 def parsed_cif_6eey():
-    """Parsed (protein, water) atoms from the 6eey CIF, parsed once per session."""
+    """Parsed (protein, water, ligand) atoms from the 6eey CIF, once per session."""
     from src.dataset import parse_asu_with_biotite
 
     return parse_asu_with_biotite(_resolve_test_path("6eey", ".cif"))
@@ -84,7 +84,7 @@ def pdb_1deu():
 @pytest.fixture
 def pdb_4h0b():
     """4h0b - has non-water ligand HETATMs for ligand support tests."""
-    return _resolve_pdb_path("4h0b")
+    return _resolve_test_path("4h0b", ".pdb")
 
 
 # ============== Shared encoder fixtures ==============

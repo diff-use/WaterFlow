@@ -507,7 +507,7 @@ class TestParseAsuWithBiotite:
 
     def test_water_residue_names(self, parsed_pdb_6eey):
         """Water atoms should have HOH or WAT residue names."""
-        _, water_atoms = parsed_pdb_6eey
+        _, water_atoms, _ligands = parsed_pdb_6eey
 
         if len(water_atoms) > 0:
             water_res_names = set(water_atoms.res_name)
@@ -518,27 +518,30 @@ class TestParseAsuWithBiotite:
 class TestCIFParsing:
     """Tests for CIF parsing with biotite."""
 
-    def test_cif_parse_returns_protein_and_water(self, parsed_cif_6eey):
-        """Should return protein and water atom arrays from CIF."""
-        protein_atoms, water_atoms = parsed_cif_6eey
+    def test_cif_parse_returns_protein_water_and_ligands(self, parsed_cif_6eey):
+        """Should return protein, water, and ligand atom arrays from CIF."""
+        protein_atoms, water_atoms, ligand_atoms = parsed_cif_6eey
 
         assert protein_atoms is not None
         assert water_atoms is not None
+        assert ligand_atoms is not None
         assert len(protein_atoms) > 0
 
     def test_cif_hydrogen_removed(self, parsed_cif_6eey):
         """Hydrogens should be removed from CIF-parsed arrays."""
-        protein_atoms, water_atoms = parsed_cif_6eey
+        protein_atoms, water_atoms, ligand_atoms = parsed_cif_6eey
 
         protein_elements = set(protein_atoms.element)
         water_elements = set(water_atoms.element) if len(water_atoms) > 0 else set()
+        ligand_elements = set(ligand_atoms.element) if len(ligand_atoms) > 0 else set()
 
         assert "H" not in protein_elements
         assert "H" not in water_elements
+        assert "H" not in ligand_elements
 
     def test_cif_water_residue_names(self, parsed_cif_6eey):
         """Water atoms from CIF should have HOH or WAT residue names."""
-        _, water_atoms = parsed_cif_6eey
+        _, water_atoms, _ligands = parsed_cif_6eey
 
         if len(water_atoms) > 0:
             water_res_names = set(water_atoms.res_name)
@@ -546,11 +549,12 @@ class TestCIFParsing:
 
     def test_cif_matches_pdb(self, parsed_pdb_6eey, parsed_cif_6eey):
         """CIF and PDB parsing of the same structure should produce matching atom counts."""
-        pdb_protein, pdb_water = parsed_pdb_6eey
-        cif_protein, cif_water = parsed_cif_6eey
+        pdb_protein, pdb_water, pdb_ligands = parsed_pdb_6eey
+        cif_protein, cif_water, cif_ligands = parsed_cif_6eey
 
         assert len(cif_protein) == len(pdb_protein)
         assert len(cif_water) == len(pdb_water)
+        assert len(cif_ligands) == len(pdb_ligands)
 
     def test_accepts_path_objects(self, pdb_6eey, cif_6eey):
         """_read_structure must accept Path inputs (suffix dispatch), not just str.
@@ -558,8 +562,8 @@ class TestCIFParsing:
         Regression: a previous str-only .endswith(".cif") dispatch raised
         AttributeError on Path inputs.
         """
-        pdb_protein, _ = parse_asu_with_biotite(Path(pdb_6eey))
-        cif_protein, _ = parse_asu_with_biotite(Path(cif_6eey))
+        pdb_protein, _, _ = parse_asu_with_biotite(Path(pdb_6eey))
+        cif_protein, _, _ = parse_asu_with_biotite(Path(cif_6eey))
 
         assert len(pdb_protein) > 0
         assert len(cif_protein) > 0

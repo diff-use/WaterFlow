@@ -398,7 +398,7 @@ def main() -> None:
 
             try:
                 # protein_atoms: biotite AtomArray with num_atoms atoms
-                protein_atoms, _, _ = parse_asu_with_biotite(str(pdb_path))
+                protein_atoms, _, _ = parse_asu_with_biotite(str(entry["struc_path"]))
                 # coords: (num_residues, 37, 3) - atom37 coordinates
                 # residue_type: (num_residues,) - residue type indices
                 # chains: (num_residues,) - chain IDs

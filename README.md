@@ -35,29 +35,35 @@ WaterFlow/
 
 ## Data Preparation
 
-### Input PDB Files
+### Input Structure Files
 
-WaterFlow expects PDB files in a specific directory structure:
+WaterFlow reads PDB or mmCIF files, and expects them in a specific directory structure:
 
 ```
 <base_pdb_dir>/
 ├── 1abc/
-│   └── 1abc_final.pdb
+│   └── 1abc_final.cif      # .cif or .pdb
 ├── 2xyz/
 │   └── 2xyz_final.pdb
 └── ...
 ```
 
-Each PDB should have `_final` suffix and contain:
+Each structure should have the `_final` suffix and contain:
 - Protein atoms (used as conditioning context)
 - Water molecules (HOH residues, used as ground truth)
 
+**Format resolution:** entries in a split file are bare IDs (`6eey_final`) with no extension.
+For each entry WaterFlow looks in `<base_pdb_dir>/<pdb_id>/` and **prefers
+`<pdb_id>_final.cif` when it exists**, otherwise falls back to `<pdb_id>_final.pdb`. Both
+formats parse to identical atom counts, so the choice does not change the resulting graph.
+If neither file exists, reading the structure raises an error naming the missing path.
+
 ### Data Processing Pipeline
 
-WaterFlow processes PDB files through several stages to create training-ready graph representations:
+WaterFlow processes structure files through several stages to create training-ready graph representations:
 
-**PDB Parsing**
-- Uses Biotite to extract protein atoms, water molecules (HOH residues), and ligands
+**Structure Parsing**
+- Uses Biotite to extract protein atoms, water molecules (HOH residues), and ligands, dispatching on file extension (`.cif` via `CIFFile`, otherwise `PDBFile`)
 - "Ligand" means every non-protein, non-water heavy atom: small molecules, ions, cofactors, and nucleic acids. Included by default; disable with `--no-include_ligands`
 - Modified residues are retained during structure parsing and geometry preprocessing
 - When generating ESM embeddings, modified residues are mapped to encoder-compatible amino acid identities (e.g., MSE→M/MET, SEC→U/SEC)
@@ -316,7 +322,7 @@ EDIA measures how well an atom's position is supported by the experimental elect
 
 **Configuration:**
 - EDIA filtering is enabled by default 
-- The EDIA data lives in the `json` file of the format `<pdb_id>_final.json` in the same directory as the `pdb` file, and is obtained from PDB-REDO.
+- The EDIA data lives in the `json` file of the format `<pdb_id>_final.json` in the same directory as the structure file, and is obtained from PDB-REDO.
 - Use `--no_filter_by_edia` to explicitly disable EDIA filtering
 
 </details>
