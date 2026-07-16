@@ -110,7 +110,8 @@ def test_cached_encoder_model_construction_succeeds(
     encoder = build_encoder(encoder_config, device)
     model = FlowWaterGVP(encoder=encoder)
 
-    assert model.encoder.output_dims == (128, 0)
+    # Cached encoder fuses the embedding + element one-hot to hidden_s width.
+    assert model.encoder.output_dims == (256, 0)
 
 
 def test_inference_build_model_from_config_uses_embedding_dim(device):
@@ -171,6 +172,7 @@ def test_dataset_defaults_match_train_defaults(monkeypatch):
     assert args.min_water_residue_ratio == dataset_defaults["min_water_residue_ratio"]
     assert args.max_protein_dist == dataset_defaults["max_protein_dist"]
     assert args.max_com_dist == dataset_defaults["max_com_dist"]
+    assert args.include_ligands == dataset_defaults["include_ligands"]
 
 
 def test_inference_extracts_filter_config_from_training_config():

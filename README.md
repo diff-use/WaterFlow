@@ -35,29 +35,36 @@ WaterFlow/
 
 ## Data Preparation
 
-### Input PDB Files
+### Input Structure Files
 
-WaterFlow expects PDB files in a specific directory structure:
+WaterFlow reads PDB or mmCIF files, and expects them in a specific directory structure:
 
 ```
 <base_pdb_dir>/
 ├── 1abc/
-│   └── 1abc_final.pdb
+│   └── 1abc_final.cif      # .cif or .pdb
 ├── 2xyz/
 │   └── 2xyz_final.pdb
 └── ...
 ```
 
-Each PDB should have `_final` suffix and contain:
+Each structure should have the `_final` suffix and contain:
 - Protein atoms (used as conditioning context)
 - Water molecules (HOH residues, used as ground truth)
 
+**Format resolution:** entries in a split file are bare IDs (`6eey_final`) with no extension.
+For each entry WaterFlow looks in `<base_pdb_dir>/<pdb_id>/` and **prefers
+`<pdb_id>_final.cif` when it exists**, otherwise falls back to `<pdb_id>_final.pdb`. Both
+formats parse to identical atom counts, so the choice does not change the resulting graph.
+If neither file exists, reading the structure raises an error naming the missing path.
+
 ### Data Processing Pipeline
 
-WaterFlow processes PDB files through several stages to create training-ready graph representations:
+WaterFlow processes structure files through several stages to create training-ready graph representations:
 
-**PDB Parsing**
-- Uses Biotite to extract protein atoms and water molecules (HOH residues)
+**Structure Parsing**
+- Uses Biotite to extract protein atoms, water molecules (HOH residues), and ligands, dispatching on file extension (`.cif` via `CIFFile`, otherwise `PDBFile`)
+- "Ligand" means every non-protein, non-water heavy atom: small molecules, ions, cofactors, and nucleic acids. Included by default; disable with `--no-include_ligands`
 - Modified residues are retained during structure parsing and geometry preprocessing
 - When generating ESM embeddings, modified residues are mapped to encoder-compatible amino acid identities (e.g., MSE→M/MET, SEC→U/SEC)
 - Hydrogen atoms are excluded
@@ -70,7 +77,9 @@ WaterFlow processes PDB files through several stages to create training-ready gr
 - Mate atoms are stored separately for proper handling during training
 
 **Graph Representation**
-- Node types: `protein` (ASU + symmetry mates), `water` (ground truth)
+- Node types: `protein` (ASU + symmetry mates + ligands), `water` (ground truth)
+- ASU ligand atoms are appended after ASU and mate atoms and carry the boolean `is_ligand` mask plus `residue_index = -1` (they have no residue embedding, so residue pooling masks them out)
+- `is_ligand` marks **ASU ligands only**. Symmetry-mate generation is currently unfiltered, so mate nodes can include HETATM and water atoms that `is_ligand` does not mark — see `TODO(mates)` in `ProteinWaterDataset._preprocess_one`. Don't treat `is_ligand` as an exhaustive ligand selector
 - Edge types (defined in `src/constants.py`):
   - `('protein', 'pp', 'protein')`: protein-protein edges
   - `('protein', 'pw', 'water')`: protein to water
@@ -100,17 +109,25 @@ Preprocessed data is cached under `--processed_dir` in a three-layer architectur
 
 ```
 <processed_dir>/
-├── geometry/              # Graph structures (or geometry_mates/ when include_mates=True)
+├── geometry/              # Graph structures; see cache directory naming below
 │   └── <pdb_id>_final.pt
 │       - protein_pos: centered protein coordinates (N, 3)
 │       - protein_x: element one-hot encoding (N, 16)
 │       - protein_res_idx: residue indices for grouping
+│       - is_ligand: bool mask marking the appended ASU ligand atoms (N,)
 │       - water_pos, water_x: water coordinates and features
 │       - num_asu_protein: ASU atom count (mate boundary metadata)
 │       # Note: When include_mates=True, mate atoms are concatenated into
-│       # protein_pos/protein_x. Recover boundaries via:
-│       #   ASU atoms = protein_pos[:num_asu_protein]
-│       #   Mate atoms = protein_pos[num_asu_protein:]
+│       # protein_pos/protein_x, and ASU ligand atoms are appended after those.
+│       # Node order is [ASU protein | mates | ASU ligands]. Recover blocks via:
+│       #   ASU protein atoms = protein_pos[:num_asu_protein]
+│       #   ASU ligand atoms  = protein_pos[is_ligand]          # always last
+│       #   Mate atoms        = protein_pos[num_asu_protein:][~is_ligand[num_asu_protein:]]
+│       #
+│       # is_ligand marks ASU ligands ONLY -- it is not an exhaustive ligand
+│       # selector. The mate block is unfiltered (see TODO(mates) in
+│       # _preprocess_one), so mate atoms may include HETATM/ligand/water atoms
+│       # that are NOT marked by is_ligand.
 ├── esm/                   # ESM embeddings (per-residue)
 │   └── <pdb_id>_final.pt
 │       - residue_embeddings: ESM3 embeddings (N_res, embed_dim)
@@ -122,10 +139,27 @@ Preprocessed data is cached under `--processed_dir` in a three-layer architectur
         - atom37_coords: standard atom37 coordinates (N_res, 37, 3)
 ```
 
+**Cache Directory Naming:**
+
+The geometry cache directory name encodes the flags that change which nodes get cached, so
+configs that produce different graphs never share a directory:
+
+| `--include_mates` | `--include_ligands` | Directory |
+|---|---|---|
+| true | true (default) | `geometry_mates/` |
+| true | false | `geometry_mates_noligands/` |
+| false | true | `geometry/` |
+| false | false | `geometry_noligands/` |
+
+The base name comes from `--geometry_cache_name` (default `geometry`).
+
 **Cache Generation Notes:**
 - Geometry cache is generated automatically when `preprocess=True` (default)
 - ESM/SLAE caches require running the respective `generate_*_embeddings.py` scripts first
 - Preprocessing failures are logged to `<geometry_dir>/preprocessing_failures.log`
+- Geometry caches built before ligand support lack the `is_ligand` field and will fail to
+  load with a `KeyError`. Delete the geometry cache directory and let it regenerate — the
+  cached graphs are stale, not merely missing a field
 
 ## Environment Setup
 
@@ -238,6 +272,8 @@ To resume training from a checkpoint, you can load the model weights and optimiz
 | `--scheduler` | `cosine` | LR scheduler: `cosine`, `step`, or `none` |
 | `--warmup_steps` | `0` | Linear warmup steps |
 | `--processed_dir` | `~/flow_cache/` | Cache directory for preprocessed data |
+| `--include_mates` | `false` | Include symmetry mate atoms as protein nodes |
+| `--include_ligands` | `true` | Include ligand/ion/cofactor/nucleic acid heavy atoms as protein nodes. Negate with `--no-include_ligands` |
 | `--save_dir` | `../flow_checkpoints` | Directory to save checkpoints |
 | `--save_every` | `10` | Save checkpoint every N epochs |
 | `--eval_every` | `5` | Run evaluation every N epochs |
@@ -286,7 +322,7 @@ EDIA measures how well an atom's position is supported by the experimental elect
 
 **Configuration:**
 - EDIA filtering is enabled by default 
-- The EDIA data lives in the `json` file of the format `<pdb_id>_final.json` in the same directory as the `pdb` file, and is obtained from PDB-REDO.
+- The EDIA data lives in the `json` file of the format `<pdb_id>_final.json` in the same directory as the structure file, and is obtained from PDB-REDO.
 - Use `--no_filter_by_edia` to explicitly disable EDIA filtering
 
 </details>

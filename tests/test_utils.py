@@ -12,7 +12,8 @@ Organized by category to match utils.py structure:
 All test cases created with assistance from Claude Code and refined.
 """
 
-import biotite.structure as bts
+from pathlib import Path
+
 import matplotlib
 import numpy as np
 import pytest
@@ -30,6 +31,7 @@ from src.utils import (
     compute_rmsd,
     normalize_ins_code,
     ot_coupling,
+    parse_split_file,
     # Visualization
     plot_3d_frame,
     # Feature encoding
@@ -160,6 +162,118 @@ class TestSanitizeResNamesForEsm:
                 for (res_id, res_name, ins) in residues
             ]
         )
+class TestSplitFileParsing:
+    """Tests for parse_split_file CIF/PDB structure-path resolution."""
+
+    @staticmethod
+    def _write_split(
+        tmp_path: Path, pdb_id: str, suffixes: list[str]
+    ) -> tuple[Path, Path]:
+        """Write a structure dir (with the given suffixes) and a one-line split file."""
+        base_dir = tmp_path / "pdbs"
+        structure_dir = base_dir / pdb_id
+        structure_dir.mkdir(parents=True, exist_ok=True)
+        for suffix in suffixes:
+            (structure_dir / f"{pdb_id}_final{suffix}").write_text("")
+
+        split_file = tmp_path / "split.txt"
+        split_file.write_text(f"{pdb_id}_final\n")
+        return split_file, base_dir
+
+    def test_prefers_existing_cif(self, tmp_path):
+        split_file, base_dir = self._write_split(tmp_path, "abcd", [".cif", ".pdb"])
+
+        entries = parse_split_file(split_file, base_dir)
+
+        assert entries[0]["struc_path"] == base_dir / "abcd" / "abcd_final.cif"
+
+    def test_falls_back_to_pdb(self, tmp_path):
+        split_file, base_dir = self._write_split(tmp_path, "wxyz", [".pdb"])
+
+        entries = parse_split_file(split_file, base_dir)
+
+        assert entries[0]["struc_path"] == base_dir / "wxyz" / "wxyz_final.pdb"
+
+    def test_raises_when_structure_missing(self, tmp_path):
+        split_file, base_dir = self._write_split(tmp_path, "missing", [])
+
+        with pytest.raises(FileNotFoundError):
+            parse_split_file(split_file, base_dir)
+
+
+@pytest.mark.unit
+class TestAtom37ToAtoms:
+    """Tests for atom37 representation conversion."""
+
+    def test_basic_conversion(self):
+        """Basic conversion from atom37 to flat atoms."""
+        # Create atom37 tensor with some present atoms
+        atom_tensor = torch.full((3, 37, 3), ATOM37_FILL)
+        # Place atoms at specific positions
+        atom_tensor[0, 0, :] = torch.tensor([1.0, 2.0, 3.0])  # CA of residue 0
+        atom_tensor[0, 1, :] = torch.tensor([1.5, 2.5, 3.5])  # C of residue 0
+        atom_tensor[1, 0, :] = torch.tensor([4.0, 5.0, 6.0])  # CA of residue 1
+
+        coords, residue_idx, atom_type = atom37_to_atoms(atom_tensor)
+
+        assert coords.shape == (3, 3)
+        assert residue_idx.shape == (3,)
+        assert atom_type.shape == (3,)
+
+    def test_residue_indices_correct(self):
+        """Residue indices should match the original residue."""
+        atom_tensor = torch.full((2, 37, 3), ATOM37_FILL)
+        atom_tensor[0, 0, :] = torch.tensor([1.0, 0.0, 0.0])
+        atom_tensor[0, 1, :] = torch.tensor([2.0, 0.0, 0.0])
+        atom_tensor[1, 5, :] = torch.tensor([3.0, 0.0, 0.0])
+
+        _, residue_idx, atom_type = atom37_to_atoms(atom_tensor)
+
+        assert residue_idx[0] == 0
+        assert residue_idx[1] == 0
+        assert residue_idx[2] == 1
+
+    def test_atom_types_correct(self):
+        """Atom types should match the slot index."""
+        atom_tensor = torch.full((1, 37, 3), ATOM37_FILL)
+        atom_tensor[0, 0, :] = torch.tensor([1.0, 0.0, 0.0])  # slot 0
+        atom_tensor[0, 5, :] = torch.tensor([2.0, 0.0, 0.0])  # slot 5
+        atom_tensor[0, 10, :] = torch.tensor([3.0, 0.0, 0.0])  # slot 10
+
+        _, _, atom_type = atom37_to_atoms(atom_tensor)
+
+        assert atom_type[0] == 0
+        assert atom_type[1] == 5
+        assert atom_type[2] == 10
+
+    def test_empty_residues(self):
+        """Empty residues should not contribute atoms."""
+        atom_tensor = torch.full((3, 37, 3), ATOM37_FILL)
+        # Only residue 0 has atoms
+        atom_tensor[0, 0, :] = torch.tensor([1.0, 0.0, 0.0])
+
+        coords, residue_idx, _ = atom37_to_atoms(atom_tensor)
+
+        assert coords.shape == (1, 3)
+        assert residue_idx[0] == 0
+
+    def test_all_empty(self):
+        """All-empty tensor should return empty outputs."""
+        atom_tensor = torch.full((5, 37, 3), ATOM37_FILL)
+
+        coords, residue_idx, atom_type = atom37_to_atoms(atom_tensor)
+
+        assert coords.shape == (0, 3)
+        assert residue_idx.shape == (0,)
+        assert atom_type.shape == (0,)
+
+    def test_coordinates_preserved(self):
+        """Coordinates should be preserved exactly."""
+        atom_tensor = torch.full((1, 37, 3), ATOM37_FILL)
+        expected_coord = torch.tensor([1.234, 5.678, 9.012])
+        atom_tensor[0, 0, :] = expected_coord
+
+        coords, _, _ = atom37_to_atoms(atom_tensor)
 
     @staticmethod
     def _esm_key_count(atoms):
