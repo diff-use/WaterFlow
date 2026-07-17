@@ -188,7 +188,7 @@ def match_atoms_to_coords(
 
     # A wholesale miss means the parses disagree (frame, cell, altloc). Warn, or
     # the caller's drop looks like clean data.
-    if len(set(matched)) < len(atoms) // 2:
+    if len(set(matched)) < len(atoms) / 2:
         logger.warning(
             f"Only {len(set(matched))}/{len(atoms)} atoms matched within "
             f"{tolerance}A; parses may disagree. Unmatched atoms are dropped."
