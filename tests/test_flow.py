@@ -10,6 +10,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 from torch_geometric.data import Batch, Data, HeteroData
+from torch_geometric.nn import knn
 
 from src.flow import (
     _batch_from_counts,
