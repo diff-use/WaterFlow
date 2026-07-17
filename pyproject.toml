@@ -4,10 +4,10 @@ version = "0.1.0"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "torch==2.8.0",
-  "torch-geometric",
+  "torch-geometric>=2.8.0",
   "torch-scatter",
   "torch-cluster",
-  "pyg-lib",
+  "pyg-lib>=0.6.0",
   "e3nn",
   "esm",
   "biotite",

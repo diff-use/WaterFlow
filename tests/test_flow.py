@@ -207,7 +207,7 @@ class TestBuildKnnEdgesDirection:
 
     def test_torch_geometric_knn_row_convention_unchanged(self, device):
         """Pin knn's undocumented rows: row 0 = y (query), row 1 = x (neighbor).
-        build_knn_edges swaps these, so a library change reverses every edge."""
+        build_knn_edges swaps them, so a flip here would reverse every edge."""
         x = torch.tensor([[0.0, 0.0], [10.0, 0.0], [20.0, 0.0]], device=device)  # N=3
         y = torch.tensor([[0.1, 0.0], [19.9, 0.0]], device=device)  # M=2
 
