@@ -1002,6 +1002,53 @@ class FlowMatcher:
 
         return x, batch_w
 
+    def _setup_water_nodes(
+        self,
+        g: Batch,
+        water_ratio: float | None,
+        water_count: int | None,
+        device: torch.device,
+    ) -> tuple[Tensor, Tensor]:
+        """
+        Create the initial water nodes to integrate from.
+
+        Args:
+            g: Batched HeteroData graph (modified in-place)
+            water_ratio: If provided, sample num_residues * water_ratio waters.
+                        Ignored when water_count is also given.
+            water_count: If provided, sample exactly this many waters per protein.
+                        Takes precedence over water_ratio. When neither is given,
+                        the ground-truth water count is resampled from the prior.
+            device: Device to create tensors on
+
+        Returns:
+            x: (N_water_total, 3) initial noise positions
+            batch_w: (N_water_total,) batch indices
+        """
+        if water_count is not None:
+            # sample fixed number of waters per protein
+            return self._setup_water_nodes_from_count(g, water_count, device)
+
+        if water_ratio is not None:
+            # sample waters based on residue count
+            return self._setup_water_nodes_from_ratio(g, water_ratio, device)
+
+        # use existing water nodes
+        batch_w = g["water"].batch
+        num_waters = scatter(
+            torch.ones(batch_w.size(0), device=device, dtype=torch.long),
+            batch_w,
+            dim=0,
+            dim_size=self._num_graphs(g),
+            reduce="sum",
+        )
+        x, batch_w = self._sample_waters(g, num_waters, device)
+        # keep the graph's water batch in sync with the resampled layout so
+        # the model expands t against the correct per-water graph indices
+        g["water"].batch = batch_w
+
+        return x, batch_w
+
     @torch.inference_mode()
     def euler_integrate(
         self,
@@ -1057,26 +1104,7 @@ class FlowMatcher:
         x1_true = g["water"].pos.clone()
         batch_w_true = g["water"].batch.clone()
 
-        if water_count is not None:
-            # sample fixed number of waters per protein
-            x, batch_w = self._setup_water_nodes_from_count(g, water_count, device)
-        elif water_ratio is not None:
-            # sample waters based on residue count
-            x, batch_w = self._setup_water_nodes_from_ratio(g, water_ratio, device)
-        else:
-            # use existing water nodes
-            batch_w = g["water"].batch
-            num_waters = scatter(
-                torch.ones(batch_w.size(0), device=device, dtype=torch.long),
-                batch_w,
-                dim=0,
-                dim_size=num_graphs,
-                reduce="sum",
-            )
-            x, batch_w = self._sample_waters(g, num_waters, device)
-            # keep the graph's water batch in sync with the resampled layout so
-            # the model expands t against the correct per-water graph indices
-            g["water"].batch = batch_w
+        x, batch_w = self._setup_water_nodes(g, water_ratio, water_count, device)
 
         x1_pred_ema = x.clone()
 
@@ -1183,26 +1211,7 @@ class FlowMatcher:
         x1_true = g["water"].pos.clone()
         batch_w_true = g["water"].batch.clone()
 
-        if water_count is not None:
-            # sample fixed number of waters per protein
-            x, batch_w = self._setup_water_nodes_from_count(g, water_count, device)
-        elif water_ratio is not None:
-            # sample waters based on residue count
-            x, batch_w = self._setup_water_nodes_from_ratio(g, water_ratio, device)
-        else:
-            # use existing water nodes
-            batch_w = g["water"].batch
-            num_waters = scatter(
-                torch.ones(batch_w.size(0), device=device, dtype=torch.long),
-                batch_w,
-                dim=0,
-                dim_size=num_graphs,
-                reduce="sum",
-            )
-            x, batch_w = self._sample_waters(g, num_waters, device)
-            # keep the graph's water batch in sync with the resampled layout so
-            # the model expands t against the correct per-water graph indices
-            g["water"].batch = batch_w
+        x, batch_w = self._setup_water_nodes(g, water_ratio, water_count, device)
 
         x1_pred_ema = x.clone()
 
