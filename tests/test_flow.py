@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 import torch
 import torch.nn.functional as F
-from torch_geometric.data import Data, HeteroData
+from torch_geometric.data import Batch, Data, HeteroData
 
 from src.flow import (
     _batch_from_counts,
@@ -366,6 +366,16 @@ class TestFlowMatcher:
 
         assert isinstance(sigma, float)
         assert sigma > 0
+
+    def test_compute_sigma_per_graph_zero_protein_raises(self, device):
+        """A graph with no protein atoms has no meaningful sigma."""
+        g0 = HeteroData()
+        g0["protein"].pos = torch.randn(4, 3, device=device)
+        g1 = HeteroData()
+        g1["protein"].pos = torch.empty(0, 3, device=device)
+
+        with pytest.raises(ValueError, match="zero protein atoms"):
+            FlowMatcher.compute_sigma_per_graph(Batch.from_data_list([g0, g1]), device)
 
     def test_training_step(self, flow_matcher, simple_hetero_data, device):
         optimizer = torch.optim.Adam(flow_matcher.model.parameters(), lr=1e-4)

@@ -741,10 +741,20 @@ class FlowMatcher:
         """
         pos = data["protein"].pos  # (N_total, 3)
         batch_p = data["protein"].batch  # (N_total,)
+        num_graphs = FlowMatcher._num_graphs(data)
+
+        # an empty graph would otherwise shorten the output or yield a degenerate
+        # sigma that silently places its waters at the origin
+        empty = torch.bincount(batch_p, minlength=num_graphs) == 0
+        if empty.any():
+            raise ValueError(
+                f"Cannot compute sigma for graph(s) {empty.nonzero().flatten().tolist()}: "
+                "they have zero protein atoms."
+            )
 
         # Var(X) = E[X^2] - E[X]^2
-        mean_pos = scatter_mean(pos, batch_p, dim=0)  # (num_graphs, 3)
-        mean_sq = scatter_mean(pos**2, batch_p, dim=0)  # (num_graphs, 3)
+        mean_pos = scatter_mean(pos, batch_p, dim=0, dim_size=num_graphs)
+        mean_sq = scatter_mean(pos**2, batch_p, dim=0, dim_size=num_graphs)
         var_per_dim = mean_sq - mean_pos**2  # (num_graphs, 3)
         sigma = torch.sqrt(var_per_dim.mean(dim=-1).clamp(min=1e-8))  # (num_graphs,)
 
@@ -944,7 +954,9 @@ class FlowMatcher:
         total_waters = batch_w.size(0)
 
         # create water features (oxygen one-hot; +1 for the trailing 'other' bucket)
-        water_x = torch.zeros(total_waters, len(ELEMENT_VOCAB) + 1, device=device)
+        water_x = torch.zeros(
+            total_waters, len(ELEMENT_VOCAB) + 1, dtype=torch.float32, device=device
+        )
         water_x[:, ELEM_IDX["O"]] = 1.0
 
         # update graph with new water nodes
@@ -990,7 +1002,9 @@ class FlowMatcher:
         total_waters = batch_w.size(0)
 
         # create water features (oxygen one-hot; +1 for the trailing 'other' bucket)
-        water_x = torch.zeros(total_waters, len(ELEMENT_VOCAB) + 1, device=device)
+        water_x = torch.zeros(
+            total_waters, len(ELEMENT_VOCAB) + 1, dtype=torch.float32, device=device
+        )
         water_x[:, ELEM_IDX["O"]] = 1.0
 
         # update graph with new water nodes
