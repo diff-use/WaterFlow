@@ -75,6 +75,17 @@ def single_pdb_list_file(tmp_path, pdb_6eey):
     return str(list_file)
 
 
+@pytest.fixture
+def warning_log():
+    """Collect loguru warning messages; loguru does not reach pytest's caplog."""
+    from loguru import logger
+
+    messages = []
+    sink_id = logger.add(messages.append, level="WARNING", format="{message}")
+    yield messages
+    logger.remove(sink_id)
+
+
 @pytest.mark.unit
 class TestElementOnehot:
     """Tests for element one-hot encoding."""
@@ -251,43 +262,47 @@ class TestMatchAtomsToCoords:
         matched_loose = match_atoms_to_coords(atoms, target_coords, tolerance=0.1)
         assert len(matched_loose) == 1
 
-    @staticmethod
-    def _capture_warnings():
-        """Collect loguru WARNING records (loguru bypasses pytest's caplog)."""
-        from loguru import logger
-
-        records = []
-        handler_id = logger.add(records.append, level="WARNING")
-        return records, lambda: logger.remove(handler_id)
-
-    def test_warns_when_most_atoms_unmatched(self):
+    def test_warns_when_most_atoms_unmatched(self, warning_log):
         """A mostly-failed match must warn: the caller drops what doesn't match."""
         atoms = bts.AtomArray(4)
         atoms.coord = np.array([[float(i), 0.0, 0.0] for i in range(4)])
 
-        records, stop = self._capture_warnings()
-        try:
-            # coordinates nowhere near the atoms
-            matched = match_atoms_to_coords(atoms, np.array([[99.0, 0.0, 0.0]]))
-        finally:
-            stop()
+        # coordinates nowhere near the atoms
+        matched = match_atoms_to_coords(atoms, np.array([[99.0, 0.0, 0.0]]))
 
         assert matched == []
-        assert any("0/4 atoms matched" in r for r in records)
+        assert "0/4 atoms matched" in warning_log[0]
 
-    def test_no_warning_when_all_match(self):
+    def test_no_warning_when_all_match(self, warning_log):
         """A clean match must stay silent."""
         atoms = bts.AtomArray(4)
         atoms.coord = np.array([[float(i), 0.0, 0.0] for i in range(4)])
 
-        records, stop = self._capture_warnings()
-        try:
-            matched = match_atoms_to_coords(atoms, atoms.coord.copy())
-        finally:
-            stop()
+        matched = match_atoms_to_coords(atoms, atoms.coord.copy())
 
         assert len(matched) == 4
-        assert records == []
+        assert warning_log == []
+
+    @pytest.mark.parametrize(
+        "n_atoms,n_matched",
+        [
+            (1, 0),  # 0%
+            (3, 1),  # 33%
+            (5, 2),  # 40%
+        ],
+    )
+    def test_warns_on_odd_counts_below_half(self, warning_log, n_atoms, n_matched):
+        """Fewer than half matched must warn even when half is fractional; a
+        threshold of len(atoms) // 2 rounds the cutoff down and stays silent."""
+        atoms = bts.AtomArray(n_atoms)
+        atoms.coord = np.array([[float(i), 0.0, 0.0] for i in range(n_atoms)])
+
+        # hit exactly n_matched atoms, plus one coordinate far from every atom
+        targets = np.vstack([atoms.coord[:n_matched], [[99.0, 0.0, 0.0]]])
+        matched = match_atoms_to_coords(atoms, targets)
+
+        assert len(set(matched)) == n_matched
+        assert f"{n_matched}/{n_atoms} atoms matched" in warning_log[0]
 
 
 @pytest.mark.unit

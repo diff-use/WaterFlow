@@ -165,8 +165,10 @@ def match_atoms_to_coords(
     """
     Match biotite atoms to coordinates from a second parse of the same structure.
 
-    Used to reconcile biotite and PyMOL, which can disagree on altlocs and
-    hydrogens. The caller drops whatever does not match.
+    Reconciles biotite against PyMOL. The two disagree on count by design: PyMOL
+    keeps every altloc conformer while biotite takes the highest-occupancy one,
+    so PyMOL's atom set is a superset. Every biotite atom should still be found
+    in it; the caller drops any that are not.
 
     Args:
         atoms: Biotite AtomArray with coord attribute
@@ -174,20 +176,19 @@ def match_atoms_to_coords(
         tolerance: Maximum distance in Angstroms for a valid match
 
     Returns:
-        Indices into atoms lying within tolerance of some target coordinate.
+        Index into atoms for each target coordinate whose nearest atom lies
+        within tolerance. May repeat an index if two targets share an atom.
     """
     if target_coords.shape[0] == 0 or len(atoms) == 0:
         return []
 
-    matched = []
-    for i, coord in enumerate(target_coords):
-        dists = np.linalg.norm(atoms.coord - coord, axis=1)
-        min_idx = np.argmin(dists)
-        if dists[min_idx] < tolerance:
-            matched.append(min_idx)
+    dists = cdist(target_coords, atoms.coord)
+    nearest = dists.argmin(axis=1)
+    within = dists[np.arange(len(target_coords)), nearest] < tolerance
+    matched = nearest[within].tolist()
 
-    # A wholesale miss means the parses disagree (frame, cell, altloc). Warn, or
-    # the caller's drop looks like clean data.
+    # A wholesale miss means the parses disagree (frame, cell), not that the
+    # atoms are bad. Warn, or the caller's drop looks like clean data.
     if len(set(matched)) < len(atoms) / 2:
         logger.warning(
             f"Only {len(set(matched))}/{len(atoms)} atoms matched within "
@@ -985,9 +986,9 @@ class ProteinWaterDataset(Dataset):
 
         crystal_data = get_crystal_contacts_pymol(struc_path, self.cutoff)
 
-        # Ensure consistency between biotite and PyMOL parsing.
-        # Both parse the same ASU, but may differ in altloc selection, hydrogen
-        # handling, or edge cases. Keep only waters present in both representations.
+        # Keep only the waters PyMOL also saw. PyMOL's ASU is a superset of
+        # biotite's (it keeps every altloc conformer), so a water missing from it
+        # means the two parses disagree rather than that the water is unwanted.
         asu_water_indices = match_atoms_to_coords(
             water_atoms, crystal_data["asu_coords"]
         )
