@@ -196,14 +196,22 @@ class TestBuildKnnEdgesDirection:
         assert 2 not in set(edges[0].tolist())
 
     def test_output_rows_are_src_then_dst(self, device):
-        """Row 0 = src, row 1 = dst, pinned by index range (3 srcs vs 2 dsts)."""
-        src = torch.tensor(self.SRC, device=device)
-        dst = torch.tensor(self.DST, device=device)
+        """Row 0 = src, row 1 = dst, pinned by index range.
+
+        Own geometry: both dsts are nearest src[2], so row 0 must reach index 2
+        while row 1 only reaches 1. Swapping the rows puts 2 in row 1, which is
+        out of range for two dsts. (The class fixture can't pin this -- its row 0
+        is all zeros, so both ranges hold either way round.)
+        """
+        src = torch.tensor(
+            [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [20.0, 0.0, 0.0]], device=device
+        )
+        dst = torch.tensor([[19.0, 0.0, 0.0], [21.0, 0.0, 0.0]], device=device)
 
         edges = build_knn_edges(src, dst, k=1)
 
-        assert edges[0].max().item() < len(self.SRC)
-        assert edges[1].max().item() < len(self.DST)
+        assert edges[0].max().item() == 2  # src[2]; >= len(dst), so a swap breaks
+        assert edges[1].max().item() < len(dst)
 
     def test_torch_geometric_knn_row_convention_unchanged(self, device):
         """Pin knn's undocumented rows: row 0 = y (query), row 1 = x (neighbor).
