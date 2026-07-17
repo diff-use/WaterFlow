@@ -31,10 +31,16 @@ from torch_cluster import radius_graph
 from torch_geometric.data import Batch, HeteroData
 from tqdm import tqdm
 
-from src.constants import EDGE_PP, ELEM_IDX, ELEMENT_VOCAB, NUM_RBF
+from src.constants import (
+    EDGE_PP,
+    ELEM_IDX,
+    ELEMENT_VOCAB,
+    NUM_RBF,
+)
 from src.utils import (
     compute_edge_features,
     normalize_ins_code,
+    sanitize_res_names_for_esm,
 )
 
 
@@ -157,25 +163,39 @@ def match_atoms_to_coords(
     atoms: bts.AtomArray, target_coords: np.ndarray, tolerance: float = 0.01
 ) -> list[int]:
     """
-    Match biotite atoms to target coordinates by nearest neighbor. (needed for mates when parsing with PyMOL)
+    Match biotite atoms to coordinates from a second parse of the same structure.
+
+    Reconciles biotite against PyMOL. The two disagree on count by design: PyMOL
+    keeps every altloc conformer while biotite takes the highest-occupancy one,
+    so PyMOL's atom set is a superset. Every biotite atom should still be found
+    in it; the caller drops any that are not.
 
     Args:
         atoms: Biotite AtomArray with coord attribute
-        target_coords: (N, 3) array of target coordinates to match
+        target_coords: (N, 3) coordinates to match against
         tolerance: Maximum distance in Angstroms for a valid match
 
     Returns:
-        List of indices into atoms array for matched atoms
+        Index into atoms for each target coordinate whose nearest atom lies
+        within tolerance. May repeat an index if two targets share an atom.
     """
-    if target_coords.shape[0] == 0:
+    if target_coords.shape[0] == 0 or len(atoms) == 0:
         return []
 
-    matched = []
-    for i, coord in enumerate(target_coords):
-        dists = np.linalg.norm(atoms.coord - coord, axis=1)
-        min_idx = np.argmin(dists)
-        if dists[min_idx] < tolerance:
-            matched.append(min_idx)
+    from scipy.spatial import cKDTree
+
+    tree = cKDTree(atoms.coord)
+    dists, nearest = tree.query(target_coords, k=1, distance_upper_bound=tolerance)
+    within = np.isfinite(dists) & (nearest < len(atoms))
+    matched = nearest[within].tolist()
+
+    # A wholesale miss means the parses disagree (frame, cell), not that the
+    # atoms are bad. Warn, or the caller's drop looks like clean data.
+    if len(set(matched)) < len(atoms) / 2:
+        logger.warning(
+            f"Only {len(set(matched))}/{len(atoms)} atoms matched within "
+            f"{tolerance}A; parses may disagree. Unmatched atoms are dropped."
+        )
     return matched
 
 
@@ -696,7 +716,7 @@ def filter_waters_by_quality(
 
 class ProteinWaterDataset(Dataset):
     """
-    Dataset for protein crystal contact prediction.
+    Dataset for predicting water positions in protein crystal structures.
 
     Returns HeteroData with:
     - 'protein' node type: ASU protein atoms + optionally symmetry mates
@@ -968,9 +988,9 @@ class ProteinWaterDataset(Dataset):
 
         crystal_data = get_crystal_contacts_pymol(struc_path, self.cutoff)
 
-        # Ensure consistency between biotite and PyMOL parsing.
-        # Both parse the same ASU, but may differ in altloc selection, hydrogen
-        # handling, or edge cases. Keep only waters present in both representations.
+        # Keep only the waters PyMOL also saw. PyMOL's ASU is a superset of
+        # biotite's (it keeps every altloc conformer), so a water missing from it
+        # means the two parses disagree rather than that the water is unwanted.
         asu_water_indices = match_atoms_to_coords(
             water_atoms, crystal_data["asu_coords"]
         )
@@ -1067,20 +1087,19 @@ class ProteinWaterDataset(Dataset):
         protein_elements = [str(e).upper() for e in protein_atoms.element]
         protein_x = element_onehot(protein_elements)
 
-        # compute residue indices (including ins_code to match ESM/SLAE residue counting)
-        res_id = protein_atoms.res_id
-        chain_id_arr = protein_atoms.chain_id
-        ins_code_arr = np.array(
-            [normalize_ins_code(x) for x in protein_atoms.ins_code], dtype=object
-        )
-        residue_keys = list(zip(chain_id_arr, res_id, ins_code_arr))
-        unique_res = {k: i for i, k in enumerate(dict.fromkeys(residue_keys))}
-        protein_res_idx = torch.tensor(
-            [unique_res[k] for k in residue_keys], dtype=torch.long
-        )
-
-        # check water/residue ratio
-        num_residues = len(unique_res)
+        # protein_res_idx indexes cached ESM embedding rows, so it uses biotite's
+        # residue segmentation, not res_id (not 0-based, not contiguous, repeats
+        # across chains). Sanitize names and normalize ins_codes first so residues
+        # split exactly where the ESM script splits them.
+        sanitized_for_idx = sanitize_res_names_for_esm(protein_atoms)
+        for i in range(len(sanitized_for_idx)):
+            sanitized_for_idx.ins_code[i] = normalize_ins_code(
+                sanitized_for_idx.ins_code[i]
+            )
+        num_residues = bts.get_residue_count(sanitized_for_idx)
+        protein_res_idx = torch.from_numpy(
+            bts.spread_residue_wise(sanitized_for_idx, np.arange(num_residues))
+        ).long()
         num_waters = len(water_atoms)
         ratio_valid, ratio_reason = check_water_residue_ratio(
             num_waters,

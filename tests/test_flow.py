@@ -10,6 +10,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 from torch_geometric.data import Batch, Data, HeteroData
+from torch_geometric.nn import knn
 
 from src.flow import (
     _batch_from_counts,
@@ -157,6 +158,74 @@ class TestBuildKnnEdges:
 
         assert edges.shape[0] == 2
         assert edges.shape[1] > 0
+
+
+@pytest.mark.unit
+class TestBuildKnnEdgesDirection:
+    """Exact-set KNN direction tests on asymmetric geometry.
+
+    srcs are spread out, both dsts sit near src[0], so "k nearest srcs per dst"
+    (correct) and "k nearest dsts per src" (the x/y swap) give different edge
+    sets -- no distance ties to mask a mix-up.
+    """
+
+    SRC = [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [20.0, 0.0, 0.0]]
+    DST = [[1.0, 0.0, 0.0], [2.0, 0.0, 0.0]]
+
+    def test_exact_edge_set_is_per_destination(self, device):
+        """Both dsts are nearest src[0], so src[1]/src[2] must not appear. An x/y
+        swap gives {(0,0), (1,1), (2,1)} instead."""
+        src = torch.tensor(self.SRC, device=device)
+        dst = torch.tensor(self.DST, device=device)
+
+        edges = build_knn_edges(src, dst, k=1)
+
+        edge_set = set(zip(edges[0].tolist(), edges[1].tolist()))
+        assert edge_set == {(0, 0), (0, 1)}, f"got {sorted(edge_set)}"
+
+    def test_every_destination_is_covered(self, device):
+        """Coverage is per-destination: every dst gets k in-edges; an unneeded src
+        may be absent."""
+        src = torch.tensor(self.SRC, device=device)
+        dst = torch.tensor(self.DST, device=device)
+        k = 2
+
+        edges = build_knn_edges(src, dst, k=k)
+
+        dst_row = edges[1]
+        for d in range(len(self.DST)):
+            assert (dst_row == d).sum().item() == k, f"dst {d} lacks {k} in-edges"
+        # src[2] (x=20) is not among the 2 nearest srcs of either dst
+        assert 2 not in set(edges[0].tolist())
+
+    def test_output_rows_are_src_then_dst(self, device):
+        """Row 0 = src, row 1 = dst, pinned by index range.
+
+        Own geometry: both dsts are nearest src[2], so row 0 must reach index 2
+        while row 1 only reaches 1. Swapping the rows puts 2 in row 1, which is
+        out of range for two dsts. (The class fixture can't pin this -- its row 0
+        is all zeros, so both ranges hold either way round.)
+        """
+        src = torch.tensor(
+            [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [20.0, 0.0, 0.0]], device=device
+        )
+        dst = torch.tensor([[19.0, 0.0, 0.0], [21.0, 0.0, 0.0]], device=device)
+
+        edges = build_knn_edges(src, dst, k=1)
+
+        assert edges[0].max().item() == 2  # src[2]; >= len(dst), so a swap breaks
+        assert edges[1].max().item() < len(dst)
+
+    def test_torch_geometric_knn_row_convention_unchanged(self, device):
+        """Pin knn's undocumented rows: row 0 = y (query), row 1 = x (neighbor).
+        build_knn_edges swaps them, so a flip here would reverse every edge."""
+        x = torch.tensor([[0.0, 0.0], [10.0, 0.0], [20.0, 0.0]], device=device)  # N=3
+        y = torch.tensor([[0.1, 0.0], [19.9, 0.0]], device=device)  # M=2
+
+        out = knn(x, y, k=1)
+
+        assert out[0].tolist() == [0, 1]  # queries (y), in order
+        assert out[1].tolist() == [0, 2]  # nearest x: y[0]->x[0], y[1]->x[2]
 
 
 @pytest.mark.unit
@@ -895,8 +964,11 @@ class TestWaterEdgeConnectivity:
         n_water = simple_hetero_data["water"].num_nodes
 
         if n_water > 1:
-            # Check that all water nodes appear in the water-water edges
-            water_nodes_with_edges = torch.unique(ww_edges[0])
+            # WW edges are built per destination (knn query per water), so every
+            # water is guaranteed to appear as a destination (row 1); a water that
+            # is no other water's nearest neighbor would be missing from the source
+            # row (row 0). Assert coverage on the destination/query row.
+            water_nodes_with_edges = torch.unique(ww_edges[1])
             assert len(water_nodes_with_edges) == n_water, (
                 f"Only {len(water_nodes_with_edges)}/{n_water} waters have water-water edges"
             )
@@ -917,9 +989,11 @@ class TestWaterEdgeConnectivity:
             f"Only {len(water_nodes_with_pw_edges)}/{n_water} waters have protein edges in batched data"
         )
 
-        # Check water-water edges
+        # Check water-water edges. WW edges are built per destination, so every
+        # water appears as a destination (row 1); assert coverage on the
+        # destination/query row rather than the source row.
         if n_water > 1:
-            water_nodes_with_ww_edges = torch.unique(ww_edges[0])
+            water_nodes_with_ww_edges = torch.unique(ww_edges[1])
             assert len(water_nodes_with_ww_edges) == n_water, (
                 f"Only {len(water_nodes_with_ww_edges)}/{n_water} waters have water-water edges in batched data"
             )

@@ -22,6 +22,7 @@ All test cases created with assistance from Claude Code.
 import json
 from pathlib import Path
 
+import biotite.structure as bts
 import numpy as np
 import pytest
 import torch
@@ -52,6 +53,7 @@ from src.dataset import (
     parse_asu_with_biotite,
     ProteinWaterDataset,
 )
+from src.utils import normalize_ins_code, sanitize_res_names_for_esm
 
 
 # PDB fixtures (pdb_base_dir, pdb_6eey, pdb_2b5w, pdb_8dzt, pdb_1deu) are
@@ -71,6 +73,17 @@ def single_pdb_list_file(tmp_path, pdb_6eey):
     list_file = tmp_path / "pdb_list.txt"
     list_file.write_text("6eey_final\n")
     return str(list_file)
+
+
+@pytest.fixture
+def warning_log():
+    """Collect loguru warning messages; loguru does not reach pytest's caplog."""
+    from loguru import logger
+
+    messages = []
+    sink_id = logger.add(messages.append, level="WARNING", format="{message}")
+    yield messages
+    logger.remove(sink_id)
 
 
 @pytest.mark.unit
@@ -248,6 +261,48 @@ class TestMatchAtomsToCoords:
         # Should match with loose tolerance
         matched_loose = match_atoms_to_coords(atoms, target_coords, tolerance=0.1)
         assert len(matched_loose) == 1
+
+    def test_warns_when_most_atoms_unmatched(self, warning_log):
+        """A mostly-failed match must warn: the caller drops what doesn't match."""
+        atoms = bts.AtomArray(4)
+        atoms.coord = np.array([[float(i), 0.0, 0.0] for i in range(4)])
+
+        # coordinates nowhere near the atoms
+        matched = match_atoms_to_coords(atoms, np.array([[99.0, 0.0, 0.0]]))
+
+        assert matched == []
+        assert "0/4 atoms matched" in warning_log[0]
+
+    def test_no_warning_when_all_match(self, warning_log):
+        """A clean match must stay silent."""
+        atoms = bts.AtomArray(4)
+        atoms.coord = np.array([[float(i), 0.0, 0.0] for i in range(4)])
+
+        matched = match_atoms_to_coords(atoms, atoms.coord.copy())
+
+        assert len(matched) == 4
+        assert warning_log == []
+
+    @pytest.mark.parametrize(
+        "n_atoms,n_matched",
+        [
+            (1, 0),  # 0%
+            (3, 1),  # 33%
+            (5, 2),  # 40%
+        ],
+    )
+    def test_warns_on_odd_counts_below_half(self, warning_log, n_atoms, n_matched):
+        """Fewer than half matched must warn even when half is fractional; a
+        threshold of len(atoms) // 2 rounds the cutoff down and stays silent."""
+        atoms = bts.AtomArray(n_atoms)
+        atoms.coord = np.array([[float(i), 0.0, 0.0] for i in range(n_atoms)])
+
+        # hit exactly n_matched atoms, plus one coordinate far from every atom
+        targets = np.vstack([atoms.coord[:n_matched], [[99.0, 0.0, 0.0]]])
+        matched = match_atoms_to_coords(atoms, targets)
+
+        assert len(set(matched)) == n_matched
+        assert f"{n_matched}/{n_atoms} atoms matched" in warning_log[0]
 
 
 @pytest.mark.unit
@@ -2609,6 +2664,81 @@ class TestSymmetryMateHandling:
         # num_asu_protein_atoms should be <= total protein nodes
         assert data.num_asu_protein_atoms <= data["protein"].num_nodes
         assert data.num_asu_protein_atoms > 0
+
+
+# ============== Tests for residue index assignment ==============
+
+
+@pytest.mark.integration
+class TestResidueIndexAssignment:
+    """protein_res_idx must be usable as an index into cached ESM embedding rows."""
+
+    @staticmethod
+    def _asu_res_idx(dataset):
+        """ASU protein residue indices for the first entry (excludes mates)."""
+        data = dataset[0]
+        return data["protein"].residue_index[: data.num_asu_protein_atoms]
+
+    def _build(self, pdb_id, tmp_path, pdb_base_dir, **kwargs):
+        """Build a dataset with water filters off (irrelevant to indexing)."""
+        list_file = tmp_path / "list.txt"
+        list_file.write_text(f"{pdb_id}_final\n")
+        return ProteinWaterDataset(
+            pdb_list_file=str(list_file),
+            processed_dir=str(tmp_path / "processed"),
+            base_pdb_dir=str(pdb_base_dir),
+            include_mates=False,
+            preprocess=True,
+            filter_by_distance=False,
+            filter_by_edia=False,
+            filter_by_bfactor=False,
+            **kwargs,
+        )
+
+    def test_index_is_zero_based_and_contiguous(self, tmp_path, pdb_base_dir):
+        """Indices must cover 0..num_residues-1 with no gaps."""
+        res_idx = self._asu_res_idx(self._build("6eey", tmp_path, pdb_base_dir))
+
+        assert res_idx.min().item() == 0
+        assert torch.equal(
+            torch.unique(res_idx), torch.arange(res_idx.max().item() + 1)
+        )
+
+    def test_index_matches_num_residues(self, tmp_path, pdb_base_dir):
+        """Distinct index count must equal the ESM embedding table's row count."""
+        dataset = self._build("6eey", tmp_path, pdb_base_dir)
+        data = dataset[0]
+        res_idx = data["protein"].residue_index[: data.num_asu_protein_atoms]
+
+        assert len(torch.unique(res_idx)) == data["protein"].num_protein_residues
+
+    def test_atoms_of_same_residue_share_index(self, tmp_path, pdb_base_dir):
+        """Each residue is one contiguous atom block owning >=1 atom."""
+        res_idx = self._asu_res_idx(self._build("6eey", tmp_path, pdb_base_dir))
+
+        assert torch.all(res_idx[1:] >= res_idx[:-1])  # non-decreasing
+        assert (torch.bincount(res_idx) > 0).all()
+
+    def test_insertion_codes_do_not_split_residues(self, tmp_path, pdb_base_dir):
+        """1deu has real insertion codes: they mark distinct residues, but
+        placeholder codes must not inflate the count."""
+        # 1deu's chains sit 45A apart; relax the unrelated interface guard.
+        dataset = self._build(
+            "1deu", tmp_path, pdb_base_dir, interface_dist_threshold=100.0
+        )
+        data = dataset[0]
+        res_idx = data["protein"].residue_index[: data.num_asu_protein_atoms]
+
+        protein_atoms, _, _ = parse_asu_with_biotite(
+            str(Path(pdb_base_dir) / "1deu" / "1deu_final.pdb")
+        )
+        sanitized = sanitize_res_names_for_esm(protein_atoms)
+        for i in range(len(sanitized)):
+            sanitized.ins_code[i] = normalize_ins_code(sanitized.ins_code[i])
+        expected = len(bts.get_residue_starts(sanitized))
+
+        assert len(torch.unique(res_idx)) == expected
+        assert data["protein"].num_protein_residues == expected
 
 
 # ============== Tests for RBF feature computation ==============
