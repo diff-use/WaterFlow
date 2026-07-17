@@ -576,6 +576,8 @@ class TestUniformBallSampling:
         import biotite.structure as bts
         from biotite.structure.io.pdb import get_structure, PDBFile
 
+        torch.manual_seed(0)
+
         pdb_file = PDBFile.read(pdb_6eey)
         atoms = get_structure(pdb_file, model=1, altloc="occupancy")
         atoms = atoms[atoms.element != "H"]
@@ -640,6 +642,27 @@ class TestScaledGaussianSampling:
         assert batch_w.shape == (7,)
         assert (batch_w == 0).sum().item() == 4
         assert (batch_w == 1).sum().item() == 3
+
+    def test_sigma_broadcasts_per_graph(self, device):
+        """Each graph's waters must be scaled by that graph's own sigma."""
+        num_waters = torch.tensor([4, 3], dtype=torch.long, device=device)
+        sigma = torch.tensor([1.0, 2.0], device=device)
+
+        torch.manual_seed(0)
+        pos, batch_w = sample_waters_scaled_gaussian(
+            num_waters=num_waters,
+            sigma_per_graph=sigma,
+            device=device,
+            dtype=torch.float32,
+        )
+
+        # randn is the sampler's only RNG draw, so the same seed reproduces it
+        torch.manual_seed(0)
+        expected = torch.randn(7, 3, device=device, dtype=torch.float32) * sigma[
+            batch_w
+        ].unsqueeze(-1)
+
+        assert torch.allclose(pos, expected)
 
     def test_empty_waters(self, device):
         num_waters = torch.tensor([0], dtype=torch.long, device=device)

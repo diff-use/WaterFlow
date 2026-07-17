@@ -20,7 +20,16 @@ from torch_geometric.nn import knn
 from torch_scatter import scatter, scatter_mean
 from tqdm.auto import tqdm
 
-from src.constants import ALL_EDGE_TYPES, EDGE_PP, EDGE_PW, EDGE_WP, EDGE_WW, NUM_RBF
+from src.constants import (
+    ALL_EDGE_TYPES,
+    EDGE_PP,
+    EDGE_PW,
+    EDGE_WP,
+    EDGE_WW,
+    ELEM_IDX,
+    ELEMENT_VOCAB,
+    NUM_RBF,
+)
 from src.encoder_base import BaseProteinEncoder
 from src.gvp import GVP, GVPMultiEdgeConv
 from src.utils import ot_coupling
@@ -835,8 +844,12 @@ class FlowMatcher:
                 from torch_scatter import scatter_add
 
                 weighted_mse = (w * per_atom_mse).squeeze(-1)
-                numerator = scatter_add(weighted_mse, batch_w, dim=0)
-                denominator = scatter_add(w.squeeze(-1), batch_w, dim=0)
+                numerator = scatter_add(
+                    weighted_mse, batch_w, dim=0, dim_size=num_graphs
+                )
+                denominator = scatter_add(
+                    w.squeeze(-1), batch_w, dim=0, dim_size=num_graphs
+                )
                 per_sample_loss = numerator / (denominator + 1e-8)
                 per_sample_info = {"losses": per_sample_loss, "num_graphs": num_graphs}
 
@@ -932,9 +945,9 @@ class FlowMatcher:
         x, batch_w = self._sample_waters(g, num_waters, device)
         total_waters = batch_w.size(0)
 
-        # create water features (oxygen one-hot, index 2 for 'O' in ELEMENT_VOCAB)
-        water_x = torch.zeros(total_waters, 16, device=device)
-        water_x[:, 2] = 1.0  # oxygen is index 2 in ELEMENT_VOCAB
+        # create water features (oxygen one-hot; +1 for the trailing 'other' bucket)
+        water_x = torch.zeros(total_waters, len(ELEMENT_VOCAB) + 1, device=device)
+        water_x[:, ELEM_IDX["O"]] = 1.0
 
         # update graph with new water nodes
         g["water"].pos = x
@@ -965,8 +978,7 @@ class FlowMatcher:
         if water_count < 0:
             raise ValueError(f"water_count must be >= 0, got {water_count}")
 
-        num_residues = g["protein"].num_residues  # (num_graphs,)
-        num_graphs = num_residues.size(0)
+        num_graphs = self._num_graphs(g)
 
         num_waters = torch.full(
             (num_graphs,),
@@ -978,9 +990,9 @@ class FlowMatcher:
         x, batch_w = self._sample_waters(g, num_waters, device)
         total_waters = batch_w.size(0)
 
-        # create water features (oxygen one-hot, index 2 for 'O' in ELEMENT_VOCAB)
-        water_x = torch.zeros(total_waters, 16, device=device)
-        water_x[:, 2] = 1.0  # oxygen is index 2 in ELEMENT_VOCAB
+        # create water features (oxygen one-hot; +1 for the trailing 'other' bucket)
+        water_x = torch.zeros(total_waters, len(ELEMENT_VOCAB) + 1, device=device)
+        water_x[:, ELEM_IDX["O"]] = 1.0
 
         # update graph with new water nodes
         g["water"].pos = x
@@ -1011,8 +1023,11 @@ class FlowMatcher:
             sc_ema_alpha: EMA decay for self-conditioning
             device: Device to run on
             water_ratio: If provided, sample num_residues * water_ratio waters
-                        instead of using ground truth water count
-            water_count: If provided, sample exactly this many waters per protein
+                        instead of using ground truth water count. Ignored when
+                        water_count is also given.
+            water_count: If provided, sample exactly this many waters per protein.
+                        Takes precedence over water_ratio. When neither is given,
+                        the ground-truth water count is resampled from the prior.
 
         Returns:
             List of dicts, one per input graph, each with keys:
@@ -1036,6 +1051,7 @@ class FlowMatcher:
         g = Batch.from_data_list([copy.deepcopy(graph) for graph in graphs]).to(device)
 
         batch_p = g["protein"].batch
+        num_graphs = self._num_graphs(g)
 
         # store ground truth water positions and batch indices before modifying
         x1_true = g["water"].pos.clone()
@@ -1044,15 +1060,12 @@ class FlowMatcher:
         if water_count is not None:
             # sample fixed number of waters per protein
             x, batch_w = self._setup_water_nodes_from_count(g, water_count, device)
-            num_graphs = g["protein"].num_residues.size(0)
         elif water_ratio is not None:
             # sample waters based on residue count
             x, batch_w = self._setup_water_nodes_from_ratio(g, water_ratio, device)
-            num_graphs = g["protein"].num_residues.size(0)
         else:
             # use existing water nodes
             batch_w = g["water"].batch
-            num_graphs = len(graphs)
             num_waters = scatter(
                 torch.ones(batch_w.size(0), device=device, dtype=torch.long),
                 batch_w,
@@ -1136,8 +1149,11 @@ class FlowMatcher:
             device: Device to run on
             return_trajectory: Whether to return full trajectory and metrics
             water_ratio: If provided, sample num_residues * water_ratio waters
-                        instead of using ground truth water count
-            water_count: If provided, sample exactly this many waters per protein
+                        instead of using ground truth water count. Ignored when
+                        water_count is also given.
+            water_count: If provided, sample exactly this many waters per protein.
+                        Takes precedence over water_ratio. When neither is given,
+                        the ground-truth water count is resampled from the prior.
 
         Returns:
             List of dicts, one per input graph, each with keys:
@@ -1161,6 +1177,7 @@ class FlowMatcher:
         g = Batch.from_data_list([copy.deepcopy(graph) for graph in graphs]).to(device)
 
         batch_p = g["protein"].batch
+        num_graphs = self._num_graphs(g)
 
         # store ground truth water positions and batch indices before modifying
         x1_true = g["water"].pos.clone()
@@ -1169,15 +1186,12 @@ class FlowMatcher:
         if water_count is not None:
             # sample fixed number of waters per protein
             x, batch_w = self._setup_water_nodes_from_count(g, water_count, device)
-            num_graphs = g["protein"].num_residues.size(0)
         elif water_ratio is not None:
             # sample waters based on residue count
             x, batch_w = self._setup_water_nodes_from_ratio(g, water_ratio, device)
-            num_graphs = g["protein"].num_residues.size(0)
         else:
             # use existing water nodes
             batch_w = g["water"].batch
-            num_graphs = len(graphs)
             num_waters = scatter(
                 torch.ones(batch_w.size(0), device=device, dtype=torch.long),
                 batch_w,
