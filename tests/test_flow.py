@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from torch_geometric.data import Data, HeteroData
 
 from src.flow import (
+    _batch_from_counts,
     build_knn_edges,
     FlowMatcher,
     FlowWaterGVP,
@@ -483,32 +484,33 @@ class TestUniformBallSampling:
             device=device,
         )
         batch_p = torch.tensor([0, 0, 1, 1], dtype=torch.long, device=device)
-        num_waters = torch.tensor([4, 3], dtype=torch.long, device=device)
+        batch_w = _batch_from_counts(
+            torch.tensor([4, 3], dtype=torch.long, device=device), device
+        )
 
-        pos, batch_w = sample_waters_uniform_ball(
+        pos = sample_waters_uniform_ball(
             protein_pos=protein_pos,
             batch_p=batch_p,
-            num_waters=num_waters,
+            batch_w=batch_w,
             cutoff=2.0,
             device=device,
         )
 
         assert pos.shape == (7, 3)
-        assert batch_w.shape == (7,)
-        assert (batch_w == 0).sum().item() == 4
-        assert (batch_w == 1).sum().item() == 3
 
     def test_all_within_cutoff(self, device):
         torch.manual_seed(42)
         protein_pos = torch.randn(20, 3, device=device) * 50
         batch_p = torch.cat([torch.zeros(10), torch.ones(10)]).long().to(device)
-        num_waters = torch.tensor([50, 50], dtype=torch.long, device=device)
+        batch_w = _batch_from_counts(
+            torch.tensor([50, 50], dtype=torch.long, device=device), device
+        )
         cutoff = 8.0
 
-        pos, batch_w = sample_waters_uniform_ball(
+        pos = sample_waters_uniform_ball(
             protein_pos=protein_pos,
             batch_p=batch_p,
-            num_waters=num_waters,
+            batch_w=batch_w,
             cutoff=cutoff,
             device=device,
         )
@@ -522,31 +524,32 @@ class TestUniformBallSampling:
     def test_empty_waters(self, device):
         protein_pos = torch.randn(5, 3, device=device)
         batch_p = torch.zeros(5, dtype=torch.long, device=device)
-        num_waters = torch.tensor([0], dtype=torch.long, device=device)
+        batch_w = torch.empty(0, dtype=torch.long, device=device)
 
-        pos, batch_w = sample_waters_uniform_ball(
+        pos = sample_waters_uniform_ball(
             protein_pos=protein_pos,
             batch_p=batch_p,
-            num_waters=num_waters,
+            batch_w=batch_w,
             cutoff=8.0,
             device=device,
         )
 
         assert pos.shape == (0, 3)
-        assert batch_w.shape == (0,)
 
     def test_zero_protein_graph_raises(self, device):
         """Requesting waters for a graph with no protein atoms fails fast."""
         # graph 0 has protein atoms, graph 1 has none but requests waters
         protein_pos = torch.randn(5, 3, device=device)
         batch_p = torch.zeros(5, dtype=torch.long, device=device)
-        num_waters = torch.tensor([3, 4], dtype=torch.long, device=device)
+        batch_w = _batch_from_counts(
+            torch.tensor([3, 4], dtype=torch.long, device=device), device
+        )
 
         with pytest.raises(ValueError, match="zero protein atoms"):
             sample_waters_uniform_ball(
                 protein_pos=protein_pos,
                 batch_p=batch_p,
-                num_waters=num_waters,
+                batch_w=batch_w,
                 cutoff=8.0,
                 device=device,
             )
@@ -556,18 +559,19 @@ class TestUniformBallSampling:
         torch.manual_seed(0)
         protein_pos = torch.randn(500, 3, device=device) * 50
         batch_p = torch.zeros(500, dtype=torch.long, device=device)
-        num_waters = torch.tensor([301], dtype=torch.long, device=device)
+        batch_w = _batch_from_counts(
+            torch.tensor([301], dtype=torch.long, device=device), device
+        )
 
-        pos, batch_w = sample_waters_uniform_ball(
+        pos = sample_waters_uniform_ball(
             protein_pos=protein_pos,
             batch_p=batch_p,
-            num_waters=num_waters,
+            batch_w=batch_w,
             cutoff=8.0,
             device=device,
         )
 
         assert pos.shape == (301, 3)
-        assert batch_w.shape == (301,)
 
     @pytest.mark.slow
     def test_real_structure_cutoff_and_batch(self, device, pdb_6eey):
@@ -596,19 +600,19 @@ class TestUniformBallSampling:
             ]
         )
         num_waters = torch.tensor([50, 30], dtype=torch.long, device=device)
+        batch_w = _batch_from_counts(num_waters, device)
         cutoff = 8.0
 
-        pos, batch_w = sample_waters_uniform_ball(
+        pos = sample_waters_uniform_ball(
             protein_pos=protein_pos_both,
             batch_p=batch_p,
-            num_waters=num_waters,
+            batch_w=batch_w,
             cutoff=cutoff,
             device=device,
         )
 
         # correct total count and per-graph split
         assert pos.shape == (80, 3)
-        assert batch_w.shape == (80,)
         assert (batch_w == 0).sum().item() == 50
         assert (batch_w == 1).sum().item() == 30
 
@@ -628,29 +632,30 @@ class TestUniformBallSampling:
 class TestScaledGaussianSampling:
     def test_shapes_and_counts(self, device):
         torch.manual_seed(0)
-        num_waters = torch.tensor([4, 3], dtype=torch.long, device=device)
+        batch_w = _batch_from_counts(
+            torch.tensor([4, 3], dtype=torch.long, device=device), device
+        )
         sigma = torch.tensor([1.0, 2.0], device=device)
 
-        pos, batch_w = sample_waters_scaled_gaussian(
-            num_waters=num_waters,
+        pos = sample_waters_scaled_gaussian(
+            batch_w=batch_w,
             sigma_per_graph=sigma,
             device=device,
             dtype=torch.float32,
         )
 
         assert pos.shape == (7, 3)
-        assert batch_w.shape == (7,)
-        assert (batch_w == 0).sum().item() == 4
-        assert (batch_w == 1).sum().item() == 3
 
     def test_sigma_broadcasts_per_graph(self, device):
         """Each graph's waters must be scaled by that graph's own sigma."""
-        num_waters = torch.tensor([4, 3], dtype=torch.long, device=device)
+        batch_w = _batch_from_counts(
+            torch.tensor([4, 3], dtype=torch.long, device=device), device
+        )
         sigma = torch.tensor([1.0, 2.0], device=device)
 
         torch.manual_seed(0)
-        pos, batch_w = sample_waters_scaled_gaussian(
-            num_waters=num_waters,
+        pos = sample_waters_scaled_gaussian(
+            batch_w=batch_w,
             sigma_per_graph=sigma,
             device=device,
             dtype=torch.float32,
@@ -665,18 +670,87 @@ class TestScaledGaussianSampling:
         assert torch.allclose(pos, expected)
 
     def test_empty_waters(self, device):
-        num_waters = torch.tensor([0], dtype=torch.long, device=device)
+        batch_w = torch.empty(0, dtype=torch.long, device=device)
         sigma = torch.tensor([1.0], device=device)
 
-        pos, batch_w = sample_waters_scaled_gaussian(
-            num_waters=num_waters,
+        pos = sample_waters_scaled_gaussian(
+            batch_w=batch_w,
             sigma_per_graph=sigma,
             device=device,
             dtype=torch.float32,
         )
 
         assert pos.shape == (0, 3)
-        assert batch_w.shape == (0,)
+
+
+@pytest.mark.unit
+class TestSamplingHonoursNodeOrder:
+    """Samplers return one water per batch_w entry, in batch_w's own order."""
+
+    @staticmethod
+    def _two_graphs_far_apart(device):
+        """Graph 0's protein at the origin, graph 1's 100A away."""
+        protein_pos = torch.cat(
+            [torch.zeros(4, 3, device=device), torch.full((4, 3), 100.0, device=device)]
+        )
+        batch_p = torch.tensor([0] * 4 + [1] * 4, dtype=torch.long, device=device)
+        # water nodes interleaved across graphs rather than grouped
+        batch_w = torch.tensor([0, 1, 0, 1], dtype=torch.long, device=device)
+
+        return protein_pos, batch_p, batch_w
+
+    def test_uniform_ball_follows_interleaved_batch(self, device):
+        """Each water anchors on its own graph even when nodes are interleaved."""
+        torch.manual_seed(0)
+        protein_pos, batch_p, batch_w = self._two_graphs_far_apart(device)
+
+        pos = sample_waters_uniform_ball(
+            protein_pos=protein_pos,
+            batch_p=batch_p,
+            batch_w=batch_w,
+            cutoff=2.0,
+            device=device,
+        )
+
+        assert pos[batch_w == 0].abs().max().item() < 10.0
+        assert (pos[batch_w == 1] - 100.0).abs().max().item() < 10.0
+
+    def test_scaled_gaussian_follows_interleaved_batch(self, device):
+        """Sigma follows each water's own graph when nodes are interleaved."""
+        batch_w = torch.tensor([0, 1, 0, 1], dtype=torch.long, device=device)
+        sigma = torch.tensor([1.0, 2.0], device=device)
+
+        torch.manual_seed(0)
+        pos = sample_waters_scaled_gaussian(
+            batch_w=batch_w, sigma_per_graph=sigma, device=device, dtype=torch.float32
+        )
+
+        torch.manual_seed(0)
+        expected = torch.randn(4, 3, device=device) * sigma[batch_w].unsqueeze(-1)
+
+        assert torch.allclose(pos, expected)
+
+    def test_ot_coupling_pairs_within_graph_when_interleaved(self, device):
+        """A graph's waters pair with its own prior, not a neighbour's."""
+        from src.utils import ot_coupling
+
+        torch.manual_seed(0)
+        protein_pos, batch_p, batch_w = self._two_graphs_far_apart(device)
+        x1 = torch.tensor(
+            [[0.0] * 3, [100.0] * 3, [0.0] * 3, [100.0] * 3], device=device
+        )
+
+        x0 = sample_waters_uniform_ball(
+            protein_pos=protein_pos,
+            batch_p=batch_p,
+            batch_w=batch_w,
+            cutoff=2.0,
+            device=device,
+        )
+        x0_star, x1_star = ot_coupling(x1=x1, batch=batch_w, x0=x0)
+
+        # pairings stay inside their graph, so nothing is dragged 100A across
+        assert (x1_star - x0_star).norm(dim=-1).max().item() < 10.0
 
 
 @pytest.mark.unit

@@ -35,13 +35,29 @@ from src.gvp import GVP, GVPMultiEdgeConv
 from src.utils import ot_coupling
 
 
+def _batch_from_counts(num_waters: Tensor, device: torch.device) -> Tensor:
+    """
+    Build a graph-grouped batch vector from per-graph counts.
+
+    Args:
+        num_waters: (num_graphs,) water count per graph
+        device: Output device
+
+    Returns:
+        (sum(num_waters),) graph index per water, non-decreasing
+    """
+    return torch.repeat_interleave(
+        torch.arange(num_waters.numel(), device=device), num_waters.to(device)
+    )
+
+
 def sample_waters_uniform_ball(
     protein_pos: Tensor,
     batch_p: Tensor,
-    num_waters: Tensor,
+    batch_w: Tensor,
     cutoff: float = 8.0,
     device: torch.device | None = None,
-) -> tuple[Tensor, Tensor]:
+) -> Tensor:
     """
     Sample water positions uniformly inside balls of radius *cutoff* centred
     on randomly chosen protein atoms.
@@ -52,36 +68,34 @@ def sample_waters_uniform_ball(
     Args:
         protein_pos: (N_protein, 3) protein coordinates for all graphs
         batch_p: (N_protein,) graph indices for protein atoms
-        num_waters: (num_graphs,) target water count per graph
+        batch_w: (N_water,) graph index per water to sample. Positions are returned
+            in this order, so callers with existing water nodes can pass their own
+            batch vector and get samples aligned to it.
         cutoff: Ball radius in Angstroms
         device: Optional output device (defaults to protein_pos.device)
 
     Returns:
-        water_pos: (sum(num_waters), 3) sampled positions
-        batch_w: (sum(num_waters),) graph indices
+        water_pos: (N_water, 3) sampled positions, one per entry of batch_w
     """
     if device is None:
         device = protein_pos.device
 
-    num_graphs = num_waters.numel()
-    total_waters = int(num_waters.sum().item())
+    batch_w = batch_w.to(device)
+    total_waters = batch_w.numel()
 
     if total_waters == 0:
-        return (
-            torch.empty(0, 3, dtype=protein_pos.dtype, device=device),
-            torch.empty(0, dtype=torch.long, device=device),
-        )
-
-    # batch indices for output waters
-    batch_w = torch.repeat_interleave(
-        torch.arange(num_graphs, device=device), num_waters.to(device)
-    )
+        return torch.empty(0, 3, dtype=protein_pos.dtype, device=device)
 
     # offsets below assume protein atoms are grouped contiguously by graph;
     # interleaved batch_p would pick anchors from the wrong graph.
     batch_p = batch_p.to(device)
     if batch_p.numel() > 1 and (batch_p[1:] < batch_p[:-1]).any():
         raise ValueError("batch_p must be sorted (non-decreasing) by graph index.")
+
+    # cover every graph named by either side so the guard below can see empty ones
+    num_graphs = int(batch_w.max().item()) + 1
+    if batch_p.numel() > 0:
+        num_graphs = max(num_graphs, int(batch_p.max().item()) + 1)
 
     # per-graph protein atom counts and cumulative offsets
     num_p_per_graph = scatter(
@@ -95,20 +109,18 @@ def sample_waters_uniform_ball(
     # fail fast: a graph that requests waters must have at least one protein atom.
     # Otherwise graph_sizes is 0 and graph_offsets + local_idx would index into a
     # neighbouring graph's atoms (or out of bounds) when picking anchors below.
-    num_waters_dev = num_waters.to(device)
-    empty_protein = (num_waters_dev > 0) & (num_p_per_graph == 0)
-    if empty_protein.any():
-        bad = torch.nonzero(empty_protein, as_tuple=False).flatten().tolist()
+    graph_sizes = num_p_per_graph[batch_w]
+    if (graph_sizes == 0).any():
+        bad = batch_w[graph_sizes == 0].unique().tolist()
         raise ValueError(
-            f"Cannot sample waters for graph(s) {bad}: requested "
-            f"{num_waters_dev[bad].tolist()} water(s) but they have zero protein atoms."
+            f"Cannot sample waters for graph(s) {bad}: they request waters "
+            "but have zero protein atoms."
         )
 
     offsets = torch.zeros(num_graphs + 1, dtype=torch.long, device=device)
     offsets[1:] = num_p_per_graph.cumsum(dim=0)
 
     # pick a random protein atom per water (uniform with replacement)
-    graph_sizes = num_p_per_graph[batch_w]
     graph_offsets = offsets[batch_w]
     local_idx = (torch.rand(total_waters, device=device) * graph_sizes.float()).long()
     anchors = protein_pos.to(device)[graph_offsets + local_idx]
@@ -122,44 +134,38 @@ def sample_waters_uniform_ball(
         total_waters, 1, device=device, dtype=protein_pos.dtype
     ).pow(1.0 / 3.0)
 
-    return anchors + r * direction, batch_w
+    return anchors + r * direction
 
 
 def sample_waters_scaled_gaussian(
-    num_waters: Tensor,
+    batch_w: Tensor,
     sigma_per_graph: Tensor,
     device: torch.device,
     dtype: torch.dtype = torch.float32,
-) -> tuple[Tensor, Tensor]:
+) -> Tensor:
     """
     Sample water positions from N(0, sigma^2 * I) with no rejection.
 
     Args:
-        num_waters: (num_graphs,) target water count per graph
+        batch_w: (N_water,) graph index per water to sample. Positions are returned
+            in this order, so callers with existing water nodes can pass their own
+            batch vector and get samples aligned to it.
         sigma_per_graph: (num_graphs,) Gaussian scale per graph
         device: Output device
         dtype: Output dtype
 
     Returns:
-        water_pos: (sum(num_waters), 3) sampled positions
-        batch_w: (sum(num_waters),) graph indices
+        water_pos: (N_water, 3) sampled positions, one per entry of batch_w
     """
-    num_graphs = num_waters.numel()
-    total_waters = int(num_waters.sum().item())
+    batch_w = batch_w.to(device)
+    total_waters = batch_w.numel()
 
     if total_waters == 0:
-        return (
-            torch.empty(0, 3, dtype=dtype, device=device),
-            torch.empty(0, dtype=torch.long, device=device),
-        )
+        return torch.empty(0, 3, dtype=dtype, device=device)
 
-    batch_w = torch.repeat_interleave(
-        torch.arange(num_graphs, device=device), num_waters.to(device)
-    )
     sigma = sigma_per_graph.to(device=device, dtype=dtype)[batch_w].unsqueeze(-1)
-    water_pos = torch.randn(total_waters, 3, device=device, dtype=dtype) * sigma
 
-    return water_pos, batch_w
+    return torch.randn(total_waters, 3, device=device, dtype=dtype) * sigma
 
 
 def build_knn_edges(
@@ -679,22 +685,23 @@ class FlowMatcher:
     def _sample_waters(
         self,
         batch_data: HeteroData | Batch,
-        num_waters: Tensor,
+        batch_w: Tensor,
         device: torch.device,
-    ) -> tuple[Tensor, Tensor]:
-        """Dispatch to the configured sampling strategy."""
+    ) -> Tensor:
+        """Dispatch to the configured sampling strategy, sampling one water per
+        entry of batch_w and returning them in that order."""
         if self.sampling_strategy == "uniform_ball":
             return sample_waters_uniform_ball(
                 protein_pos=batch_data["protein"].pos,
                 batch_p=batch_data["protein"].batch,
-                num_waters=num_waters,
+                batch_w=batch_w,
                 cutoff=self.graph_cutoff,
                 device=device,
             )
         # scaled_gaussian
         sigma_per_graph = self.compute_sigma_per_graph(batch_data, device)
         return sample_waters_scaled_gaussian(
-            num_waters=num_waters,
+            batch_w=batch_w,
             sigma_per_graph=sigma_per_graph,
             device=device,
             dtype=batch_data["protein"].pos.dtype,
@@ -787,14 +794,9 @@ class FlowMatcher:
         num_graphs = self._num_graphs(batch)
 
         sigma_per_graph = self.compute_sigma_per_graph(batch, device)
-        num_w_per_graph = scatter(
-            torch.ones(batch_w.size(0), device=device, dtype=torch.long),
-            batch_w,
-            dim=0,
-            dim_size=num_graphs,
-            reduce="sum",
-        )
-        x0, _ = self._sample_waters(batch, num_w_per_graph, device)
+        # sampling against the batch's own water order keeps x0 aligned with x1, so
+        # ot_coupling's per-graph mask selects the same nodes from both
+        x0 = self._sample_waters(batch, batch_w, device)
         x0_star, x1_star = ot_coupling(x1=x1, batch=batch_w, x0=x0)
 
         t = torch.rand(num_graphs, device=device)
@@ -886,14 +888,9 @@ class FlowMatcher:
         batch_w = batch["water"].batch
         num_graphs = self._num_graphs(batch)
 
-        num_w_per_graph = scatter(
-            torch.ones(batch_w.size(0), device=device, dtype=torch.long),
-            batch_w,
-            dim=0,
-            dim_size=num_graphs,
-            reduce="sum",
-        )
-        x0, _ = self._sample_waters(batch, num_w_per_graph, device)
+        # sampling against the batch's own water order keeps x0 aligned with x1, so
+        # ot_coupling's per-graph mask selects the same nodes from both
+        x0 = self._sample_waters(batch, batch_w, device)
         x0_star, x1_star = ot_coupling(x1=x1, batch=batch_w, x0=x0)
 
         t = torch.rand(num_graphs, device=device)
@@ -942,7 +939,8 @@ class FlowMatcher:
         # compute waters per graph: num_residues * ratio, minimum 1
         num_waters = (num_residues.float() * water_ratio).long().clamp(min=1)
 
-        x, batch_w = self._sample_waters(g, num_waters, device)
+        batch_w = _batch_from_counts(num_waters, device)
+        x = self._sample_waters(g, batch_w, device)
         total_waters = batch_w.size(0)
 
         # create water features (oxygen one-hot; +1 for the trailing 'other' bucket)
@@ -987,7 +985,8 @@ class FlowMatcher:
             device=device,
         )
 
-        x, batch_w = self._sample_waters(g, num_waters, device)
+        batch_w = _batch_from_counts(num_waters, device)
+        x = self._sample_waters(g, batch_w, device)
         total_waters = batch_w.size(0)
 
         # create water features (oxygen one-hot; +1 for the trailing 'other' bucket)
@@ -1033,19 +1032,9 @@ class FlowMatcher:
             # sample waters based on residue count
             return self._setup_water_nodes_from_ratio(g, water_ratio, device)
 
-        # use existing water nodes
+        # resample the existing water nodes in place; their batch is unchanged
         batch_w = g["water"].batch
-        num_waters = scatter(
-            torch.ones(batch_w.size(0), device=device, dtype=torch.long),
-            batch_w,
-            dim=0,
-            dim_size=self._num_graphs(g),
-            reduce="sum",
-        )
-        x, batch_w = self._sample_waters(g, num_waters, device)
-        # keep the graph's water batch in sync with the resampled layout so
-        # the model expands t against the correct per-water graph indices
-        g["water"].batch = batch_w
+        x = self._sample_waters(g, batch_w, device)
 
         return x, batch_w
 

@@ -12,6 +12,8 @@ Organized by category to match utils.py structure:
 All test cases created with assistance from Claude Code and refined.
 """
 
+from pathlib import Path
+
 import matplotlib
 import numpy as np
 import pytest
@@ -30,6 +32,7 @@ from src.utils import (
     compute_rmsd,
     normalize_ins_code,
     ot_coupling,
+    parse_split_file,
     # Visualization
     plot_3d_frame,
     # Feature encoding
@@ -129,6 +132,46 @@ class TestInsertionCodeNormalization:
     def test_normalize_valid_code(self):
         assert normalize_ins_code("A") == "A"
         assert normalize_ins_code(" B ") == "B"
+
+
+@pytest.mark.unit
+class TestSplitFileParsing:
+    """Tests for parse_split_file CIF/PDB structure-path resolution."""
+
+    @staticmethod
+    def _write_split(
+        tmp_path: Path, pdb_id: str, suffixes: list[str]
+    ) -> tuple[Path, Path]:
+        """Write a structure dir (with the given suffixes) and a one-line split file."""
+        base_dir = tmp_path / "pdbs"
+        structure_dir = base_dir / pdb_id
+        structure_dir.mkdir(parents=True, exist_ok=True)
+        for suffix in suffixes:
+            (structure_dir / f"{pdb_id}_final{suffix}").write_text("")
+
+        split_file = tmp_path / "split.txt"
+        split_file.write_text(f"{pdb_id}_final\n")
+        return split_file, base_dir
+
+    def test_prefers_existing_cif(self, tmp_path):
+        split_file, base_dir = self._write_split(tmp_path, "abcd", [".cif", ".pdb"])
+
+        entries = parse_split_file(split_file, base_dir)
+
+        assert entries[0]["struc_path"] == base_dir / "abcd" / "abcd_final.cif"
+
+    def test_falls_back_to_pdb(self, tmp_path):
+        split_file, base_dir = self._write_split(tmp_path, "wxyz", [".pdb"])
+
+        entries = parse_split_file(split_file, base_dir)
+
+        assert entries[0]["struc_path"] == base_dir / "wxyz" / "wxyz_final.pdb"
+
+    def test_raises_when_structure_missing(self, tmp_path):
+        split_file, base_dir = self._write_split(tmp_path, "missing", [])
+
+        with pytest.raises(FileNotFoundError):
+            parse_split_file(split_file, base_dir)
 
 
 @pytest.mark.unit
