@@ -182,9 +182,11 @@ def match_atoms_to_coords(
     if target_coords.shape[0] == 0 or len(atoms) == 0:
         return []
 
-    dists = cdist(target_coords, atoms.coord)
-    nearest = dists.argmin(axis=1)
-    within = dists[np.arange(len(target_coords)), nearest] < tolerance
+    from scipy.spatial import cKDTree
+
+    tree = cKDTree(atoms.coord)
+    dists, nearest = tree.query(target_coords, k=1, distance_upper_bound=tolerance)
+    within = np.isfinite(dists) & (nearest < len(atoms))
     matched = nearest[within].tolist()
 
     # A wholesale miss means the parses disagree (frame, cell), not that the
