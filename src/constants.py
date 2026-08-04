@@ -54,6 +54,7 @@ def get_active_edge_types(
         etypes.append(EDGE_WP)
     return etypes
 
+
 # Standard 3-letter to 1-letter amino acid mapping
 # Includes 20 canonical amino acids plus common non-standard residues
 # Non-canonical residues not in this dict should be mapped to 'X'
