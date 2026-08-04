@@ -276,6 +276,8 @@ def build_model_from_config(config: dict, device: torch.device) -> nn.Module:
         cutoff=config.get("cutoff", 8.0),
         max_neighbors=config.get("max_neighbors", 256),
         dynamic_edge_policy=config.get("dynamic_edge_policy", "radius"),
+        # "auto" depends on which prior the run uses, so pass that through.
+        sampling_strategy=config.get("sampling_strategy", "uniform_ball"),
         knn_fallback_k=config.get("knn_fallback_k", 8),
         disable_ww=config.get("disable_ww", False),
         disable_wp=config.get("disable_wp", False),

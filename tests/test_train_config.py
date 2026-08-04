@@ -131,10 +131,9 @@ def test_inference_build_model_from_config_uses_embedding_dim(device):
     assert model.encoder.output_dims == (128, 0)
 
 
-def test_inference_build_model_from_config_replays_legacy_edge_policy(device):
-    """Recorded configs predate the radius/knn split and carry the old
-    three-valued policy. Replaying one must build a model, not raise, and must
-    land on the radius path those runs actually used."""
+def test_inference_build_model_from_config_replays_recorded_edge_policy(device):
+    """Every recorded config carries "auto". Replaying one must build a model,
+    not raise, and must land on the radius path those runs actually used."""
     config = {
         "encoder_type": "slae",
         "hidden_s": 128,

@@ -22,7 +22,6 @@ from src.constants import (
 from src.flow import (
     _batch_from_counts,
     build_dynamic_edges,
-    DYNAMIC_EDGE_POLICIES,
     FlowMatcher,
     FlowWaterGVP,
     ProteinWaterUpdate,
@@ -292,19 +291,24 @@ class TestBuildDynamicEdgesDirection:
 
 @pytest.mark.unit
 class TestResolveEdgePolicy:
-    """Configs recorded before the radius/knn split carry a three-valued policy.
-    Replaying one must reproduce the original run, not silently do something new.
-    """
+    """Replaying a recorded config must reproduce the original run. Every run on
+    record carries "auto", so rejecting it would strand all of them."""
 
-    def test_current_values_pass_through(self):
-        for policy in DYNAMIC_EDGE_POLICIES:
-            assert resolve_edge_policy(policy) == policy
-
-    @pytest.mark.parametrize("legacy", ["auto", "radius", "knn_if_isolated"])
-    def test_legacy_values_map_to_radius(self, legacy):
-        """All three legacy values built a radius graph; they differed only in
-        whether isolated waters were rescued, which `knn_fallback_k` now owns."""
-        assert resolve_edge_policy(legacy) == "radius"
+    @pytest.mark.parametrize(
+        "policy,strategy,expected",
+        [
+            # "auto" reads off the prior: the uniform ball never strands a water,
+            # the Gaussian can, so only the latter earns the rescue.
+            ("auto", "uniform_ball", "radius"),
+            ("auto", "scaled_gaussian", "knn_if_isolated"),
+            # An explicit policy ignores the prior.
+            ("radius", "scaled_gaussian", "radius"),
+            ("knn", "uniform_ball", "knn"),
+            ("knn_if_isolated", "uniform_ball", "knn_if_isolated"),
+        ],
+    )
+    def test_resolves(self, policy, strategy, expected):
+        assert resolve_edge_policy(policy, strategy) == expected
 
     def test_unknown_value_raises(self):
         with pytest.raises(ValueError, match="dynamic_edge_policy"):
@@ -378,14 +382,27 @@ class TestProteinWaterUpdate:
                 etypes=[EDGE_PW, ("water", "xx", "water")],
             )
 
-    def test_init_resolves_legacy_policy(self):
-        """Constructing from a pre-radius config must translate, not store the
-        legacy string verbatim -- build_edges only understands current values."""
+    def test_knn_if_isolated_builds_a_radius_graph_and_rescues(self):
+        """It differs from plain radius only by the rescue; build_edges is handed
+        "radius" either way."""
         updater = ProteinWaterUpdate(
             hidden_dims=(128, 16), layers=1, dynamic_edge_policy="knn_if_isolated"
         )
 
         assert updater.dynamic_edge_policy == "radius"
+        assert updater.rescue_isolated
+
+    def test_plain_radius_does_not_rescue(self):
+        """local_flow ran the rescue only under knn_if_isolated, so a positive
+        knn_fallback_k must not switch it on by itself."""
+        updater = ProteinWaterUpdate(
+            hidden_dims=(128, 16),
+            layers=1,
+            dynamic_edge_policy="radius",
+            knn_fallback_k=8,
+        )
+
+        assert not updater.rescue_isolated
 
     def test_init_rejects_negative_fallback_k(self):
         with pytest.raises(ValueError, match="knn_fallback_k"):
@@ -416,7 +433,7 @@ class TestProteinWaterUpdate:
                 hidden_dims=(32, 4),
                 layers=1,
                 cutoff=8.0,
-                dynamic_edge_policy="radius",
+                dynamic_edge_policy="knn_if_isolated",
                 knn_fallback_k=knn_fallback_k,
             )
             edge_index = updater.build_edges(data)[EDGE_PW]

@@ -36,41 +36,38 @@ from src.gvp import GVP, GVPMultiEdgeConv
 from src.utils import ot_coupling
 
 
-# How dynamic (water-touching) edges are built. "radius" connects everything
-# within `cutoff`; "knn" connects a fixed number of nearest neighbours. Both are
-# concrete -- there is no policy that defers resolution to another object.
-DYNAMIC_EDGE_POLICIES = ("radius", "knn")
-
-# Pre-radius runs recorded a three-valued policy where "knn_if_isolated" meant
-# "radius, then rescue isolated waters" and "auto" resolved to one of the other
-# two from the sampling strategy. All three built a radius graph; whether the
-# rescue ran is now expressed by `knn_fallback_k` instead. Old checkpoints are
-# unaffected: the rescue never fired under `uniform_ball`, which every recorded
-# run used.
-_LEGACY_EDGE_POLICIES = {"auto": "radius", "radius": "radius", "knn_if_isolated": "radius"}
+# "knn_if_isolated" = radius edges, plus nearest-neighbour edges for nodes left with none.
+DYNAMIC_EDGE_POLICIES = ("radius", "knn", "knn_if_isolated")
 
 
-def resolve_edge_policy(policy: str) -> str:
+def resolve_edge_policy(policy: str, sampling_strategy: str = "uniform_ball") -> str:
     """
-    Map a possibly-legacy `dynamic_edge_policy` value onto a current one.
+    Resolve a recorded `dynamic_edge_policy`, including the "auto" setting.
+
+    "auto" is what every recorded run carries. It reads off the prior: uniform
+    ball samples land within `cutoff` of a protein atom by construction, so
+    nothing is stranded and the rescue is not wanted; Gaussian samples carry no
+    such guarantee, so they get it.
 
     Args:
         policy: Value from a config file or CLI flag.
+        sampling_strategy: Prior the run uses, consulted only for "auto".
 
     Returns:
         One of DYNAMIC_EDGE_POLICIES.
 
     Raises:
-        ValueError: If the value is neither current nor a known legacy name.
+        ValueError: If the value is not "auto" or a member of
+            DYNAMIC_EDGE_POLICIES.
     """
-    if policy in DYNAMIC_EDGE_POLICIES:
-        return policy
-    if policy in _LEGACY_EDGE_POLICIES:
-        return _LEGACY_EDGE_POLICIES[policy]
-    raise ValueError(
-        f"dynamic_edge_policy must be one of {DYNAMIC_EDGE_POLICIES} "
-        f"(or a legacy {tuple(_LEGACY_EDGE_POLICIES)} value), got '{policy}'"
-    )
+    if policy == "auto":
+        return "knn_if_isolated" if sampling_strategy == "scaled_gaussian" else "radius"
+    if policy not in DYNAMIC_EDGE_POLICIES:
+        raise ValueError(
+            f"dynamic_edge_policy must be 'auto' or one of {DYNAMIC_EDGE_POLICIES}, "
+            f"got '{policy}'"
+        )
+    return policy
 
 
 def _batch_from_counts(num_waters: Tensor, device: torch.device) -> Tensor:
@@ -252,17 +249,18 @@ def build_dynamic_edges(
     if src_pos.numel() == 0 or dst_pos.numel() == 0:
         return torch.empty(2, 0, dtype=torch.long, device=src_pos.device)
 
-    homogeneous = src_pos.data_ptr() == dst_pos.data_ptr()
+    # Same object
+    homogeneous = src_pos is dst_pos
 
     if policy == "knn":
-        # knn(x, y) returns row 0 = y (query), row 1 = x (neighbor); swap for this
-        # repo's src(row 0)->dst(row 1) convention. That row order is undocumented,
-        # so it is pinned by tests/test_flow.py::TestBuildDynamicEdgesDirection.
-        idx = knn(x=src_pos, y=dst_pos, k=k, batch_x=batch_src, batch_y=batch_dst)
-        idx = torch.stack((idx[1], idx[0]), dim=0)
+        # Asked for each destination's nearest sources, so sources come back second.
+        dst_idx, src_idx = knn(
+            x=src_pos, y=dst_pos, k=k, batch_x=batch_src, batch_y=batch_dst
+        )
+        edge_index = torch.stack((src_idx, dst_idx), dim=0)
         if homogeneous:
-            idx = idx[:, idx[0] != idx[1]]
-        return idx.unique(dim=1)
+            edge_index = edge_index[:, edge_index[0] != edge_index[1]]
+        return edge_index.unique(dim=1)
 
     # Cap against the number of reachable counterparts, minus the self-edge that
     # a homogeneous query would otherwise spend a slot on.
@@ -274,10 +272,7 @@ def build_dynamic_edges(
             src_pos, r=r, batch=batch_src, loop=False, max_num_neighbors=cap
         )
 
-    # radius(x, y) uses the same row convention as knn(x, y): row 0 = y (query),
-    # row 1 = x (neighbour). Passing src as `y` therefore lands source indices in
-    # row 0 directly, with no swap -- the inverted argument order is deliberate
-    # and is pinned by the same test class.
+    # Asked for each source's neighbours within r, so sources already come back first.
     return radius(
         x=dst_pos,
         y=src_pos,
@@ -315,6 +310,7 @@ class ProteinWaterUpdate(nn.Module):
         cutoff: float = 8.0,
         max_neighbors: int = 256,
         dynamic_edge_policy: str = "radius",
+        sampling_strategy: str = "uniform_ball",
         knn_fallback_k: int = 8,
         k_pw: int = 12,
         k_ww: int = 8,
@@ -340,12 +336,14 @@ class ProteinWaterUpdate(nn.Module):
             cutoff: Distance cutoff in Angstroms for radius edges.
             max_neighbors: Cap on neighbours per source node in radius queries,
                 bounding edge count and runtime on dense structures.
-            dynamic_edge_policy: One of DYNAMIC_EDGE_POLICIES. "radius" connects
-                everything within `cutoff`; "knn" connects a fixed number of
-                nearest neighbours using k_pw/k_ww/k_wp.
-            knn_fallback_k: Under "radius", attach this many nearest neighbours
-                to any water the radius query left with no edges. 0 disables the
-                rescue. Ignored under "knn", which cannot strand a node.
+            dynamic_edge_policy: "auto" or one of DYNAMIC_EDGE_POLICIES. "radius"
+                connects everything within `cutoff`; "knn" connects a fixed
+                number of nearest neighbours using k_pw/k_ww/k_wp.
+            sampling_strategy: Prior the run uses, consulted only to resolve
+                "auto"; see `resolve_edge_policy`.
+            knn_fallback_k: Under "knn_if_isolated", attach this many nearest
+                neighbours to any water the radius query left with no edges. 0
+                disables the rescue. Ignored under the other policies.
             k_pw: Nearest neighbours for protein -> water edges under "knn".
             k_ww: Nearest neighbours for water -> water edges under "knn".
             k_wp: Nearest neighbours for water -> protein edges under "knn".
@@ -371,7 +369,12 @@ class ProteinWaterUpdate(nn.Module):
 
         self.cutoff = cutoff
         self.max_neighbors = max_neighbors
-        self.dynamic_edge_policy = resolve_edge_policy(dynamic_edge_policy)
+        resolved = resolve_edge_policy(dynamic_edge_policy, sampling_strategy)
+        # Same edges as "radius"; the difference is the extra pass for nodes left with none.
+        self.rescue_isolated = resolved == "knn_if_isolated" and knn_fallback_k > 0
+        self.dynamic_edge_policy = (
+            "radius" if resolved == "knn_if_isolated" else resolved
+        )
         self.knn_fallback_k = knn_fallback_k
         self.k_pw = k_pw
         self.k_ww = k_ww
@@ -469,9 +472,7 @@ class ProteinWaterUpdate(nn.Module):
             return fallback
         return torch.cat((edge_index, fallback), dim=1).unique(dim=1)
 
-    def build_edges(
-        self, data: HeteroData
-    ) -> dict[tuple[str, str, str], torch.Tensor]:
+    def build_edges(self, data: HeteroData) -> dict[tuple[str, str, str], torch.Tensor]:
         """
         Build the edge set for one batch under the active policy.
 
@@ -494,11 +495,8 @@ class ProteinWaterUpdate(nn.Module):
         pos_p = data["protein"].pos
         pos_w = data["water"].pos
 
-        # Radius queries can strand a water; KNN cannot, since it guarantees every
-        # destination its k nearest sources. Only the water-touching heterogeneous
-        # edges are rescued: a water isolated in WW still gets protein context
-        # through PW.
-        rescue = self.dynamic_edge_policy == "radius" and self.knn_fallback_k > 0
+        # Only protein-water edges get the extra pass; waters keep protein context anyway.
+        rescue = self.rescue_isolated
 
         # protein -> water (water is the destination, so it is row 1)
         if EDGE_PW in self.etypes:
@@ -649,6 +647,7 @@ class FlowWaterGVP(nn.Module):
         cutoff: float = 8.0,
         max_neighbors: int = 256,
         dynamic_edge_policy: str = "radius",
+        sampling_strategy: str = "uniform_ball",
         knn_fallback_k: int = 8,
         disable_ww: bool = False,
         disable_wp: bool = False,
@@ -737,6 +736,7 @@ class FlowWaterGVP(nn.Module):
             cutoff=cutoff,
             max_neighbors=max_neighbors,
             dynamic_edge_policy=dynamic_edge_policy,
+            sampling_strategy=sampling_strategy,
             knn_fallback_k=knn_fallback_k,
             k_pw=k_pw,
             k_ww=k_ww,
