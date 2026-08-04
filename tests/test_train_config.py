@@ -131,6 +131,34 @@ def test_inference_build_model_from_config_uses_embedding_dim(device):
     assert model.encoder.output_dims == (128, 0)
 
 
+def test_inference_build_model_from_config_replays_legacy_edge_policy(device):
+    """Recorded configs predate the radius/knn split and carry the old
+    three-valued policy. Replaying one must build a model, not raise, and must
+    land on the radius path those runs actually used."""
+    config = {
+        "encoder_type": "slae",
+        "hidden_s": 128,
+        "hidden_v": 32,
+        "flow_layers": 2,
+        "node_scalar_in": 16,
+        "embedding_dim": 128,
+        "dynamic_edge_policy": "auto",
+        "knn_fallback_k": 8,
+        "cutoff": 8.0,
+        "max_neighbors": 256,
+        "disable_ww": True,
+        "disable_wp": True,
+    }
+
+    model = build_model_from_config(config, device)
+
+    assert model.updater.dynamic_edge_policy == "radius"
+    assert set(model.updater.etypes) == {
+        ("protein", "pw", "water"),
+        ("protein", "pp", "protein"),
+    }
+
+
 def test_parse_args_rejects_embedding_dim_for_gvp(monkeypatch):
     monkeypatch.setattr(
         "sys.argv",

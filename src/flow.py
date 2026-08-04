@@ -2,7 +2,7 @@
 Flow matching model components for water placement prediction.
 
 This module provides:
-- ProteinWaterUpdate: Heterogeneous GVP message passing across 4 edge types
+- ProteinWaterUpdate: Heterogeneous GVP message passing across the active edge types
 - FlowWaterGVP: End-to-end flow model combining encoder + GVP updates + vector field head
 - FlowMatcher: High-level training, validation, and numerical integration interface
 """
@@ -17,7 +17,7 @@ import torch.nn.functional as F
 from loguru import logger
 from torch import nn, Tensor
 from torch_geometric.data import Batch, HeteroData
-from torch_geometric.nn import knn
+from torch_geometric.nn import knn, radius, radius_graph
 from torch_scatter import scatter, scatter_mean
 from tqdm.auto import tqdm
 
@@ -29,11 +29,49 @@ from src.constants import (
     EDGE_WW,
     ELEM_IDX,
     ELEMENT_VOCAB,
+    get_active_edge_types,
     NUM_RBF,
 )
 from src.encoder_base import BaseProteinEncoder
 from src.gvp import GVP, GVPMultiEdgeConv
 from src.utils import ot_coupling
+
+
+# How dynamic (water-touching) edges are built. "radius" connects everything
+# within `cutoff`; "knn" connects a fixed number of nearest neighbours. Both are
+# concrete -- there is no policy that defers resolution to another object.
+DYNAMIC_EDGE_POLICIES = ("radius", "knn")
+
+# Pre-radius runs recorded a three-valued policy where "knn_if_isolated" meant
+# "radius, then rescue isolated waters" and "auto" resolved to one of the other
+# two from the sampling strategy. All three built a radius graph; whether the
+# rescue ran is now expressed by `knn_fallback_k` instead. Old checkpoints are
+# unaffected: the rescue never fired under `uniform_ball`, which every recorded
+# run used.
+_LEGACY_EDGE_POLICIES = {"auto": "radius", "radius": "radius", "knn_if_isolated": "radius"}
+
+
+def resolve_edge_policy(policy: str) -> str:
+    """
+    Map a possibly-legacy `dynamic_edge_policy` value onto a current one.
+
+    Args:
+        policy: Value from a config file or CLI flag.
+
+    Returns:
+        One of DYNAMIC_EDGE_POLICIES.
+
+    Raises:
+        ValueError: If the value is neither current nor a known legacy name.
+    """
+    if policy in DYNAMIC_EDGE_POLICIES:
+        return policy
+    if policy in _LEGACY_EDGE_POLICIES:
+        return _LEGACY_EDGE_POLICIES[policy]
+    raise ValueError(
+        f"dynamic_edge_policy must be one of {DYNAMIC_EDGE_POLICIES} "
+        f"(or a legacy {tuple(_LEGACY_EDGE_POLICIES)} value), got '{policy}'"
+    )
 
 
 def _batch_from_counts(num_waters: Tensor, device: torch.device) -> Tensor:
@@ -228,30 +266,42 @@ def sample_waters_scaled_gaussian(
     return torch.randn(total_waters, 3, device=device, dtype=dtype) * sigma
 
 
-def build_knn_edges(
+def build_dynamic_edges(
     src_pos: torch.Tensor,
     dst_pos: torch.Tensor,
+    *,
+    policy: str,
     k: int,
+    r: float,
+    max_neighbors: int = 256,
     batch_src: torch.Tensor | None = None,
     batch_dst: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
-    Build KNN edges from src -> dst (source indices in row 0, dest in row 1).
+    Build edges from src -> dst (source indices in row 0, dest in row 1).
 
-    The KNN query is performed *per destination*: for each point in ``dst_pos``
-    we look up its ``k`` nearest neighbors in ``src_pos`` (``knn(x=src_pos,
-    y=dst_pos, ...)``) and emit them as incoming edges. As a consequence every
-    destination node is guaranteed to have up to ``k`` incoming edges (and so
-    appears in row 1), whereas a source node that is no destination's nearest
-    neighbor may not appear in row 0 at all. Coverage checks ("every node has an
-    edge") must therefore be made against the destination row (row 1).
+    The two policies differ in which side the neighbour budget applies to, which
+    matters when reading coverage guarantees off the result:
+
+    - ``"knn"`` queries *per destination*: each point in ``dst_pos`` takes its
+      ``k`` nearest neighbours in ``src_pos``. Every destination is therefore
+      guaranteed incoming edges and appears in row 1, while a source that is no
+      destination's nearest neighbour may not appear in row 0 at all. Coverage
+      checks must be made against row 1.
+    - ``"radius"`` connects every pair within ``r``, capped at ``max_neighbors``
+      *per source*. Nothing is guaranteed: a node with an empty neighbourhood
+      gets no edges, which is what :meth:`ProteinWaterUpdate._add_knn_fallback`
+      exists to repair.
 
     For a homogeneous graph (``src_pos is dst_pos``) self-edges are dropped.
 
     Args:
         src_pos: (N_src, 3) source node positions.
         dst_pos: (N_dst, 3) destination node positions.
-        k: Number of nearest source neighbors to find per destination node.
+        policy: One of DYNAMIC_EDGE_POLICIES.
+        k: Nearest neighbours per destination, used when policy is "knn".
+        r: Distance cutoff in Angstroms, used when policy is "radius".
+        max_neighbors: Per-source cap on radius results.
         batch_src: (N_src,) batch assignment for source nodes, or None.
         batch_dst: (N_dst,) batch assignment for destination nodes, or None.
 
@@ -262,27 +312,52 @@ def build_knn_edges(
     if src_pos.numel() == 0 or dst_pos.numel() == 0:
         return torch.empty(2, 0, dtype=torch.long, device=src_pos.device)
 
-    # knn(x, y) returns row 0 = y (query), row 1 = x (neighbor); swap for this
-    # repo's src(row 0)->dst(row 1) convention. That row order is undocumented,
-    # so it is pinned by tests/test_flow.py::TestBuildKnnEdgesDirection.
-    idx = knn(x=src_pos, y=dst_pos, k=k, batch_x=batch_src, batch_y=batch_dst)
-    idx = torch.stack((idx[1], idx[0]), dim=0)
+    homogeneous = src_pos.data_ptr() == dst_pos.data_ptr()
 
-    # remove self-edges if homogeneous
-    if src_pos.data_ptr() == dst_pos.data_ptr():
-        mask = idx[0] != idx[1]
-        idx = idx[:, mask]
+    if policy == "knn":
+        # knn(x, y) returns row 0 = y (query), row 1 = x (neighbor); swap for this
+        # repo's src(row 0)->dst(row 1) convention. That row order is undocumented,
+        # so it is pinned by tests/test_flow.py::TestBuildDynamicEdgesDirection.
+        idx = knn(x=src_pos, y=dst_pos, k=k, batch_x=batch_src, batch_y=batch_dst)
+        idx = torch.stack((idx[1], idx[0]), dim=0)
+        if homogeneous:
+            idx = idx[:, idx[0] != idx[1]]
+        return idx.unique(dim=1)
 
-    return idx.unique(dim=1)
+    # Cap against the number of reachable counterparts, minus the self-edge that
+    # a homogeneous query would otherwise spend a slot on.
+    num_candidates = dst_pos.size(0) - 1 if homogeneous else dst_pos.size(0)
+    cap = max(1, min(num_candidates, max_neighbors))
+
+    if homogeneous:
+        return radius_graph(
+            src_pos, r=r, batch=batch_src, loop=False, max_num_neighbors=cap
+        )
+
+    # radius(x, y) uses the same row convention as knn(x, y): row 0 = y (query),
+    # row 1 = x (neighbour). Passing src as `y` therefore lands source indices in
+    # row 0 directly, with no swap -- the inverted argument order is deliberate
+    # and is pinned by the same test class.
+    return radius(
+        x=dst_pos,
+        y=src_pos,
+        r=r,
+        batch_x=batch_dst,
+        batch_y=batch_src,
+        max_num_neighbors=cap,
+    )
 
 
 class ProteinWaterUpdate(nn.Module):
     """
-    Heterogeneous GVP message passing with all four edge types:
-      - protein -> water  (pw)
-      - water   -> water  (ww)
-      - protein -> protein (pp)
-      - water   -> protein (wp)
+    Heterogeneous GVP message passing over the active edge types:
+      - protein -> water  (pw)   always active
+      - protein -> protein (pp)  always active
+      - water   -> water  (ww)   ablatable
+      - water   -> protein (wp)  ablatable
+
+    Which are active is fixed at construction via `etypes`; see
+    `constants.get_active_edge_types`.
     """
 
     def __init__(
@@ -296,6 +371,14 @@ class ProteinWaterUpdate(nn.Module):
         vector_gate=True,
         aggr_edges="sum",
         use_dst_feats=True,
+        etypes: list[tuple[str, str, str]] | None = None,
+        cutoff: float = 8.0,
+        max_neighbors: int = 256,
+        dynamic_edge_policy: str = "radius",
+        knn_fallback_k: int = 8,
+        k_pw: int = 12,
+        k_ww: int = 8,
+        k_wp: int = 8,
     ):
         """
         Initialize heterogeneous protein-water message passing module.
@@ -312,12 +395,49 @@ class ProteinWaterUpdate(nn.Module):
             vector_gate: Whether to use vector gating in GVP layers
             aggr_edges: Edge aggregation method ('sum' or 'mean')
             use_dst_feats: Whether to include destination features in messages
+            etypes: Active edge types. Defaults to ALL_EDGE_TYPES. Build with
+                `constants.get_active_edge_types` to ablate WW/WP.
+            cutoff: Distance cutoff in Angstroms for radius edges.
+            max_neighbors: Cap on neighbours per source node in radius queries,
+                bounding edge count and runtime on dense structures.
+            dynamic_edge_policy: One of DYNAMIC_EDGE_POLICIES. "radius" connects
+                everything within `cutoff`; "knn" connects a fixed number of
+                nearest neighbours using k_pw/k_ww/k_wp.
+            knn_fallback_k: Under "radius", attach this many nearest neighbours
+                to any water the radius query left with no edges. 0 disables the
+                rescue. Ignored under "knn", which cannot strand a node.
+            k_pw: Nearest neighbours for protein -> water edges under "knn".
+            k_ww: Nearest neighbours for water -> water edges under "knn".
+            k_wp: Nearest neighbours for water -> protein edges under "knn".
+
+        Raises:
+            ValueError: If `dynamic_edge_policy` is not a known value, or if
+                `knn_fallback_k` is negative.
         """
         super().__init__()
         # Unpack hidden dimensions: s_h = scalar hidden dim, v_h = vector hidden dim
         s_h, v_h = hidden_dims
 
-        etypes = ALL_EDGE_TYPES
+        if knn_fallback_k < 0:
+            raise ValueError(f"knn_fallback_k must be >= 0, got {knn_fallback_k}")
+
+        # build_edges only knows how to construct the four known relations, and
+        # HeteroConv would KeyError on any other, so reject it up front.
+        unknown = [et for et in (etypes or []) if et not in ALL_EDGE_TYPES]
+        if unknown:
+            raise ValueError(
+                f"etypes must be a subset of {ALL_EDGE_TYPES}, got unknown {unknown}"
+            )
+
+        self.cutoff = cutoff
+        self.max_neighbors = max_neighbors
+        self.dynamic_edge_policy = resolve_edge_policy(dynamic_edge_policy)
+        self.knn_fallback_k = knn_fallback_k
+        self.k_pw = k_pw
+        self.k_ww = k_ww
+        self.k_wp = k_wp
+
+        etypes = ALL_EDGE_TYPES if etypes is None else etypes
 
         self.blocks = nn.ModuleList(
             [
@@ -339,30 +459,94 @@ class ProteinWaterUpdate(nn.Module):
         )
         self.etypes = etypes
 
-    def build_edges(
-        self, data: HeteroData, k_pw: int = 12, k_ww: int = 8, k_wp: int = 8
-    ) -> dict[tuple[str, str, str], torch.Tensor]:
+    def _add_knn_fallback(
+        self,
+        edge_index: torch.Tensor,
+        src_pos: torch.Tensor,
+        dst_pos: torch.Tensor,
+        batch_src: torch.Tensor | None,
+        batch_dst: torch.Tensor | None,
+        isolate_axis: int,
+    ) -> torch.Tensor:
         """
-        Build KNN edges for protein-water interactions.
+        Attach KNN edges for nodes the radius query left with no edges.
 
-        For protein->water edges, we take the union of:
-        - KNN(protein -> water): k nearest waters per protein
-        - KNN(water -> protein) reversed: k nearest proteins per water
-        This ensures every water has at least k_pw protein neighbors.
-
-        PP edges are read from the dataset (cached at preprocessing time).
+        A radius query strands any node with nothing inside `cutoff`. Those nodes
+        would reach the GVP blocks with no incoming messages, so they are
+        reconnected to their `knn_fallback_k` nearest counterparts regardless of
+        distance.
 
         Args:
-            data: HeteroData with 'protein' and 'water' node types containing positions
-            k_pw: Number of nearest neighbors for protein-water edges
-            k_ww: Number of nearest neighbors for water-water edges
-            k_wp: Number of nearest neighbors for water-protein edges
+            edge_index: (2, E) radius edges, source row 0, destination row 1.
+            src_pos: (N_src, 3) source positions.
+            dst_pos: (N_dst, 3) destination positions.
+            batch_src: (N_src,) batch assignment for sources, or None.
+            batch_dst: (N_dst,) batch assignment for destinations, or None.
+            isolate_axis: Row to check for stranded nodes -- 0 for sources,
+                1 for destinations.
 
         Returns:
-            Dict mapping edge type tuples to (2, E) edge index tensors
+            (2, E') edge index with fallback edges merged in and deduplicated.
+        """
+        device = src_pos.device
+        num_nodes = dst_pos.size(0) if isolate_axis == 1 else src_pos.size(0)
+        if num_nodes == 0:
+            return edge_index
+
+        connected = torch.zeros(num_nodes, dtype=torch.bool, device=device)
+        if edge_index.numel() > 0:
+            connected[edge_index[isolate_axis].unique()] = True
+        isolated = (~connected).nonzero(as_tuple=False).flatten()
+        if isolated.numel() == 0:
+            return edge_index
+
+        # Query only the stranded nodes, then lift the returned local indices
+        # back into the full node set via `isolated`.
+        if isolate_axis == 1:
+            fallback = build_dynamic_edges(
+                src_pos,
+                dst_pos[isolated],
+                policy="knn",
+                k=max(1, min(self.knn_fallback_k, src_pos.size(0))),
+                r=self.cutoff,
+                batch_src=batch_src,
+                batch_dst=batch_dst[isolated] if batch_dst is not None else None,
+            )
+            fallback = torch.stack((fallback[0], isolated[fallback[1]]), dim=0)
+        else:
+            fallback = build_dynamic_edges(
+                dst_pos,
+                src_pos[isolated],
+                policy="knn",
+                k=max(1, min(self.knn_fallback_k, dst_pos.size(0))),
+                r=self.cutoff,
+                batch_src=batch_dst,
+                batch_dst=batch_src[isolated] if batch_src is not None else None,
+            )
+            fallback = torch.stack((isolated[fallback[1]], fallback[0]), dim=0)
+
+        if edge_index.numel() == 0:
+            return fallback
+        return torch.cat((edge_index, fallback), dim=1).unique(dim=1)
+
+    def build_edges(
+        self, data: HeteroData
+    ) -> dict[tuple[str, str, str], torch.Tensor]:
+        """
+        Build the edge set for one batch under the active policy.
+
+        PP and PW edges are read from the dataset when cached at preprocessing
+        time and built on the fly otherwise. WW and WP are always dynamic, and
+        are skipped entirely when ablated out of `etypes`.
+
+        Args:
+            data: HeteroData with 'protein' and 'water' node types containing
+                positions, optionally carrying cached PP/PW edges.
+
+        Returns:
+            Dict mapping each active edge type to a (2, E) edge index tensor.
         """
         edge_index_dict: dict[tuple[str, str, str], torch.Tensor] = {}
-        device = data["protein"].pos.device
 
         batch_p = data["protein"].batch if "batch" in data["protein"] else None
         batch_w = data["water"].batch if "batch" in data["water"] else None
@@ -370,56 +554,80 @@ class ProteinWaterUpdate(nn.Module):
         pos_p = data["protein"].pos
         pos_w = data["water"].pos
 
-        # protein -> water
-        if pos_p.numel() > 0 and pos_w.numel() > 0:
-            # p->w
-            ei_pw = build_knn_edges(
-                pos_p, pos_w, k=k_pw, batch_src=batch_p, batch_dst=batch_w
-            )
-            # w->p then reverse
-            ei_wp = build_knn_edges(
-                pos_w, pos_p, k=k_pw, batch_src=batch_w, batch_dst=batch_p
-            )
-            ei_wp_reversed = ei_wp.flip(0)
-            # union
-            ei_pw_union = torch.cat([ei_pw, ei_wp_reversed], dim=1).unique(dim=1)
-            edge_index_dict[EDGE_PW] = ei_pw_union
-        else:
-            edge_index_dict[EDGE_PW] = torch.empty(
-                2, 0, dtype=torch.long, device=device
+        # Radius queries can strand a water; KNN cannot, since it guarantees every
+        # destination its k nearest sources. Only the water-touching heterogeneous
+        # edges are rescued: a water isolated in WW still gets protein context
+        # through PW.
+        rescue = self.dynamic_edge_policy == "radius" and self.knn_fallback_k > 0
+
+        # protein -> water (water is the destination, so it is row 1)
+        if EDGE_PW in self.etypes:
+            if EDGE_PW in data.edge_types:
+                edge_index_dict[EDGE_PW] = data[EDGE_PW].edge_index
+            else:
+                ei = build_dynamic_edges(
+                    pos_p,
+                    pos_w,
+                    policy=self.dynamic_edge_policy,
+                    k=self.k_pw,
+                    r=self.cutoff,
+                    max_neighbors=self.max_neighbors,
+                    batch_src=batch_p,
+                    batch_dst=batch_w,
+                )
+                if rescue:
+                    ei = self._add_knn_fallback(
+                        ei, pos_p, pos_w, batch_p, batch_w, isolate_axis=1
+                    )
+                edge_index_dict[EDGE_PW] = ei
+
+        # protein -> protein (cached from the dataset in every normal run)
+        if EDGE_PP in self.etypes:
+            edge_index_dict[EDGE_PP] = (
+                data[EDGE_PP].edge_index
+                if EDGE_PP in data.edge_types
+                else build_dynamic_edges(
+                    pos_p,
+                    pos_p,
+                    policy=self.dynamic_edge_policy,
+                    k=self.k_pw,
+                    r=self.cutoff,
+                    max_neighbors=self.max_neighbors,
+                    batch_src=batch_p,
+                    batch_dst=batch_p,
+                )
             )
 
         # water -> water
-        if pos_w.numel() > 0:
-            edge_index_dict[EDGE_WW] = build_knn_edges(
-                pos_w, pos_w, k=k_ww, batch_src=batch_w, batch_dst=batch_w
-            )
-        else:
-            edge_index_dict[EDGE_WW] = torch.empty(
-                2, 0, dtype=torch.long, device=device
-            )
-
-        # protein-protein edges (cached from dataset)
-        if EDGE_PP in data.edge_types:
-            edge_index_dict[EDGE_PP] = data[EDGE_PP].edge_index
-        else:
-            edge_index_dict[EDGE_PP] = build_knn_edges(
-                pos_p, pos_p, k=k_pw, batch_src=batch_p, batch_dst=batch_p
+        if EDGE_WW in self.etypes:
+            edge_index_dict[EDGE_WW] = build_dynamic_edges(
+                pos_w,
+                pos_w,
+                policy=self.dynamic_edge_policy,
+                k=self.k_ww,
+                r=self.cutoff,
+                max_neighbors=self.max_neighbors,
+                batch_src=batch_w,
+                batch_dst=batch_w,
             )
 
-        # water -> protein
-        if pos_w.numel() > 0 and pos_p.numel() > 0:
-            edge_index_dict[EDGE_WP] = build_knn_edges(
-                pos_w, pos_p, k=k_wp, batch_src=batch_w, batch_dst=batch_p
+        # water -> protein (water is the source, so it is row 0)
+        if EDGE_WP in self.etypes:
+            ei = build_dynamic_edges(
+                pos_w,
+                pos_p,
+                policy=self.dynamic_edge_policy,
+                k=self.k_wp,
+                r=self.cutoff,
+                max_neighbors=self.max_neighbors,
+                batch_src=batch_w,
+                batch_dst=batch_p,
             )
-        else:
-            edge_index_dict[EDGE_WP] = torch.empty(
-                2, 0, dtype=torch.long, device=device
-            )
-
-        for et in self.etypes:
-            if et not in edge_index_dict:
-                edge_index_dict[et] = torch.empty(2, 0, dtype=torch.long, device=device)
+            if rescue:
+                ei = self._add_knn_fallback(
+                    ei, pos_w, pos_p, batch_w, batch_p, isolate_axis=0
+                )
+            edge_index_dict[EDGE_WP] = ei
 
         return edge_index_dict
 
@@ -427,9 +635,6 @@ class ProteinWaterUpdate(nn.Module):
         self,
         x_dict: dict[str, tuple[torch.Tensor, torch.Tensor]],
         data: HeteroData,
-        k_pw: int = 12,
-        k_ww: int = 8,
-        k_wp: int = 8,
         pp_edge_attr: tuple | None = None,
     ):
         """
@@ -440,9 +645,6 @@ class ProteinWaterUpdate(nn.Module):
                 - 'protein': (s_p, v_p) where s_p is (N_p, scalar_dim), v_p is (N_p, vector_dim, 3)
                 - 'water': (s_w, v_w) where s_w is (N_w, scalar_dim), v_w is (N_w, vector_dim, 3)
             data: HeteroData with 'protein' and 'water' node positions
-            k_pw: Number of nearest neighbors for protein-water edges
-            k_ww: Number of nearest neighbors for water-water edges
-            k_wp: Number of nearest neighbors for water-protein edges
             pp_edge_attr: Optional encoder-learned edge features (s_edge, V_edge) for PP edges.
                 If provided, uses encoder-learned scalar features (s_edge) combined with
                 cached edge direction unit vectors (edge_unit_vectors, pre-normalized at preprocessing).
@@ -453,12 +655,7 @@ class ProteinWaterUpdate(nn.Module):
         """
         pos_dict = {nt: data[nt].pos for nt in data.node_types if "pos" in data[nt]}
 
-        edge_index_dict = self.build_edges(
-            data,
-            k_pw=k_pw,
-            k_ww=k_ww,
-            k_wp=k_wp,
-        )
+        edge_index_dict = self.build_edges(data)
 
         # PP edge features: encoder-provided take priority over cached geometric features
         cached_edge_attr_dict = {}
@@ -507,10 +704,16 @@ class FlowWaterGVP(nn.Module):
         n_message_gvps: int = 2,
         n_update_gvps: int = 2,
         vector_gate: bool = True,
+        water_input_dim: int = 16,  # 1 hot with oxygen, same as encoder
+        cutoff: float = 8.0,
+        max_neighbors: int = 256,
+        dynamic_edge_policy: str = "radius",
+        knn_fallback_k: int = 8,
+        disable_ww: bool = False,
+        disable_wp: bool = False,
         k_pw: int = 12,
         k_ww: int = 8,
         k_wp: int = 8,
-        water_input_dim: int = 16,  # 1 hot with oxygen, same as encoder
     ):
         """
         Initialize end-to-end flow model for water placement.
@@ -526,10 +729,19 @@ class FlowWaterGVP(nn.Module):
             n_update_gvps: Number of GVP modules in the node update function
                 (applied after aggregating messages from all edge types). Default: 2
             vector_gate: Whether to use vector gating in GVP layers. Default: True
-            k_pw: K nearest neighbors for protein-water edges. Default: 12
-            k_ww: K nearest neighbors for water-water edges. Default: 8
-            k_wp: K nearest neighbors for water-protein edges. Default: 8
             water_input_dim: Input dimension for water node features. Default: 16
+            cutoff: Distance cutoff in Angstroms for radius edges. Default: 8.0
+            max_neighbors: Per-source cap on radius results. Default: 256
+            dynamic_edge_policy: How water-touching edges are built, one of
+                DYNAMIC_EDGE_POLICIES. Default: "radius"
+            knn_fallback_k: Nearest neighbours attached to waters the radius
+                query stranded; 0 disables the rescue. Default: 8
+            disable_ww: Ablate water -> water edges. Default: False
+            disable_wp: Ablate water -> protein edges. Default: False
+            k_pw: K nearest neighbors for protein-water edges under the "knn"
+                policy. Default: 12
+            k_ww: K nearest neighbors for water-water edges under "knn". Default: 8
+            k_wp: K nearest neighbors for water-protein edges under "knn". Default: 8
         """
         super().__init__()
         self.encoder = encoder
@@ -540,9 +752,10 @@ class FlowWaterGVP(nn.Module):
         self.n_message_gvps = n_message_gvps
         self.n_update_gvps = n_update_gvps
         self.vector_gate = vector_gate
-        self.k_pw = k_pw
-        self.k_ww = k_ww
-        self.k_wp = k_wp
+        # Read back by FlowMatcher for the water prior's sampling radius. The rest
+        # of the edge configuration is owned by `self.updater` and deliberately not
+        # mirrored here -- two copies would be two things to keep in sync.
+        self.cutoff = cutoff
 
         s_h, v_h = hidden_dims
 
@@ -579,6 +792,14 @@ class FlowWaterGVP(nn.Module):
             vector_gate=vector_gate,
             aggr_edges="sum",
             use_dst_feats=True,
+            etypes=get_active_edge_types(disable_ww=disable_ww, disable_wp=disable_wp),
+            cutoff=cutoff,
+            max_neighbors=max_neighbors,
+            dynamic_edge_policy=dynamic_edge_policy,
+            knn_fallback_k=knn_fallback_k,
+            k_pw=k_pw,
+            k_ww=k_ww,
+            k_wp=k_wp,
         )
 
         self.sc_vec_encoder = GVP(
@@ -687,9 +908,6 @@ class FlowWaterGVP(nn.Module):
         x_dict = self.updater(
             x_dict,
             data,
-            k_pw=self.k_pw,
-            k_ww=self.k_ww,
-            k_wp=self.k_wp,
             pp_edge_attr=pp_edge_attr,
         )
 
@@ -704,7 +922,6 @@ class FlowMatcher:
     """
 
     SAMPLING_STRATEGIES = ("uniform_ball", "scaled_gaussian")
-    DYNAMIC_EDGE_POLICIES = ("auto", "radius", "knn_if_isolated")
 
     def __init__(
         self,
@@ -716,7 +933,6 @@ class FlowMatcher:
         sigma_distort: float = 0.5,
         loss_eps: float = 1e-3,
         sampling_strategy: str = "uniform_ball",
-        dynamic_edge_policy: str = "auto",
     ):
         """
         Initialize flow matcher for training and inference.
@@ -732,17 +948,15 @@ class FlowMatcher:
             sampling_strategy: Source distribution for flow matching noise.
                 "uniform_ball" samples uniformly in balls around protein atoms.
                 "scaled_gaussian" samples from N(0, sigma^2*I).
-            dynamic_edge_policy: Runtime policy for dynamic water-edge building.
+
+        Note:
+            Edge construction is configured on the model, not here, so training
+            and integration always build edges the same way.
         """
         if sampling_strategy not in self.SAMPLING_STRATEGIES:
             raise ValueError(
                 f"sampling_strategy must be one of {self.SAMPLING_STRATEGIES}, "
                 f"got '{sampling_strategy}'"
-            )
-        if dynamic_edge_policy not in self.DYNAMIC_EDGE_POLICIES:
-            raise ValueError(
-                f"dynamic_edge_policy must be one of {self.DYNAMIC_EDGE_POLICIES}, "
-                f"got '{dynamic_edge_policy}'"
             )
         self.model = model
         self.p_self_cond = p_self_cond
@@ -753,7 +967,6 @@ class FlowMatcher:
         self.loss_eps = loss_eps
         self.graph_cutoff = getattr(model, "cutoff", 8.0)
         self.sampling_strategy = sampling_strategy
-        self.dynamic_edge_policy = dynamic_edge_policy
 
     @staticmethod
     def _num_graphs(data: HeteroData | Batch) -> int:
@@ -811,14 +1024,6 @@ class FlowMatcher:
             device=device,
             dtype=batch_data["protein"].pos.dtype,
         )
-
-    def _effective_dynamic_edge_policy(self) -> str:
-        """Resolve the dynamic edge policy for the current sampling strategy."""
-        if self.dynamic_edge_policy == "auto":
-            if self.sampling_strategy == "scaled_gaussian":
-                return "knn_if_isolated"
-            return "radius"
-        return self.dynamic_edge_policy
 
     @staticmethod
     def compute_sigma(data: HeteroData) -> float:
@@ -933,7 +1138,6 @@ class FlowMatcher:
 
         self.model.train()
         device = batch["protein"].pos.device
-        batch.dynamic_edge_policy = self._effective_dynamic_edge_policy()
 
         x1 = batch["water"].pos
         batch_w = batch["water"].batch
@@ -1031,7 +1235,6 @@ class FlowMatcher:
         """
         self.model.eval()
         device = batch["protein"].pos.device
-        batch.dynamic_edge_policy = self._effective_dynamic_edge_policy()
 
         x1 = batch["water"].pos
         batch_w = batch["water"].batch
