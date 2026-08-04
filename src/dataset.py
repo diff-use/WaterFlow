@@ -264,7 +264,7 @@ def dedup_mate_atoms(
     # An empty reference tree answers inf, so no guard is needed here.
     drop = cKDTree(reference_coords).query(mate_coords, k=1)[0] < tol
 
-    # Self-dedup is a first-wins sweep. One tree answers every lookup, so the
+    # Self-dedup is a first-win sweep. One tree answers every lookup, so the
     # sweep only walks each atom's coincident neighbors.
     neighbors = cKDTree(mate_coords).query_ball_point(mate_coords, r=tol)
     kept = np.zeros(n, dtype=bool)
@@ -272,7 +272,7 @@ def dedup_mate_atoms(
         if drop[i]:
             continue
         earlier = [j for j in neighbors[i] if j < i and kept[j]]
-        # query_ball_point includes r; this sweep is strict.
+        # query_ball_point includes r, this sweep is strict.
         dists = np.linalg.norm(mate_coords[earlier] - mate_coords[i], axis=1)
         kept[i] = not (dists < tol).any()
 
@@ -1068,7 +1068,7 @@ class ProteinWaterDataset(Dataset):
         one directory holding two populations no later reader can tell apart.
 
         Args:
-            write: Create the sidecar when it is absent. Only runs that may add
+            write: Create when it is absent. Only runs that may add
                 entries (preprocess=True) claim a directory this way.
 
         Raises:
@@ -1265,9 +1265,7 @@ class ProteinWaterDataset(Dataset):
             )
 
             # Apply quality filters. Mate protein atoms join the distance
-            # reference so a genuine crystal-contact water -- one sitting in the
-            # gap between the ASU and a neighbor copy, close to the mate surface
-            # but far from the ASU -- is not dropped as solvent-far.
+            # reference so a genuine crystal-contact water is not dropped as solvent-far.
             if self.include_mates and crystal_data["mate_coords"].shape[0] > 0:
                 filter_protein_coords = np.concatenate(
                     [protein_atoms.coord, crystal_data["mate_coords"]], axis=0

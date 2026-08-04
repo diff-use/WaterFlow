@@ -102,9 +102,7 @@ def sample_waters_uniform_ball(
     if batch_p.numel() > 0:
         num_graphs = max(num_graphs, int(batch_p.max().item()) + 1)
 
-    # Drop to the eligible anchors, keeping the grouped-by-graph order the offsets
-    # below rely on. A mask that starves a graph asking for waters is ignored
-    # outright, so the guard below still reports the real cause.
+    # Drop to the eligible anchors
     if anchor_mask is not None:
         eligible = anchor_mask.to(device).bool()
         counts = torch.bincount(batch_p[eligible], minlength=num_graphs)
