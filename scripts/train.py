@@ -230,11 +230,14 @@ def parse_args():
     p.add_argument(
         "--dynamic_edge_policy",
         type=str,
-        default="radius",
-        choices=list(DYNAMIC_EDGE_POLICIES),
+        default="auto",
+        choices=["auto", *DYNAMIC_EDGE_POLICIES],
         help=(
             "How water-touching edges are built: 'radius' connects everything "
-            "within --cutoff, 'knn' takes a fixed neighbour count (default: radius)"
+            "within --cutoff, 'knn' takes a fixed neighbour count, "
+            "'knn_if_isolated' is radius plus a rescue for stranded waters. "
+            "'auto' picks radius under uniform_ball and knn_if_isolated under "
+            "scaled_gaussian (default: auto)"
         ),
     )
     p.add_argument(
@@ -632,6 +635,8 @@ def build_model(
         cutoff=args.cutoff,
         max_neighbors=args.max_neighbors,
         dynamic_edge_policy=args.dynamic_edge_policy,
+        # "auto" depends on which prior the run uses, so pass that through.
+        sampling_strategy=args.sampling_strategy,
         knn_fallback_k=args.knn_fallback_k,
         disable_ww=args.disable_ww,
         disable_wp=args.disable_wp,
