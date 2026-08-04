@@ -36,7 +36,7 @@ from tqdm import tqdm
 
 from src.dataset import get_dataloader
 from src.encoder_base import build_encoder
-from src.flow import FlowMatcher, FlowWaterGVP
+from src.flow import DYNAMIC_EDGE_POLICIES, FlowMatcher, FlowWaterGVP
 from src.utils import (
     compute_placement_metrics,
     compute_rmsd,
@@ -219,8 +219,67 @@ def parse_args():
         default=0.1,
         help="Dropout rate for GVP layers (default: 0.1)",
     )
-    p.add_argument("--k_pw", type=int, default=16)
-    p.add_argument("--k_ww", type=int, default=16)
+    # edge construction
+    p.add_argument(
+        "--dynamic_edge_policy",
+        type=str,
+        default="radius",
+        choices=list(DYNAMIC_EDGE_POLICIES),
+        help=(
+            "How water-touching edges are built: 'radius' connects everything "
+            "within --cutoff, 'knn' takes a fixed neighbour count (default: radius)"
+        ),
+    )
+    p.add_argument(
+        "--cutoff",
+        type=float,
+        default=8.0,
+        help="Distance cutoff in Angstroms for radius edges (default: 8.0)",
+    )
+    p.add_argument(
+        "--max_neighbors",
+        type=int,
+        default=256,
+        help="Per-source cap on radius query results (default: 256)",
+    )
+    p.add_argument(
+        "--knn_fallback_k",
+        type=int,
+        default=8,
+        help=(
+            "Nearest neighbours attached to waters the radius query stranded; "
+            "0 disables the rescue. Ignored under --dynamic_edge_policy knn "
+            "(default: 8)"
+        ),
+    )
+    p.add_argument(
+        "--disable_ww",
+        action="store_true",
+        help="Ablate water->water edges",
+    )
+    p.add_argument(
+        "--disable_wp",
+        action="store_true",
+        help="Ablate water->protein edges",
+    )
+    p.add_argument(
+        "--k_pw",
+        type=int,
+        default=12,
+        help="Nearest neighbours for protein->water edges under 'knn' (default: 12)",
+    )
+    p.add_argument(
+        "--k_ww",
+        type=int,
+        default=8,
+        help="Nearest neighbours for water->water edges under 'knn' (default: 8)",
+    )
+    p.add_argument(
+        "--k_wp",
+        type=int,
+        default=8,
+        help="Nearest neighbours for water->protein edges under 'knn' (default: 8)",
+    )
 
     # optional cached-embedding override
     p.add_argument(
@@ -563,8 +622,15 @@ def build_model(
         n_message_gvps=args.n_message_gvps,
         n_update_gvps=args.n_update_gvps,
         drop_rate=args.drop_rate,
+        cutoff=args.cutoff,
+        max_neighbors=args.max_neighbors,
+        dynamic_edge_policy=args.dynamic_edge_policy,
+        knn_fallback_k=args.knn_fallback_k,
+        disable_ww=args.disable_ww,
+        disable_wp=args.disable_wp,
         k_pw=args.k_pw,
         k_ww=args.k_ww,
+        k_wp=args.k_wp,
     ).to(device)
 
     return model

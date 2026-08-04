@@ -26,6 +26,34 @@ EDGE_WP = ("water", "wp", "protein")  # water -> protein
 # all edge types used in the model (future support: het atoms)
 ALL_EDGE_TYPES = [EDGE_PW, EDGE_WW, EDGE_PP, EDGE_WP]
 
+
+def get_active_edge_types(
+    disable_ww: bool = False, disable_wp: bool = False
+) -> list[tuple[str, str, str]]:
+    """
+    Return the active edge types for a model configuration.
+
+    PW and PP are always active: PW carries protein context onto waters and PP
+    is read from the geometry cache. WW and WP are ablatable.
+
+    The returned order differs from ``ALL_EDGE_TYPES``. That is safe -- edge
+    types key ``HeteroConv``'s parameters by name (``convs.<protein___pw___water>``),
+    not by position, so ordering does not affect state-dict compatibility.
+
+    Args:
+        disable_ww: Drop water -> water edges.
+        disable_wp: Drop water -> protein edges.
+
+    Returns:
+        List of (src_type, relation, dst_type) tuples.
+    """
+    etypes = [EDGE_PW, EDGE_PP]
+    if not disable_ww:
+        etypes.append(EDGE_WW)
+    if not disable_wp:
+        etypes.append(EDGE_WP)
+    return etypes
+
 # Standard 3-letter to 1-letter amino acid mapping
 # Includes 20 canonical amino acids plus common non-standard residues
 # Non-canonical residues not in this dict should be mapped to 'X'

@@ -183,8 +183,6 @@ def test_forward_pass_no_nan_with_module_hooks(device):
         encoder=encoder,
         hidden_dims=(64, 8),
         layers=2,
-        k_pw=8,  # keep <= n_water_per
-        k_ww=8,  # keep <= n_water_per
     ).to(device)
 
     # Quick pre-check: protein encoder input features created from pp edges
@@ -193,8 +191,8 @@ def test_forward_pass_no_nan_with_module_hooks(device):
         enc_data.edge_index, enc_data.x.size(0), enc_data.x.size(0), "pp edge_index"
     )
 
-    # Also validate knn edges are sane (catches orientation / k issues)
-    edge_dict = model.updater.build_edges(data, k_pw=model.k_pw, k_ww=model.k_ww)
+    # Also validate dynamic edges are sane (catches orientation / cutoff issues)
+    edge_dict = model.updater.build_edges(data)
     assert_edge_index_in_range(
         edge_dict[("protein", "pw", "water")],
         data["protein"].pos.size(0),

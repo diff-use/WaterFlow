@@ -273,8 +273,15 @@ def build_model_from_config(config: dict, device: torch.device) -> nn.Module:
         drop_rate=config.get("drop_rate", 0.1),
         n_message_gvps=config.get("n_message_gvps", 2),
         n_update_gvps=config.get("n_update_gvps", 2),
-        k_pw=config.get("k_pw") or 16,
-        k_ww=config.get("k_ww") or 16,
+        cutoff=config.get("cutoff", 8.0),
+        max_neighbors=config.get("max_neighbors", 256),
+        dynamic_edge_policy=config.get("dynamic_edge_policy", "radius"),
+        knn_fallback_k=config.get("knn_fallback_k", 8),
+        disable_ww=config.get("disable_ww", False),
+        disable_wp=config.get("disable_wp", False),
+        k_pw=config.get("k_pw", 12),
+        k_ww=config.get("k_ww", 8),
+        k_wp=config.get("k_wp", 8),
     ).to(device)
 
     return model
