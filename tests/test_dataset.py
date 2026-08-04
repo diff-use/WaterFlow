@@ -36,13 +36,17 @@ from src.constants import (
 from src.dataset import (
     _make_undirected,
     _pad_atom_embeddings_for_mates,
+    _parse_pdb_resi,
     apply_threshold_filter,
     check_chain_interactions,
     check_com_distance,
     check_water_clashes,
     check_water_residue_ratio,
     compute_normalized_bfactors,
+    dedup_mate_atoms,
+    dedup_mate_ligands_by_residue,
     element_onehot,
+    FILTER_META_FILENAME,
     filter_waters_by_quality,
     get_crystal_contacts_pymol,
     get_dataloader,
@@ -303,6 +307,172 @@ class TestMatchAtomsToCoords:
 
         assert len(set(matched)) == n_matched
         assert f"{n_matched}/{n_atoms} atoms matched" in warning_log[0]
+
+
+@pytest.mark.unit
+class TestDedupMateAtoms:
+    """Tests for symmetry-mate coordinate deduplication."""
+
+    @staticmethod
+    def _atoms(n):
+        return [object() for _ in range(n)]
+
+    def test_empty_passthrough(self):
+        coords = np.zeros((0, 3))
+        out_coords, out_atoms = dedup_mate_atoms(coords, [], np.zeros((0, 3)))
+
+        assert out_coords.shape == (0, 3)
+        assert out_atoms == []
+
+    def test_drops_atoms_coincident_with_reference(self):
+        """A mate atom sitting on an ASU/target atom is a leak and is removed."""
+        mate_coords = np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]])
+        reference = np.array([[0.0, 0.0, 0.0]])
+
+        out_coords, out_atoms = dedup_mate_atoms(
+            mate_coords, self._atoms(2), reference, tol=0.3
+        )
+
+        assert out_coords.shape[0] == 1
+        assert len(out_atoms) == 1
+        np.testing.assert_allclose(out_coords[0], [10.0, 0.0, 0.0])
+
+    def test_keeps_atoms_aligned(self):
+        """Returned coords and atom objects stay in lockstep."""
+        mate_coords = np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]])
+        first, second = object(), object()
+        reference = np.array([[0.0, 0.0, 0.0]])
+
+        out_coords, out_atoms = dedup_mate_atoms(
+            mate_coords, [first, second], reference, tol=0.3
+        )
+
+        assert out_atoms == [second]
+        np.testing.assert_allclose(out_coords[0], [10.0, 0.0, 0.0])
+
+    def test_keeps_atoms_beyond_tolerance(self):
+        """Separations at or past tol are distinct atoms, not duplicates."""
+        mate_coords = np.array([[0.0, 0.0, 0.0], [0.3, 0.0, 0.0], [0.6, 0.0, 0.0]])
+
+        out_coords, _ = dedup_mate_atoms(
+            mate_coords, self._atoms(3), np.zeros((0, 3)), tol=0.3
+        )
+
+        assert out_coords.shape[0] == 3
+
+    def test_self_dedup_is_first_wins(self):
+        """A chain of near-coincident mate atoms collapses onto the earliest."""
+        mate_coords = np.array([[0.0, 0.0, 0.0], [0.1, 0.0, 0.0], [0.2, 0.0, 0.0]])
+        first, second, third = object(), object(), object()
+
+        out_coords, out_atoms = dedup_mate_atoms(
+            mate_coords, [first, second, third], np.zeros((0, 3)), tol=0.3
+        )
+
+        assert out_atoms == [first]
+        np.testing.assert_allclose(out_coords[0], [0.0, 0.0, 0.0])
+
+
+class _FakeLigandAtom:
+    """Stand-in for a PyMOL atom object with the fields the dedup reads."""
+
+    def __init__(self, chain, resi, segi=""):
+        self.chain = chain
+        self.resi = resi
+        self.segi = segi
+
+
+@pytest.mark.unit
+class TestDedupMateLigandsByResidue:
+    """Tests for whole-entity symmetry-image ligand removal."""
+
+    def test_empty_passthrough(self):
+        coords = np.zeros((0, 3))
+        out_coords, out_atoms = dedup_mate_ligands_by_residue(
+            coords, [], np.zeros((0, 3))
+        )
+
+        assert out_coords.shape == (0, 3)
+        assert out_atoms == []
+
+    def test_drops_whole_symmetry_image_ligand(self):
+        """A ligand whose atoms mostly land on ASU atoms is dropped entirely."""
+        lig_coords = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
+        lig_atoms = [_FakeLigandAtom("A", "1") for _ in range(3)]
+        reference = lig_coords.copy()
+
+        out_coords, out_atoms = dedup_mate_ligands_by_residue(
+            lig_coords, lig_atoms, reference, tol=0.3
+        )
+
+        assert out_coords.shape[0] == 0
+        assert out_atoms == []
+
+    def test_keeps_neighbour_ligand_whole(self):
+        """A genuine neighbour-cell ligand keeps every atom, including any that
+        happen to coincide with the ASU."""
+        lig_coords = np.array([[0.0, 0.0, 0.0], [9.0, 0.0, 0.0], [10.0, 0.0, 0.0]])
+        lig_atoms = [_FakeLigandAtom("B", "7") for _ in range(3)]
+        reference = np.array([[0.0, 0.0, 0.0]])  # only one atom coincides
+
+        out_coords, out_atoms = dedup_mate_ligands_by_residue(
+            lig_coords, lig_atoms, reference, tol=0.3
+        )
+
+        assert out_coords.shape[0] == 3
+        assert len(out_atoms) == 3
+
+    def test_entities_are_judged_independently(self):
+        """One ligand being an image does not remove its neighbours."""
+        lig_coords = np.array([[0.0, 0.0, 0.0], [20.0, 0.0, 0.0]])
+        lig_atoms = [_FakeLigandAtom("A", "1"), _FakeLigandAtom("A", "2")]
+        reference = np.array([[0.0, 0.0, 0.0]])
+
+        out_coords, out_atoms = dedup_mate_ligands_by_residue(
+            lig_coords, lig_atoms, reference, tol=0.3
+        )
+
+        assert out_coords.shape[0] == 1
+        np.testing.assert_allclose(out_coords[0], [20.0, 0.0, 0.0])
+        assert out_atoms[0].resi == "2"
+
+    def test_segment_separates_entities(self):
+        """Two ligands sharing (chain, resi) but not segi stay independent."""
+        lig_coords = np.array([[0.0, 0.0, 0.0], [20.0, 0.0, 0.0]])
+        lig_atoms = [
+            _FakeLigandAtom("A", "1", segi="X"),
+            _FakeLigandAtom("A", "1", segi="Y"),
+        ]
+        reference = np.array([[0.0, 0.0, 0.0]])
+
+        out_coords, _ = dedup_mate_ligands_by_residue(
+            lig_coords, lig_atoms, reference, tol=0.3
+        )
+
+        assert out_coords.shape[0] == 1
+        np.testing.assert_allclose(out_coords[0], [20.0, 0.0, 0.0])
+
+
+@pytest.mark.unit
+class TestParsePdbResi:
+    """Tests for PyMOL residue-identifier parsing."""
+
+    @pytest.mark.parametrize(
+        "resi,expected",
+        [
+            ("52", (52, "")),
+            ("-3", (-3, "")),
+            ("52A", (52, "A")),
+            (" 52 ", (52, "")),
+            (7, (7, "")),
+        ],
+    )
+    def test_parses(self, resi, expected):
+        assert _parse_pdb_resi(resi) == expected
+
+    @pytest.mark.parametrize("resi", ["", "A", "52AB", "5.2"])
+    def test_returns_none_when_unparseable(self, resi):
+        assert _parse_pdb_resi(resi) is None
 
 
 @pytest.mark.unit
@@ -768,6 +938,13 @@ class TestLigandNodeIntegration:
         assert data["protein"].is_ligand.shape == (data["protein"].num_nodes,)
         assert data["protein"].is_ligand.dtype == torch.bool
 
+        # No residue owns a ligand, so it carries the -1 embedding sentinel.
+        cached = torch.load(
+            tmp_path / "processed" / "geometry" / "4h0b_final.pt", weights_only=False
+        )
+        assert cached["is_ligand"].any()
+        assert (cached["emb_res_idx"][cached["is_ligand"]] == -1).all()
+
     def test_protein_x_dim_unchanged(self, pdb_4h0b, tmp_path):
         """protein.x should still be 16-dim one-hot for both protein and ligand atoms."""
         list_file = tmp_path / "list.txt"
@@ -842,6 +1019,45 @@ class TestGetCrystalContactsPymol:
         assert (
             result_large["mate_coords"].shape[0] >= result_small["mate_coords"].shape[0]
         )
+
+    def test_mates_never_include_solvent(self, pdb_8dzt):
+        """No mate atom, protein or ligand, is a water: a mate water is a symmetry
+        image of an ASU water, which is a prediction target."""
+        result = get_crystal_contacts_pymol(pdb_8dzt, cutoff=5.0, include_ligands=True)
+
+        protein_resns = {str(a.resn).upper() for a in result["mate_atoms"]}
+        ligand_resns = {str(a.resn).upper() for a in result["mate_ligand_atoms"]}
+        assert not {"HOH", "WAT"} & protein_resns
+        assert not {"HOH", "WAT"} & ligand_resns
+
+    def test_ligand_mates_are_gated_and_separate(self, pdb_8dzt):
+        """include_ligands=False suppresses ligand mates and leaves protein mates
+        alone -- the two sets come back under separate keys."""
+        full = get_crystal_contacts_pymol(pdb_8dzt, cutoff=5.0, include_ligands=True)
+        protein_only = get_crystal_contacts_pymol(pdb_8dzt, cutoff=5.0)
+
+        assert len(protein_only["mate_ligand_atoms"]) == 0
+        assert protein_only["mate_ligand_coords"].shape[0] == 0
+        assert len(full["mate_ligand_atoms"]) > 0
+        assert protein_only["mate_coords"].shape[0] == full["mate_coords"].shape[0]
+
+    def test_special_position_water_never_selected(self, pdb_4h0b):
+        """4h0b has a target water on the 6-fold axis whose symmetry copy lands
+        ~0 A away. Since mate waters are never selected, no mate of any kind may
+        coincide with a target water -- the special-position leak cannot happen."""
+        from scipy.spatial import cKDTree
+
+        _, water_atoms, _ = parse_asu_with_biotite(pdb_4h0b)
+        result = get_crystal_contacts_pymol(pdb_4h0b, cutoff=5.0, include_ligands=True)
+
+        mate_coords = result["mate_coords"]
+        if result["mate_ligand_coords"].shape[0]:
+            mate_coords = np.concatenate(
+                [mate_coords, result["mate_ligand_coords"]], axis=0
+            )
+        assert mate_coords.shape[0] > 0
+        nearest = cKDTree(mate_coords).query(water_atoms.coord, k=1)[0]
+        assert (nearest < 0.3).sum() == 0
 
 
 @pytest.mark.integration
@@ -952,6 +1168,8 @@ class TestProteinWaterDataset:
             "protein_x": torch.zeros((1, len(ELEMENT_VOCAB) + 1), dtype=torch.float32),
             "protein_res_idx": torch.zeros(1, dtype=torch.long),
             "is_ligand": torch.zeros(1, dtype=torch.bool),
+            "is_mate": torch.zeros(1, dtype=torch.bool),
+            "emb_res_idx": torch.zeros(1, dtype=torch.long),
             "pp_edge_index": torch.empty((2, 0), dtype=torch.long),
             "pp_edge_unit_vectors": torch.empty((0, 3), dtype=torch.float32),
             "pp_edge_rbf": torch.empty((0, 16), dtype=torch.float32),
@@ -2138,9 +2356,9 @@ class TestLoadEncoderEmbeddings:
         dataset._annotate_data_with_embeddings(
             data=data,
             cache_key="test",
-            asu_protein_res_idx=torch.tensor([0]),
             num_asu_protein=100,
             num_protein_residues=50,
+            emb_res_idx=torch.zeros(100, dtype=torch.long),
         )
 
         # Should not have added any embedding attributes
@@ -2176,9 +2394,9 @@ class TestLoadEncoderEmbeddings:
         dataset._annotate_data_with_embeddings(
             data=data,
             cache_key="test_final",
-            asu_protein_res_idx=torch.tensor([0]),
             num_asu_protein=100,
             num_protein_residues=50,
+            emb_res_idx=torch.zeros(100, dtype=torch.long),
         )
 
         assert hasattr(data["protein"], "embedding")
@@ -2217,9 +2435,9 @@ class TestLoadEncoderEmbeddings:
         dataset._annotate_data_with_embeddings(
             data=data,
             cache_key="test_final",
-            asu_protein_res_idx=asu_res_idx,
             num_asu_protein=50,
             num_protein_residues=10,
+            emb_res_idx=asu_res_idx,
         )
 
         assert hasattr(data["protein"], "embedding")
@@ -2254,9 +2472,9 @@ class TestLoadEncoderEmbeddings:
         dataset._annotate_data_with_embeddings(
             data=data,
             cache_key="test_final",
-            asu_protein_res_idx=torch.zeros(num_asu, dtype=torch.long),
             num_asu_protein=num_asu,
             num_protein_residues=1,
+            emb_res_idx=torch.zeros(num_asu + num_mate + num_ligand, dtype=torch.long),
         )
 
         emb = data["protein"].embedding
@@ -2264,10 +2482,10 @@ class TestLoadEncoderEmbeddings:
         assert torch.equal(emb[:num_asu], asu_emb), "ASU rows must be left untouched"
         assert (emb[num_asu:] == 0).all(), "mate and ligand rows must be zero-padded"
 
-    def test_esm_zero_pads_mate_and_ligand_atoms(self, tmp_path, pdb_base_dir):
-        """ESM residue embeddings broadcast to ASU atoms only. Mate and ligand atoms
-        are zero-padded -- ligands carry residue_index=-1 and must never be used to
-        index the residue embedding table."""
+    def test_esm_mates_inherit_and_ligands_zero(self, tmp_path, pdb_base_dir):
+        """ESM rows broadcast to ASU atoms, and mate atoms inherit the row of the
+        ASU residue they image. Ligands carry -1 and must never index the residue
+        table, so they stay zero."""
         from torch_geometric.data import HeteroData
 
         num_residues = 4
@@ -2293,16 +2511,19 @@ class TestLoadEncoderEmbeddings:
         data = HeteroData()
         data["protein"].num_nodes = num_asu + num_mate + num_ligand
 
-        # ASU res idx only -- ligand sentinels (-1) live past num_asu_protein and are
-        # sliced off by __getitem__ before this call.
         asu_res_idx = torch.arange(num_residues).repeat_interleave(atoms_per_residue)
+        # Mates image residue 0; ligands get the -1 sentinel.
+        mate_res_idx = torch.zeros(num_mate, dtype=torch.long)
+        emb_res_idx = torch.cat(
+            [asu_res_idx, mate_res_idx, torch.full((num_ligand,), -1)]
+        )
 
         dataset._annotate_data_with_embeddings(
             data=data,
             cache_key="test_final",
-            asu_protein_res_idx=asu_res_idx,
             num_asu_protein=num_asu,
             num_protein_residues=num_residues,
+            emb_res_idx=emb_res_idx,
         )
 
         emb = data["protein"].embedding
@@ -2310,7 +2531,10 @@ class TestLoadEncoderEmbeddings:
         assert torch.equal(emb[:num_asu], residue_emb[asu_res_idx]), (
             "each ASU atom must carry its own residue's embedding"
         )
-        assert (emb[num_asu:] == 0).all(), "mate and ligand rows must be zero-padded"
+        assert torch.equal(
+            emb[num_asu : num_asu + num_mate], residue_emb[mate_res_idx]
+        ), "mate atoms must inherit their source residue's embedding"
+        assert (emb[num_asu + num_mate :] == 0).all(), "ligand rows must stay zero"
 
 
 # ============== Tests for caching behavior ==============
@@ -2664,6 +2888,156 @@ class TestSymmetryMateHandling:
         # num_asu_protein_atoms should be <= total protein nodes
         assert data.num_asu_protein_atoms <= data["protein"].num_nodes
         assert data.num_asu_protein_atoms > 0
+
+    def _mate_dataset(self, single_pdb_list_file, tmp_path, pdb_base_dir, **kwargs):
+        return ProteinWaterDataset(
+            pdb_list_file=single_pdb_list_file,
+            processed_dir=str(tmp_path),
+            base_pdb_dir=str(pdb_base_dir),
+            include_mates=True,
+            preprocess=True,
+            **kwargs,
+        )
+
+    def test_mate_provenance_fields(self, single_pdb_list_file, tmp_path, pdb_base_dir):
+        """is_mate splits ASU from mate at num_asu_protein, and the mate atoms
+        behind it carry the embedding row of the ASU residue they image, not the
+        -1 that reads as a zero row."""
+        dataset = self._mate_dataset(single_pdb_list_file, tmp_path, pdb_base_dir)
+        data = dataset[0]
+        cached = torch.load(
+            tmp_path / "geometry_mates" / "6eey_final.pt", weights_only=False
+        )
+        is_mate, emb_res_idx = data["protein"].is_mate, cached["emb_res_idx"]
+        num_asu = data.num_asu_protein_atoms
+
+        assert is_mate.shape == emb_res_idx.shape == (data["protein"].num_nodes,)
+        assert not is_mate[:num_asu].any()
+        assert is_mate.sum().item() > 0
+        # Ligands ride behind the mates, so the mate block is contiguous but need
+        # not run to the end; every marked node is past the ASU.
+        assert is_mate[num_asu:][: is_mate.sum().item()].all()
+
+        mate_protein = is_mate & ~cached["is_ligand"]
+        assert (emb_res_idx[mate_protein] >= 0).all()
+        assert (emb_res_idx[mate_protein] < data["protein"].num_protein_residues).all()
+
+    def test_no_mates_run_marks_nothing_as_mate(
+        self, single_pdb_list_file, tmp_path, pdb_base_dir
+    ):
+        """Without mates every node is ASU, so the prior's anchor mask is inert."""
+        dataset = ProteinWaterDataset(
+            pdb_list_file=single_pdb_list_file,
+            processed_dir=str(tmp_path),
+            base_pdb_dir=str(pdb_base_dir),
+            include_mates=False,
+            preprocess=True,
+        )
+
+        data = dataset[0]
+        assert not data["protein"].is_mate.any()
+
+    def test_mate_waters_never_enter_the_graph(
+        self, single_pdb_list_file, tmp_path, pdb_base_dir
+    ):
+        """No protein node may sit on a target water: that is the label leak the
+        mate selection and the dedup pass exist to prevent."""
+        dataset = self._mate_dataset(single_pdb_list_file, tmp_path, pdb_base_dir)
+        data = dataset[0]
+
+        waters = data["water"].pos
+        if waters.size(0) == 0:
+            pytest.skip("structure has no waters after filtering")
+        nearest = torch.cdist(waters, data["protein"].pos).min(dim=1).values
+        assert nearest.min().item() > 0.3
+
+
+@pytest.mark.unit
+class TestFilterMetaSidecar:
+    """A geometry directory records the settings its entries were built with."""
+
+    def _dataset(self, tmp_path, *, preprocess=True, **kwargs):
+        """Dataset over an empty list: claims the directory, preprocesses nothing."""
+        list_file = tmp_path / "empty.txt"
+        list_file.write_text("")
+        return ProteinWaterDataset(
+            pdb_list_file=str(list_file),
+            processed_dir=str(tmp_path / "processed"),
+            base_pdb_dir=str(tmp_path),
+            preprocess=preprocess,
+            **kwargs,
+        )
+
+    def _meta_path(self, tmp_path):
+        return tmp_path / "processed" / "geometry_mates" / FILTER_META_FILENAME
+
+    def test_written_on_preprocess(self, tmp_path):
+        self._dataset(tmp_path, max_bfactor_zscore=2.0)
+
+        recorded = json.loads(self._meta_path(tmp_path).read_text())
+        assert recorded["max_bfactor_zscore"] == 2.0
+        assert recorded["min_edia"] == 0.4
+        assert recorded["filter_by_bfactor"] is True
+        # Structure-level checks decide which entries exist at all, and the graph
+        # parameters decide the cached edges: both belong to the directory too.
+        assert recorded["min_water_residue_ratio"] == 0.1
+        assert recorded["cutoff"] == 8.0
+        assert recorded["max_neighbors"] == 256
+
+    def test_matching_settings_accepted(self, tmp_path):
+        self._dataset(tmp_path, max_bfactor_zscore=2.0)
+        self._dataset(tmp_path, max_bfactor_zscore=2.0)  # must not raise
+
+    @pytest.mark.parametrize(
+        "changed,preprocess",
+        [
+            ({"max_bfactor_zscore": 1.5}, True),  # water threshold
+            ({"filter_by_edia": False}, True),  # water filter toggle
+            ({"min_water_residue_ratio": 0.6}, True),  # which entries exist
+            ({"cutoff": 6.0}, True),  # which PP edges were cached
+            # A read-only run is refused too: it would report metrics over waters
+            # filtered differently than it asked for.
+            ({"min_edia": 0.6}, False),
+        ],
+    )
+    def test_mismatch_refused(self, tmp_path, changed, preprocess):
+        self._dataset(tmp_path)
+
+        with pytest.raises(ValueError, match=next(iter(changed))):
+            self._dataset(tmp_path, preprocess=preprocess, **changed)
+
+    def test_disabled_filter_ignores_its_threshold(self, tmp_path):
+        """A disabled filter never touched the cached waters, so its threshold
+        must not make two identical caches look incompatible."""
+        self._dataset(tmp_path, filter_by_bfactor=False, max_bfactor_zscore=2.0)
+
+        assert (
+            json.loads(self._meta_path(tmp_path).read_text())["max_bfactor_zscore"]
+            is None
+        )
+        self._dataset(tmp_path, filter_by_bfactor=False, max_bfactor_zscore=1.5)
+
+    def test_directories_are_claimed_independently(self, tmp_path):
+        """Mates and no-mates are separate directories, so they may disagree."""
+        self._dataset(tmp_path, include_mates=True, max_bfactor_zscore=2.0)
+        self._dataset(tmp_path, include_mates=False, max_bfactor_zscore=1.5)
+
+    def test_unlabelled_cache_warns(self, tmp_path, warning_log):
+        """An existing directory with no sidecar is usable but unverifiable."""
+        geometry_dir = tmp_path / "processed" / "geometry_mates"
+        geometry_dir.mkdir(parents=True)
+        (geometry_dir / "6eey_final.pt").write_bytes(b"cache")
+
+        self._dataset(tmp_path, preprocess=False)
+
+        assert any(FILTER_META_FILENAME in message for message in warning_log)
+
+    def test_empty_directory_does_not_warn(self, tmp_path, warning_log):
+        (tmp_path / "processed" / "geometry_mates").mkdir(parents=True)
+
+        self._dataset(tmp_path, preprocess=False)
+
+        assert not any(FILTER_META_FILENAME in message for message in warning_log)
 
 
 # ============== Tests for residue index assignment ==============

@@ -633,6 +633,83 @@ class TestUniformBallSampling:
                 device=device,
             )
 
+    def test_anchor_mask_is_per_graph(self, device):
+        """Masked-out atoms are never ball centres, and each graph stays within
+        its own eligible atoms rather than its neighbour's."""
+        torch.manual_seed(0)
+        protein_pos = torch.tensor(
+            [[0.0, 0.0, 0.0], [500.0, 0.0, 0.0], [100.0, 0.0, 0.0], [900.0, 0.0, 0.0]],
+            device=device,
+        )
+        batch_p = torch.tensor([0, 0, 1, 1], dtype=torch.long, device=device)
+        batch_w = _batch_from_counts(
+            torch.tensor([50, 50], dtype=torch.long, device=device), device
+        )
+        anchor_mask = torch.tensor([True, False, True, False], device=device)
+
+        pos = sample_waters_uniform_ball(
+            protein_pos=protein_pos,
+            batch_p=batch_p,
+            batch_w=batch_w,
+            cutoff=2.0,
+            device=device,
+            anchor_mask=anchor_mask,
+        )
+
+        assert pos[batch_w == 0][:, 0].abs().max().item() < 5.0
+        assert (pos[batch_w == 1][:, 0] - 100.0).abs().max().item() < 5.0
+
+    def test_anchor_mask_ignored_when_it_starves_a_graph(self, device):
+        """A mask leaving a water-requesting graph with no anchor is dropped, not
+        allowed to shift that graph's waters onto another graph's atoms."""
+        torch.manual_seed(0)
+        protein_pos = torch.tensor([[0.0, 0.0, 0.0], [1000.0, 0.0, 0.0]], device=device)
+        batch_p = torch.tensor([0, 1], dtype=torch.long, device=device)
+        batch_w = _batch_from_counts(
+            torch.tensor([10, 10], dtype=torch.long, device=device), device
+        )
+        # graph 1 has no eligible atom
+        anchor_mask = torch.tensor([True, False], device=device)
+
+        pos = sample_waters_uniform_ball(
+            protein_pos=protein_pos,
+            batch_p=batch_p,
+            batch_w=batch_w,
+            cutoff=2.0,
+            device=device,
+            anchor_mask=anchor_mask,
+        )
+
+        assert (pos[batch_w == 1][:, 0] - 1000.0).abs().max().item() < 5.0
+
+    def test_anchor_mask_none_matches_all_true_mask(self, device):
+        """An all-True mask changes neither the draws nor their order."""
+        protein_pos = torch.randn(12, 3, device=device) * 10
+        batch_p = torch.cat([torch.zeros(6), torch.ones(6)]).long().to(device)
+        batch_w = _batch_from_counts(
+            torch.tensor([20, 15], dtype=torch.long, device=device), device
+        )
+
+        torch.manual_seed(7)
+        without = sample_waters_uniform_ball(
+            protein_pos=protein_pos,
+            batch_p=batch_p,
+            batch_w=batch_w,
+            cutoff=8.0,
+            device=device,
+        )
+        torch.manual_seed(7)
+        with_mask = sample_waters_uniform_ball(
+            protein_pos=protein_pos,
+            batch_p=batch_p,
+            batch_w=batch_w,
+            cutoff=8.0,
+            device=device,
+            anchor_mask=torch.ones(12, dtype=torch.bool, device=device),
+        )
+
+        assert torch.equal(without, with_mask)
+
     def test_large_spread_protein_succeeds(self, device):
         """The scenario that crashes truncated Gaussian (sigma~50) works here."""
         torch.manual_seed(0)

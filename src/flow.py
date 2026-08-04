@@ -57,6 +57,7 @@ def sample_waters_uniform_ball(
     batch_w: Tensor,
     cutoff: float = 8.0,
     device: torch.device | None = None,
+    anchor_mask: Tensor | None = None,
 ) -> Tensor:
     """
     Sample water positions uniformly inside balls of radius *cutoff* centred
@@ -73,6 +74,10 @@ def sample_waters_uniform_ball(
             batch vector and get samples aligned to it.
         cutoff: Ball radius in Angstroms
         device: Optional output device (defaults to protein_pos.device)
+        anchor_mask: Optional (N_protein,) bool selecting eligible anchors. Used to
+            anchor on ASU atoms only, so the prior spawns where the targets live
+            instead of dispersing onto symmetry mates that OT must then transport
+            back. Ignored if it would leave a water-requesting graph with no anchor.
 
     Returns:
         water_pos: (N_water, 3) sampled positions, one per entry of batch_w
@@ -96,6 +101,16 @@ def sample_waters_uniform_ball(
     num_graphs = int(batch_w.max().item()) + 1
     if batch_p.numel() > 0:
         num_graphs = max(num_graphs, int(batch_p.max().item()) + 1)
+
+    # Drop to the eligible anchors, keeping the grouped-by-graph order the offsets
+    # below rely on. A mask that starves a graph asking for waters is ignored
+    # outright, so the guard below still reports the real cause.
+    if anchor_mask is not None:
+        eligible = anchor_mask.to(device).bool()
+        counts = torch.bincount(batch_p[eligible], minlength=num_graphs)
+        if not (counts[batch_w] == 0).any():
+            protein_pos = protein_pos.to(device)[eligible]
+            batch_p = batch_p[eligible]
 
     # per-graph protein atom counts and cumulative offsets
     num_p_per_graph = scatter(
@@ -405,15 +420,14 @@ class ProteinWaterUpdate(nn.Module):
         if EDGE_PP in data.edge_types:
             pp_edge = data[EDGE_PP]
 
-            # V_edge fallback is for backward compatibility with datasets
-            # that don't have cached edge features. A given model only sees one or the other.
+            # A given model sees one source or the other, never both.
             if pp_edge_attr is not None:
                 # Use encoder-learned scalar features (s_edge) with unit vectors
                 s_edge, V_edge = pp_edge_attr
                 if hasattr(pp_edge, "edge_unit_vectors"):
                     cached_edge_attr_dict[EDGE_PP] = (s_edge, pp_edge.edge_unit_vectors)
                 else:
-                    # Fallback for datasets without cached unit vectors
+                    # Graphs built outside the dataset carry vectors on the encoder side
                     cached_edge_attr_dict[EDGE_PP] = (s_edge, V_edge.squeeze(1))
             elif hasattr(pp_edge, "edge_rbf") and hasattr(pp_edge, "edge_unit_vectors"):
                 # No encoder edge features (e.g., SLAE/ESM) - use cached geometric features
@@ -716,12 +730,20 @@ class FlowMatcher:
         """Dispatch to the configured sampling strategy, sampling one water per
         entry of batch_w and returning them in that order."""
         if self.sampling_strategy == "uniform_ball":
+            # With crystal mates in the graph, anchor on ASU atoms only: the
+            # targets are ASU-only, so mate anchors just disperse the prior.
+            # Runs without mates pass no mask and are unchanged.
+            is_mate = getattr(batch_data["protein"], "is_mate", None)
+            anchor_mask = (
+                ~is_mate.bool() if is_mate is not None and bool(is_mate.any()) else None
+            )
             return sample_waters_uniform_ball(
                 protein_pos=batch_data["protein"].pos,
                 batch_p=batch_data["protein"].batch,
                 batch_w=batch_w,
                 cutoff=self.graph_cutoff,
                 device=device,
+                anchor_mask=anchor_mask,
             )
         # scaled_gaussian
         sigma_per_graph = self.compute_sigma_per_graph(batch_data, device)
