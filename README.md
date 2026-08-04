@@ -81,10 +81,13 @@ WaterFlow processes structure files through several stages to create training-re
 - ASU ligand atoms are appended after ASU and mate atoms and carry the boolean `is_ligand` mask plus `residue_index = -1` (they have no residue embedding, so residue pooling masks them out)
 - `is_ligand` marks **ASU ligands only**. Symmetry-mate generation is currently unfiltered, so mate nodes can include HETATM and water atoms that `is_ligand` does not mark — see `TODO(mates)` in `ProteinWaterDataset._preprocess_one`. Don't treat `is_ligand` as an exhaustive ligand selector
 - Edge types (defined in `src/constants.py`):
-  - `('protein', 'pp', 'protein')`: protein-protein edges
-  - `('protein', 'pw', 'water')`: protein to water
-  - `('water', 'wp', 'protein')`: water to protein
-  - `('water', 'ww', 'water')`: water-water edges
+  - `('protein', 'pp', 'protein')`: protein-protein edges — cached at preprocessing
+  - `('protein', 'pw', 'water')`: protein to water — built at runtime
+  - `('water', 'wp', 'protein')`: water to protein — built at runtime, ablatable
+  - `('water', 'ww', 'water')`: water-water edges — built at runtime, ablatable
+- Only PP edges are stored in the geometry cache; every water-touching edge is
+  rebuilt each forward pass, since water positions move during integration. See
+  [Edge Construction](#edge-construction)
 - Default edge cutoff: 8.0Å (`RBF_CUTOFF` in constants.py)
 
 **Feature Encoding**
@@ -199,6 +202,34 @@ WaterFlow uses a two-stage architecture:
 | `esm` | Uses ESM3 language model embeddings | Yes (`generate_esm_embeddings.py`) |
 | `slae` | Uses SLAE ([Strictly Local All-Atom Environment](https://www.biorxiv.org/content/10.1101/2025.10.03.680398v1)) embeddings | Yes (`generate_slae_embeddings.py`) |
 
+### Edge Construction
+
+Water-touching edges (PW, WW, WP) are rebuilt every forward pass because water
+positions change during integration. How they are built is fixed at model
+construction, so training and inference always agree:
+
+| `--dynamic_edge_policy` | Behaviour |
+|-------------------------|-----------|
+| `radius` (default) | Connect every pair within `--cutoff`, capped at `--max_neighbors` per source |
+| `knn` | Connect a fixed number of nearest neighbours (`--k_pw`, `--k_ww`, `--k_wp`) |
+
+The two differ in which side the neighbour budget applies to. KNN queries *per
+destination*, so every destination is guaranteed edges but a source may have
+none — coverage checks must read the destination row. Radius guarantees nothing:
+a water with no protein atom inside `--cutoff` gets no PW edges at all.
+
+`--knn_fallback_k` repairs that. Under `radius`, any water the query stranded is
+reconnected to that many nearest protein atoms regardless of distance. Set it to
+`0` to disable. It has no effect under `knn`, which cannot strand a node.
+
+Set `--disable_ww` / `--disable_wp` to ablate those edge types; PW and PP are
+always active.
+
+> Configs written before the radius/KNN split recorded a three-valued
+> `dynamic_edge_policy` (`auto`, `radius`, `knn_if_isolated`). All three built a
+> radius graph, so they load and map to `radius`; whether stranded waters are
+> rescued is now `--knn_fallback_k`'s job.
+
 ## Embedding Generation
 
 For `esm` and `slae` encoder types, you must precompute embeddings before training or inference.
@@ -272,6 +303,11 @@ To resume training from a checkpoint, you can load the model weights and optimiz
 | `--scheduler` | `cosine` | LR scheduler: `cosine`, `step`, or `none` |
 | `--warmup_steps` | `0` | Linear warmup steps |
 | `--processed_dir` | `~/flow_cache/` | Cache directory for preprocessed data |
+| `--dynamic_edge_policy` | `radius` | How water-touching edges are built: `radius` or `knn` (see [Edge Construction](#edge-construction)) |
+| `--cutoff` | `8.0` | Distance cutoff in Å for radius edges |
+| `--knn_fallback_k` | `8` | Nearest neighbours attached to waters stranded by the radius query; `0` disables |
+| `--disable_ww` | `false` | Ablate water→water edges |
+| `--disable_wp` | `false` | Ablate water→protein edges |
 | `--include_mates` | `false` | Include symmetry mate atoms as protein nodes |
 | `--include_ligands` | `true` | Include ligand/ion/cofactor/nucleic acid heavy atoms as protein nodes. Negate with `--no-include_ligands` |
 | `--save_dir` | `../flow_checkpoints` | Directory to save checkpoints |
