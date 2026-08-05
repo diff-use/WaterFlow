@@ -393,8 +393,8 @@ class TestProteinWaterUpdate:
         assert updater.rescue_isolated
 
     def test_plain_radius_does_not_rescue(self):
-        """local_flow ran the rescue only under knn_if_isolated, so a positive
-        knn_fallback_k must not switch it on by itself."""
+        """The rescue belongs to knn_if_isolated, so a positive knn_fallback_k
+        must not switch it on by itself."""
         updater = ProteinWaterUpdate(
             hidden_dims=(128, 16),
             layers=1,
