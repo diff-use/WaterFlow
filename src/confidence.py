@@ -378,12 +378,12 @@ class ConfidenceGVP(nn.Module):
         """
         device = data["protein"].pos.device
 
+        if "water" not in data.node_types or data["water"].num_nodes == 0:
+            return torch.zeros(0, device=device)
+
         s_all, v_all, pp_edge_attr = self.encoder(data)
         encoder_input = (s_all, v_all) if self.encoder.output_dims[1] > 0 else s_all
         s_p_latent, v_p_latent = self.encoder_to_flow(encoder_input)
-
-        if "water" not in data.node_types or data["water"].num_nodes == 0:
-            return torch.zeros(0, device=device)
 
         s_p = self.protein_scalar_encoder(s_p_latent)
         s_w = self.water_scalar_encoder(data["water"].x)
