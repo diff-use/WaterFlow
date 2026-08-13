@@ -7,7 +7,7 @@ from torch_geometric.data import HeteroData
 
 from src.confidence import smootherstep_target
 from src.confidence_dataset import _oxygen_features, ConfidenceDataset
-from src.constants import EDGE_PP, NUM_RBF
+from src.constants import EDGE_PP, ELEM_IDX, NUM_RBF
 from src.dataset import element_onehot
 
 
@@ -44,7 +44,7 @@ class _FakeFlowDataset:
             gt = torch.randn(self._n_gt, 3)
         data["water"].pos = gt
         data["water"].x = F.one_hot(
-            torch.full((gt.size(0),), 2), num_classes=16
+            torch.full((gt.size(0),), ELEM_IDX["O"]), num_classes=16
         ).float()
         data["water"].num_nodes = gt.size(0)
 
@@ -74,7 +74,7 @@ class TestConfidenceDataset:
         # candidates became the scored water nodes
         assert sample["water"].num_nodes == 3
         assert torch.equal(sample["water"].pos, cand)
-        assert (sample["water"].x[:, 2] == 1.0).all()  # oxygen one-hot
+        assert (sample["water"].x[:, ELEM_IDX["O"]] == 1.0).all()  # oxygen one-hot
         assert torch.equal(sample["water"].gt_pos, gt)
 
         # target on the fly: candidate on GT -> ~1; far candidate -> ~0
@@ -124,6 +124,16 @@ class TestConfidenceDataset:
         flow = _FakeFlowDataset(["k"])
         with pytest.raises(FileNotFoundError):
             ConfidenceDataset(flow, candidate_dir=tmp_path / "missing")
+
+    def test_invalid_parameters_raise(self, tmp_path):
+        flow = _FakeFlowDataset(["k"])
+        _write_candidate(tmp_path / "k.pt", torch.randn(2, 3))
+        with pytest.raises(ValueError):
+            ConfidenceDataset(flow, candidate_dir=tmp_path, r_in=1.5, r_out=0.5)
+        with pytest.raises(ValueError):
+            ConfidenceDataset(flow, candidate_dir=tmp_path, accept_radius=-1.0)
+        with pytest.raises(ValueError):
+            ConfidenceDataset(flow, candidate_dir=tmp_path, max_candidates=-3)
 
     def test_no_candidates_at_all_raises(self, tmp_path):
         flow = _FakeFlowDataset(["k"])
@@ -185,8 +195,13 @@ class TestConfidenceDataset:
         rows = {tuple(r.tolist()) for r in sample["water"].pos}
         assert rows.issubset({tuple(r.tolist()) for r in cand})
 
-        # a fresh draw each epoch, so repeated reads differ
-        assert not torch.equal(ds[0]["water"].pos, ds[0]["water"].pos)
+        # A fresh draw each epoch: pin the RNG so the two reads are known to
+        # subsample differently (an unseeded pair could collide, rarely).
+        torch.manual_seed(0)
+        first = ds[0]["water"].pos
+        torch.manual_seed(1)
+        second = ds[0]["water"].pos
+        assert not torch.equal(first, second)
 
     def test_max_candidates_above_the_cloud_is_a_no_op(self, tmp_path):
         gt = torch.tensor([[0.0, 0.0, 0.0]])

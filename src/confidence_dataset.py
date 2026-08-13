@@ -102,6 +102,12 @@ class ConfidenceDataset(Dataset):
         self.hard_label = bool(hard_label)
         self.accept_radius = float(accept_radius)
         self.max_candidates = max_candidates
+        if self.r_out <= self.r_in:
+            raise ValueError("r_out must exceed r_in.")
+        if self.accept_radius < 0:
+            raise ValueError("accept_radius must be non-negative.")
+        if self.max_candidates is not None and self.max_candidates < 0:
+            raise ValueError("max_candidates must be non-negative.")
 
         # Map each flow-dataset index to its candidate file (cheap existence
         # checks via the entries list).
