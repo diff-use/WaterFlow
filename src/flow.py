@@ -235,7 +235,8 @@ def build_dynamic_edges(
     Args:
         src_pos: (N_src, 3) source node positions.
         dst_pos: (N_dst, 3) destination node positions.
-        policy: One of DYNAMIC_EDGE_POLICIES.
+        policy: "radius" or "knn". ("knn_if_isolated" is not handled here;
+            ProteinWaterUpdate splits it into a "radius" call plus a rescue pass.)
         k: Nearest neighbours per destination, used when policy is "knn".
         r: Distance cutoff in Angstroms, used when policy is "radius".
         max_neighbors: Per-source cap on radius results.
@@ -495,7 +496,7 @@ class ProteinWaterUpdate(nn.Module):
         pos_p = data["protein"].pos
         pos_w = data["water"].pos
 
-        # Only protein-water edges get the extra pass; waters keep protein context anyway.
+        # Protein-water and water-protein edges get the extra pass; water-water does not.
         rescue = self.rescue_isolated
 
         # protein -> water (water is the destination, so it is row 1)

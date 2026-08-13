@@ -440,6 +440,7 @@ def main():
     flow_matcher = FlowMatcher(
         model=model,
         p_self_cond=config.get("p_self_cond", 0.5),
+        sampling_strategy=config.get("sampling_strategy", "uniform_ball"),
     )
 
     # Load dataset
