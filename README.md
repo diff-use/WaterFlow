@@ -234,25 +234,25 @@ construction, so training and inference always agree:
 
 | `--dynamic_edge_policy` | Behaviour |
 |-------------------------|-----------|
-| `radius` (default) | Connect every pair within `--cutoff`, capped at `--max_neighbors` per source |
+| `auto` (default) | Resolves off the prior: `radius` under `uniform_ball`, `knn_if_isolated` under `scaled_gaussian` |
+| `radius` | Connect every pair within `--cutoff`, capped at `--max_neighbors` per source |
 | `knn` | Connect a fixed number of nearest neighbours (`--k_pw`, `--k_ww`, `--k_wp`) |
+| `knn_if_isolated` | A `radius` graph plus a KNN rescue for any node the cutoff stranded |
 
-The two differ in which side the neighbour budget applies to. KNN queries *per
-destination*, so every destination is guaranteed edges but a source may have
-none — coverage checks must read the destination row. Radius guarantees nothing:
-a water with no protein atom inside `--cutoff` gets no PW edges at all.
+`radius` and `knn` differ in which side the neighbour budget applies to. KNN
+queries *per destination*, so every destination is guaranteed edges but a source
+may have none — coverage checks must read the destination row. Radius guarantees
+nothing: a water with no protein atom inside `--cutoff` gets no PW edges at all.
 
-`--knn_fallback_k` repairs that. Under `radius`, any water the query stranded is
-reconnected to that many nearest protein atoms regardless of distance. Set it to
-`0` to disable. It has no effect under `knn`, which cannot strand a node.
+`knn_if_isolated` repairs that: any water the radius query stranded is
+reconnected to its `--knn_fallback_k` nearest protein atoms regardless of
+distance (`0` disables the rescue). Plain `radius` does *not* rescue, and the
+flag has no effect under `knn`, which cannot strand a node. `auto` picks
+`knn_if_isolated` for `scaled_gaussian` precisely because Gaussian samples can
+land outside every cutoff, whereas uniform-ball samples cannot.
 
 Set `--disable_ww` / `--disable_wp` to ablate those edge types; PW and PP are
 always active.
-
-> Configs written before the radius/KNN split recorded a three-valued
-> `dynamic_edge_policy` (`auto`, `radius`, `knn_if_isolated`). All three built a
-> radius graph, so they load and map to `radius`; whether stranded waters are
-> rescued is now `--knn_fallback_k`'s job.
 
 ## Embedding Generation
 
@@ -327,9 +327,10 @@ To resume training from a checkpoint, you can load the model weights and optimiz
 | `--scheduler` | `cosine` | LR scheduler: `cosine`, `step`, or `none` |
 | `--warmup_steps` | `0` | Linear warmup steps |
 | `--processed_dir` | `~/flow_cache/` | Cache directory for preprocessed data |
-| `--dynamic_edge_policy` | `radius` | How water-touching edges are built: `radius` or `knn` (see [Edge Construction](#edge-construction)) |
+| `--sampling_strategy` | `uniform_ball` | Flow prior: `uniform_ball` or `scaled_gaussian`; also resolves `--dynamic_edge_policy auto` |
+| `--dynamic_edge_policy` | `auto` | How water-touching edges are built: `auto`, `radius`, `knn`, or `knn_if_isolated` (see [Edge Construction](#edge-construction)) |
 | `--cutoff` | `8.0` | Distance cutoff in Å for radius edges |
-| `--knn_fallback_k` | `8` | Nearest neighbours attached to waters stranded by the radius query; `0` disables |
+| `--knn_fallback_k` | `8` | Nearest neighbours attached to waters stranded by the radius query under `knn_if_isolated`; `0` disables |
 | `--disable_ww` | `false` | Ablate water→water edges |
 | `--disable_wp` | `false` | Ablate water→protein edges |
 | `--include_mates` | `false` | Include symmetry mate atoms as protein nodes |

@@ -226,6 +226,18 @@ def parse_args():
         default=0.1,
         help="Dropout rate for GVP layers (default: 0.1)",
     )
+    # flow-matching prior
+    p.add_argument(
+        "--sampling_strategy",
+        type=str,
+        default="uniform_ball",
+        choices=["uniform_ball", "scaled_gaussian"],
+        help=(
+            "Source distribution for the flow prior. Also resolves "
+            "--dynamic_edge_policy auto (default: uniform_ball)"
+        ),
+    )
+
     # edge construction
     p.add_argument(
         "--dynamic_edge_policy",
@@ -1108,6 +1120,7 @@ def main():
     flow_matcher = FlowMatcher(
         model=model,
         p_self_cond=args.p_self_cond,
+        sampling_strategy=args.sampling_strategy,
         use_distortion=args.use_distortion,
         p_distort=args.p_distort,
         t_distort=args.t_distort,
