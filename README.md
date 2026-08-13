@@ -113,14 +113,18 @@ Preprocessed data is cached under `--processed_dir` in a three-layer architectur
 <processed_dir>/
 ├── geometry/              # Graph structures; see cache directory naming below
 │   └── <pdb_id>_final.pt
-│       - protein_pos: centered protein coordinates (N, 3)
+│       - protein_pos: centered node coordinates (N, 3)
 │       - protein_x: element one-hot encoding (N, 16)
 │       - protein_res_idx: residue indices for grouping
 │       - is_ligand: bool mask marking the ligand atoms (N,)
 │       - is_mate: bool mask marking the symmetry-mate atoms (N,)
 │       - emb_res_idx: embedding row per atom; -1 means no row (N,)
 │       - water_pos, water_x: water coordinates and features
-│       - num_asu_protein: ASU atom count (mate boundary metadata)
+│       - num_asu_protein: ASU protein atom count (mate boundary metadata)
+│       # The protein_* names predate mates and ligands: N is the total node
+│       # count and these arrays hold every node, not just protein atoms (same
+│       # for the data["protein"] node type). Select blocks with the masks.
+│       #
 │       # Node order is [ASU protein | mate protein | ASU ligand | mate ligand],
 │       # so the two masks recover every block:
 │       #   ASU protein  = ~is_mate & ~is_ligand    (== the first num_asu_protein)
@@ -375,6 +379,13 @@ uv run python -m scripts.inference \
 | `--threshold` | `1.0` | Distance threshold for precision/recall (A) |
 | `--water_ratio` | `None` | Sample `num_residues * ratio` waters (if not set, uses ground truth count) |
 | `--use_sc` | `false` | Use self-conditioning during integration |
+
+> **`--water_ratio` counts mate residues too.** `num_residues` covers ASU *and* mate
+> residues, so `--include_mates` emits ~1.7x more waters at the same ratio (~440 vs
+> ~263 particles at ratio 1, against ~238 true waters). Two runs share a sampling
+> budget only if their mate settings match; compare density-sensitive metrics at
+> parity, not at equal ratio. `--include_mates` is inherited from the training config
+> when the flag is absent.
 
 ### Output Structure
 

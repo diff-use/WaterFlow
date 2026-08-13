@@ -168,8 +168,10 @@ def parse_args():
         "--water_ratio",
         type=float,
         default=None,
-        help="Sample num_residues * water_ratio waters instead of using ground truth count. "
-        "E.g., --water_ratio 0.5 samples 50 waters for a 100-residue protein.",
+        help="Sample num_residues * water_ratio waters instead of using ground truth "
+        "count. num_residues counts ASU and symmetry-mate residues, so with "
+        "--include_mates the same ratio yields ~1.7x more waters than without: two "
+        "runs share a sampling budget only if their mate settings match.",
     )
 
     p.add_argument(

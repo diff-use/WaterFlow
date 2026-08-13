@@ -14,6 +14,7 @@ import copy
 import numpy as np
 import torch
 import torch.nn.functional as F
+from loguru import logger
 from torch import nn, Tensor
 from torch_geometric.data import Batch, HeteroData
 from torch_geometric.nn import knn
@@ -51,6 +52,7 @@ def _batch_from_counts(num_waters: Tensor, device: torch.device) -> Tensor:
     )
 
 
+
 def sample_waters_uniform_ball(
     protein_pos: Tensor,
     batch_p: Tensor,
@@ -77,7 +79,8 @@ def sample_waters_uniform_ball(
         anchor_mask: Optional (N_protein,) bool selecting eligible anchors. Used to
             anchor on ASU atoms only, so the prior spawns where the targets live
             instead of dispersing onto symmetry mates that OT must then transport
-            back. Ignored if it would leave a water-requesting graph with no anchor.
+            back. Every structure keeps >=1 ASU atom, so the mask never starves a
+            graph; if it somehow does, the batch anchors on all atoms and warns.
 
     Returns:
         water_pos: (N_water, 3) sampled positions, one per entry of batch_w
@@ -102,12 +105,21 @@ def sample_waters_uniform_ball(
     if batch_p.numel() > 0:
         num_graphs = max(num_graphs, int(batch_p.max().item()) + 1)
 
-    # Drop to the eligible anchors
+    protein_pos = protein_pos.to(device)
+
+    # Drop to the eligible anchors (ASU-only). Skip the mask, rather than starve a
+    # graph, if it would leave a water-requesting graph with no anchor -- an
+    # invariant violation the dataset should never produce, so warn if it happens.
     if anchor_mask is not None:
         eligible = anchor_mask.to(device).bool()
         counts = torch.bincount(batch_p[eligible], minlength=num_graphs)
-        if not (counts[batch_w] == 0).any():
-            protein_pos = protein_pos.to(device)[eligible]
+        if (counts[batch_w] == 0).any():
+            logger.warning(
+                "sample_waters_uniform_ball: anchor mask leaves a water-requesting "
+                "graph with no anchor; anchoring the batch on all protein atoms."
+            )
+        else:
+            protein_pos = protein_pos[eligible]
             batch_p = batch_p[eligible]
 
     # per-graph protein atom counts and cumulative offsets
@@ -136,7 +148,7 @@ def sample_waters_uniform_ball(
     # pick a random protein atom per water (uniform with replacement)
     graph_offsets = offsets[batch_w]
     local_idx = (torch.rand(total_waters, device=device) * graph_sizes.float()).long()
-    anchors = protein_pos.to(device)[graph_offsets + local_idx]
+    anchors = protein_pos[graph_offsets + local_idx]
 
     # uniform direction on the unit sphere
     direction = torch.randn(total_waters, 3, device=device, dtype=protein_pos.dtype)
@@ -719,6 +731,20 @@ class FlowMatcher:
             return 0
         return int(batch_p.max().item()) + 1
 
+    @staticmethod
+    def _asu_mask(data: HeteroData | Batch) -> Tensor | None:
+        """
+        Mask over protein nodes selecting ASU (non-mate) atoms, or None when the
+        batch carries no mate annotation.
+
+        No ``.any()`` short-circuit: it would force a host sync every step, and both
+        consumers treat an all-True mask as a no-op.
+        """
+        is_mate = getattr(data["protein"], "is_mate", None)
+        if is_mate is None:
+            return None
+        return ~is_mate.bool()
+
     def _sample_waters(
         self,
         batch_data: HeteroData | Batch,
@@ -727,24 +753,23 @@ class FlowMatcher:
     ) -> Tensor:
         """Dispatch to the configured sampling strategy, sampling one water per
         entry of batch_w and returning them in that order."""
+        # Targets are ASU-only, so mate atoms disperse the prior (uniform_ball) and
+        # inflate its scale (scaled_gaussian). No mates -> no mask -> unchanged.
+        asu_mask = self._asu_mask(batch_data)
+
         if self.sampling_strategy == "uniform_ball":
-            # With crystal mates in the graph, anchor on ASU atoms only: the
-            # targets are ASU-only, so mate anchors just disperse the prior.
-            # Runs without mates pass no mask and are unchanged.
-            is_mate = getattr(batch_data["protein"], "is_mate", None)
-            anchor_mask = (
-                ~is_mate.bool() if is_mate is not None and bool(is_mate.any()) else None
-            )
             return sample_waters_uniform_ball(
                 protein_pos=batch_data["protein"].pos,
                 batch_p=batch_data["protein"].batch,
                 batch_w=batch_w,
                 cutoff=self.graph_cutoff,
                 device=device,
-                anchor_mask=anchor_mask,
+                anchor_mask=asu_mask,
             )
         # scaled_gaussian
-        sigma_per_graph = self.compute_sigma_per_graph(batch_data, device)
+        sigma_per_graph = self.compute_sigma_per_graph(
+            batch_data, device, node_mask=asu_mask
+        )
         return sample_waters_scaled_gaussian(
             batch_w=batch_w,
             sigma_per_graph=sigma_per_graph,
@@ -770,16 +795,30 @@ class FlowMatcher:
 
         Returns:
             Scalar sigma value (standard deviation across all protein coordinates)
+
+        Note:
+            Diagnostic only, no production caller, and does not exclude mates.
+            Training and inference use compute_sigma_per_graph, which does.
         """
         pos = data["protein"].pos
         return float(pos.std().item())
 
     @staticmethod
     def compute_sigma_per_graph(
-        data: HeteroData | Batch, device: torch.device
+        data: HeteroData | Batch,
+        device: torch.device,
+        node_mask: Tensor | None = None,
     ) -> torch.Tensor:
         """
         Compute sigma (std of protein coordinates) per graph in a batch.
+
+        Args:
+            data: Batch carrying protein positions and a protein batch vector
+            device: Unused for the computation; kept for call-site symmetry
+            node_mask: Optional (N_protein,) bool selecting the atoms that define
+                the scale. Mates sit far from the ASU, so counting them inflates
+                sigma and pushes the prior out past the targets. Skipped for the
+                whole batch (with a warning) if it would empty any graph.
 
         Returns:
             sigma: (num_graphs,) tensor of sigma values per graph
@@ -789,13 +828,29 @@ class FlowMatcher:
         num_graphs = FlowMatcher._num_graphs(data)
 
         # an empty graph would otherwise shorten the output or yield a degenerate
-        # sigma that silently places its waters at the origin
+        # sigma that silently places its waters at the origin. Checked against the
+        # unmasked atoms so the error keeps its original meaning.
         empty = torch.bincount(batch_p, minlength=num_graphs) == 0
         if empty.any():
             raise ValueError(
                 f"Cannot compute sigma for graph(s) {empty.nonzero().flatten().tolist()}: "
                 "they have zero protein atoms."
             )
+
+        # Restrict to the masked atoms (ASU-only). Skip the mask, rather than yield
+        # a degenerate sigma, if it would leave a graph with no atoms -- which the
+        # dataset should never produce, so warn if it happens.
+        if node_mask is not None:
+            eligible = node_mask.to(pos.device).bool()
+            counts = torch.bincount(batch_p[eligible], minlength=num_graphs)
+            if (counts == 0).any():
+                logger.warning(
+                    "compute_sigma_per_graph: node mask leaves a graph with no "
+                    "atoms; computing sigma over all protein atoms."
+                )
+            else:
+                pos = pos[eligible]
+                batch_p = batch_p[eligible]
 
         # Var(X) = E[X^2] - E[X]^2
         mean_pos = scatter_mean(pos, batch_p, dim=0, dim_size=num_graphs)
@@ -848,7 +903,10 @@ class FlowMatcher:
         batch_w = batch["water"].batch
         num_graphs = self._num_graphs(batch)
 
-        sigma_per_graph = self.compute_sigma_per_graph(batch, device)
+        # same restriction the sampler uses, so the logged sigma matches it
+        sigma_per_graph = self.compute_sigma_per_graph(
+            batch, device, node_mask=self._asu_mask(batch)
+        )
         # sampling against the batch's own water order keeps x0 aligned with x1, so
         # ot_coupling's per-graph mask selects the same nodes from both
         x0 = self._sample_waters(batch, batch_w, device)

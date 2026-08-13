@@ -165,8 +165,12 @@ def get_crystal_contacts_pymol(
             return coords if coords is not None else np.zeros((0, 3), dtype=float)
 
         # Whole protein-mate residues with any atom within cutoff of the ASU.
+        # `not hydro` last: byres would otherwise re-add the residue's hydrogens,
+        # and mates must stay heavy-atom-only like the ASU.
         cmd.select(
-            "iface_prot", f"byres ((sym* and polymer.protein) within {cutoff} of {obj})"
+            "iface_prot",
+            f"(byres ((sym* and polymer.protein) within {cutoff} of {obj})) "
+            f"and not hydro",
         )
         mate_coords = _coords("iface_prot")
         mate_atoms = cmd.get_model("iface_prot", state=1).atom
@@ -176,8 +180,8 @@ def get_crystal_contacts_pymol(
         if include_ligands:
             cmd.select(
                 "iface_lig",
-                f"byres ((sym* and (not polymer.protein) and (not solvent)) "
-                f"within {cutoff} of {obj})",
+                f"(byres ((sym* and (not polymer.protein) and (not solvent)) "
+                f"within {cutoff} of {obj})) and not hydro",
             )
             mate_ligand_coords = _coords("iface_lig")
             mate_ligand_atoms = cmd.get_model("iface_lig", state=1).atom
@@ -246,6 +250,10 @@ def dedup_mate_atoms(
     maps onto itself, and one residue can be reached through two operators. Left
     alone each becomes an independent node, giving duplicates joined by ~0 A
     edges -- and, for a target water on a special position, a label leak.
+
+    Per atom, unlike `dedup_mate_ligands_by_residue`: a special position is an
+    atom-level accident, so only the coincident atom is dropped. The self sweep
+    also catches mates coincident with each other, which the reference tree cannot.
 
     Args:
         mate_coords: (N, 3) mate atom coordinates, uncentered.
@@ -1114,6 +1122,14 @@ class ProteinWaterDataset(Dataset):
                 )
             return
 
+        # Warn before writing too: stamping pre-existing entries labels them with
+        # settings they were never checked against, and later runs trust the label.
+        if any(self.geometry_dir.glob("*.pt")):
+            logger.warning(
+                f"{self.geometry_dir} has no {FILTER_META_FILENAME}; the settings "
+                "its entries were built with cannot be verified."
+            )
+
         if write:
             self.geometry_dir.mkdir(parents=True, exist_ok=True)
             # Written through a temp file: cache builds fan out over processes,
@@ -1122,11 +1138,6 @@ class ProteinWaterDataset(Dataset):
             with open(tmp_path, "w") as f:
                 json.dump(current, f, indent=2)
             tmp_path.replace(meta_path)
-        elif any(self.geometry_dir.glob("*.pt")):
-            logger.warning(
-                f"{self.geometry_dir} has no {FILTER_META_FILENAME}; the settings "
-                "its entries were built with cannot be verified."
-            )
 
     def _preprocess_all(self):
         """
@@ -1340,10 +1351,11 @@ class ProteinWaterDataset(Dataset):
         # lines up with the stored ESM rows.
         asu_reskey_to_residx: dict[tuple[str, int, str], int] = {}
         for res_i, start in enumerate(bts.get_residue_starts(sanitized_for_idx)):
+            # ins_code already normalized in place above
             key = (
                 str(sanitized_for_idx.chain_id[start]).strip(),
                 int(sanitized_for_idx.res_id[start]),
-                normalize_ins_code(sanitized_for_idx.ins_code[start]),
+                str(sanitized_for_idx.ins_code[start]),
             )
             asu_reskey_to_residx.setdefault(key, res_i)
 
@@ -1402,7 +1414,10 @@ class ProteinWaterDataset(Dataset):
                 mate_pos = torch.tensor(mate_coords, dtype=torch.float32) - center
                 mate_x = element_onehot([a.symbol.upper() for a in mate_atoms])
 
-                # compute mate residue indices (group atoms by actual residue)
+                # Group mate atoms by residue. The key omits the symmetry-object id
+                # (atom.model), so two images of one residue share a group. Harmless
+                # today; add atom.model before enabling GVPEncoder's pool_residue,
+                # which would otherwise merge the images into one residue.
                 mate_residue_keys = [(a.chain, a.resi) for a in mate_atoms]
                 unique_mate_res = list(dict.fromkeys(mate_residue_keys))  # keeps order
                 mate_res_map = {k: i for i, k in enumerate(unique_mate_res)}
@@ -1410,9 +1425,12 @@ class ProteinWaterDataset(Dataset):
                     [mate_res_map[k] for k in mate_residue_keys], dtype=torch.long
                 )
 
-                # A mate keeps its source residue's (chain, resi) and the embedding
-                # is coordinate-free, so the two share one row. -1 means no match,
-                # which reads as a zero embedding.
+                # A mate inherits its ASU residue's ESM row via (chain, resi);
+                # embeddings are coordinate-free, so image and source share it. -1
+                # (no match) reads as a zero embedding: the atom keeps geometry and
+                # element, losing only its sequence signal, so a miss warns rather
+                # than raises. Misses come from PyMOL's polymer.protein admitting a
+                # residue biotite dropped, or an unparseable resi.
                 mate_emb_idx = []
                 for atom in mate_atoms:
                     parsed = _parse_pdb_resi(atom.resi)

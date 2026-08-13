@@ -372,6 +372,36 @@ class TestDedupMateAtoms:
         assert out_atoms == [first]
         np.testing.assert_allclose(out_coords[0], [0.0, 0.0, 0.0])
 
+    @pytest.mark.integration
+    def test_real_structure_drops_special_position_atoms(self, pdb_8dzt):
+        """8dzt is P 61: its screw axis maps real atoms onto the ASU, so the dedup
+        genuinely fires here rather than on hand-placed coordinates."""
+        from scipy.spatial import cKDTree
+
+        protein_atoms, water_atoms, ligand_atoms = parse_asu_with_biotite(pdb_8dzt)
+        crystal = get_crystal_contacts_pymol(
+            str(pdb_8dzt), cutoff=8.0, include_ligands=True
+        )
+        reference = np.concatenate(
+            [protein_atoms.coord, water_atoms.coord, ligand_atoms.coord], axis=0
+        )
+
+        kept_coords, kept_atoms = dedup_mate_atoms(
+            crystal["mate_coords"], crystal["mate_atoms"], reference, tol=0.3
+        )
+
+        n_in = crystal["mate_coords"].shape[0]
+        assert 0 < kept_coords.shape[0] < n_in, (
+            "expected a real structure to have coincident mate atoms to drop"
+        )
+        assert len(kept_atoms) == kept_coords.shape[0]
+        # nothing coincident with the ASU survives: that is the label-leak guard
+        assert (cKDTree(reference).query(kept_coords, k=1)[0] >= 0.3).all()
+        # ...and no two survivors are coincident with each other either
+        assert (
+            cKDTree(kept_coords).query(kept_coords, k=2)[0][:, 1] >= 0.3
+        ).all()
+
 
 class _FakeLigandAtom:
     """Stand-in for a PyMOL atom object with the fields the dedup reads."""
@@ -451,6 +481,66 @@ class TestDedupMateLigandsByResidue:
 
         assert out_coords.shape[0] == 1
         np.testing.assert_allclose(out_coords[0], [20.0, 0.0, 0.0])
+
+    @pytest.mark.integration
+    def test_real_mate_ligands_are_kept_or_dropped_whole(self, pdb_4h0b):
+        """Real mate ligands from 4h0b, judged as entities.
+
+        No fixture puts a ligand on a special position, so against the true ASU
+        reference nothing drops: every mate ligand here is a genuine neighbour-cell
+        copy. Referencing one entity against itself builds the drop case from real
+        atoms -- it goes whole, and the others are not fragmented.
+        """
+        protein_atoms, water_atoms, ligand_atoms = parse_asu_with_biotite(pdb_4h0b)
+        crystal = get_crystal_contacts_pymol(
+            str(pdb_4h0b), cutoff=8.0, include_ligands=True
+        )
+        lig_coords = crystal["mate_ligand_coords"]
+        lig_atoms = crystal["mate_ligand_atoms"]
+        assert len(lig_atoms) > 0, "4h0b must produce mate ligands to test"
+
+        asu_reference = np.concatenate(
+            [protein_atoms.coord, water_atoms.coord, ligand_atoms.coord], axis=0
+        )
+        kept, kept_atoms = dedup_mate_ligands_by_residue(
+            lig_coords, lig_atoms, asu_reference, tol=0.3
+        )
+        assert kept.shape[0] == lig_coords.shape[0], (
+            "genuine neighbour-cell ligands must all survive the ASU reference"
+        )
+
+        # now make one entity a symmetry image by referencing it against itself
+        groups = {}
+        for i, atom in enumerate(lig_atoms):
+            groups.setdefault(
+                (atom.chain, atom.resi, getattr(atom, "segi", "")), []
+            ).append(i)
+        assert len(groups) > 1, "need more than one entity to show the others survive"
+        target_key, target_idx = next(iter(groups.items()))
+
+        kept, kept_atoms = dedup_mate_ligands_by_residue(
+            lig_coords,
+            lig_atoms,
+            np.concatenate([asu_reference, lig_coords[target_idx]], axis=0),
+            tol=0.3,
+        )
+
+        # the imaged entity went whole, and nothing else went with it
+        assert kept.shape[0] == lig_coords.shape[0] - len(target_idx)
+        surviving = {
+            (a.chain, a.resi, getattr(a, "segi", "")) for a in kept_atoms
+        }
+        assert target_key not in surviving
+        assert surviving == set(groups) - {target_key}
+        # every survivor kept all of its atoms: entities are never fragmented
+        for key, idxs in groups.items():
+            if key == target_key:
+                continue
+            assert sum(
+                1
+                for a in kept_atoms
+                if (a.chain, a.resi, getattr(a, "segi", "")) == key
+            ) == len(idxs)
 
 
 @pytest.mark.unit
@@ -2900,9 +2990,8 @@ class TestSymmetryMateHandling:
         )
 
     def test_mate_provenance_fields(self, single_pdb_list_file, tmp_path, pdb_base_dir):
-        """is_mate splits ASU from mate at num_asu_protein, and the mate atoms
-        behind it carry the embedding row of the ASU residue they image, not the
-        -1 that reads as a zero row."""
+        """is_mate splits ASU from mate at num_asu_protein, and the mate atoms carry
+        the row of the ASU residue they image, not the -1 that reads as zero."""
         dataset = self._mate_dataset(single_pdb_list_file, tmp_path, pdb_base_dir)
         data = dataset[0]
         cached = torch.load(
@@ -2914,13 +3003,95 @@ class TestSymmetryMateHandling:
         assert is_mate.shape == emb_res_idx.shape == (data["protein"].num_nodes,)
         assert not is_mate[:num_asu].any()
         assert is_mate.sum().item() > 0
-        # Ligands ride behind the mates, so the mate block is contiguous but need
-        # not run to the end; every marked node is past the ASU.
-        assert is_mate[num_asu:][: is_mate.sum().item()].all()
 
-        mate_protein = is_mate & ~cached["is_ligand"]
-        assert (emb_res_idx[mate_protein] >= 0).all()
-        assert (emb_res_idx[mate_protein] < data["protein"].num_protein_residues).all()
+        # is_mate is not contiguous: the ASU ligand block sits between its two True
+        # runs. The mate *protein* block is, and it starts at num_asu.
+        mate_protein = (is_mate & ~cached["is_ligand"]).nonzero().flatten()
+        assert mate_protein.numel() > 0
+        assert mate_protein[0].item() == num_asu
+        assert (mate_protein.diff() == 1).all()
+
+        mate_protein_mask = is_mate & ~cached["is_ligand"]
+        assert (emb_res_idx[mate_protein_mask] >= 0).all()
+        assert (
+            emb_res_idx[mate_protein_mask] < data["protein"].num_protein_residues
+        ).all()
+
+    def test_mate_emb_res_idx_equals_its_asu_residue_row(
+        self, single_pdb_list_file, tmp_path, pdb_base_dir
+    ):
+        """Every mate atom points at the exact ESM row of the ASU residue it images,
+        not merely at some row in range: an off-by-one passes a range check but
+        gives every mate the wrong embedding.
+
+        Water filtering is off so the dedup reference, and so the surviving mate
+        atom list, is reproducible atom for atom.
+        """
+        dataset = self._mate_dataset(
+            single_pdb_list_file,
+            tmp_path,
+            pdb_base_dir,
+            filter_by_distance=False,
+            filter_by_edia=False,
+            filter_by_bfactor=False,
+        )
+        data = dataset[0]
+        cached = torch.load(
+            tmp_path / "geometry_mates" / "6eey_final.pt", weights_only=False
+        )
+
+        pdb_path = Path(pdb_base_dir) / "6eey" / "6eey_final.pdb"
+        protein_atoms, water_atoms, ligand_atoms = parse_asu_with_biotite(pdb_path)
+
+        # rebuild the ASU (chain, res_id, ins_code) -> ESM row map exactly as
+        # _preprocess_one does, off the same sanitized parse
+        sanitized = sanitize_res_names_for_esm(protein_atoms)
+        for i in range(len(sanitized)):
+            sanitized.ins_code[i] = normalize_ins_code(sanitized.ins_code[i])
+        asu_key_to_row = {}
+        for res_i, start in enumerate(bts.get_residue_starts(sanitized)):
+            key = (
+                str(sanitized.chain_id[start]).strip(),
+                int(sanitized.res_id[start]),
+                str(sanitized.ins_code[start]),
+            )
+            asu_key_to_row.setdefault(key, res_i)
+
+        # reproduce the surviving mate atom list, in order
+        crystal = get_crystal_contacts_pymol(
+            str(pdb_path), dataset.cutoff, include_ligands=dataset.include_ligands
+        )
+        water_atoms = water_atoms[
+            match_atoms_to_coords(water_atoms, crystal["asu_coords"])
+        ]
+        reference = [protein_atoms.coord]
+        if len(water_atoms):
+            reference.append(water_atoms.coord)
+        if dataset.include_ligands and len(ligand_atoms) > 0:
+            reference.append(ligand_atoms.coord)
+        _, mate_atoms = dedup_mate_atoms(
+            crystal["mate_coords"],
+            crystal["mate_atoms"],
+            np.concatenate(reference, axis=0),
+        )
+
+        num_asu = data.num_asu_protein_atoms
+        emb_res_idx = cached["emb_res_idx"]
+        mate_protein_count = int((cached["is_mate"] & ~cached["is_ligand"]).sum())
+        assert len(mate_atoms) == mate_protein_count > 0
+
+        expected = []
+        for atom in mate_atoms:
+            parsed = _parse_pdb_resi(atom.resi)
+            assert parsed is not None, f"unparseable mate resi {atom.resi!r}"
+            expected.append(asu_key_to_row[(str(atom.chain).strip(), *parsed)])
+
+        actual = emb_res_idx[num_asu : num_asu + mate_protein_count]
+        assert torch.equal(actual, torch.tensor(expected, dtype=actual.dtype))
+
+        # mates reuse ASU rows rather than introducing rows of their own
+        asu_rows = set(emb_res_idx[:num_asu].tolist())
+        assert set(actual.tolist()) <= asu_rows
 
     def test_no_mates_run_marks_nothing_as_mate(
         self, single_pdb_list_file, tmp_path, pdb_base_dir
@@ -2950,6 +3121,138 @@ class TestSymmetryMateHandling:
             pytest.skip("structure has no waters after filtering")
         nearest = torch.cdist(waters, data["protein"].pos).min(dim=1).values
         assert nearest.min().item() > 0.3
+
+
+@pytest.mark.integration
+class TestMatesWithLigands:
+    """Mates and ligands turned on together, end to end.
+
+    Other mates tests use 6eey (no ligands) and other ligand tests set
+    include_mates=False, so the four-block layout was never exercised on a
+    structure with all four. 4h0b has ligands and crystal contacts.
+    """
+
+    def _dataset(self, tmp_path, pdb_base_dir, **kwargs):
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        list_file = tmp_path / "list.txt"
+        list_file.write_text("4h0b_final\n")
+        return ProteinWaterDataset(
+            pdb_list_file=str(list_file),
+            processed_dir=str(tmp_path / "processed"),
+            base_pdb_dir=str(pdb_base_dir),
+            include_mates=True,
+            include_ligands=True,
+            preprocess=True,
+            # 4h0b ships no EDIA sidecar; this class is about the node layout
+            filter_by_distance=False,
+            filter_by_edia=False,
+            filter_by_bfactor=False,
+            **kwargs,
+        )
+
+    @staticmethod
+    def _blocks(is_mate, is_ligand):
+        return {
+            "asu_protein": ~is_mate & ~is_ligand,
+            "mate_protein": is_mate & ~is_ligand,
+            "asu_ligand": ~is_mate & is_ligand,
+            "mate_ligand": is_mate & is_ligand,
+        }
+
+    def test_four_blocks_appear_in_documented_order(self, tmp_path, pdb_base_dir):
+        """Node order is [ASU protein | mate protein | ASU ligand | mate ligand].
+        Each block is contiguous and they follow one another in that order."""
+        data = self._dataset(tmp_path, pdb_base_dir)[0]
+        cached = torch.load(
+            tmp_path / "processed" / "geometry_mates" / "4h0b_final.pt",
+            weights_only=False,
+        )
+        blocks = self._blocks(data["protein"].is_mate, cached["is_ligand"])
+
+        order = ["asu_protein", "mate_protein", "asu_ligand", "mate_ligand"]
+        spans = []
+        for name in order:
+            idx = blocks[name].nonzero().flatten()
+            assert idx.numel() > 0, f"4h0b should populate the {name} block"
+            assert (idx.diff() == 1).all(), f"{name} block is not contiguous"
+            spans.append((name, idx[0].item(), idx[-1].item()))
+
+        # blocks tile the node range back to back, in the documented order
+        assert spans[0][1] == 0
+        for (_, _, prev_end), (name, start, _) in zip(spans, spans[1:]):
+            assert start == prev_end + 1, f"{name} does not follow the previous block"
+        assert spans[-1][2] == data["protein"].num_nodes - 1
+
+    def test_num_asu_protein_excludes_asu_ligands(self, tmp_path, pdb_base_dir):
+        """num_asu_protein is the ASU *protein* count. ASU ligands sit behind the
+        mates, so counting them here would misalign every SLAE/ESM lookup."""
+        data = self._dataset(tmp_path, pdb_base_dir)[0]
+        cached = torch.load(
+            tmp_path / "processed" / "geometry_mates" / "4h0b_final.pt",
+            weights_only=False,
+        )
+        blocks = self._blocks(data["protein"].is_mate, cached["is_ligand"])
+
+        assert data.num_asu_protein_atoms == int(blocks["asu_protein"].sum())
+        assert int(blocks["asu_ligand"].sum()) > 0
+        assert data.num_asu_protein_atoms < data["protein"].num_nodes
+
+    def test_emb_res_idx_splits_ligands_from_mate_protein(
+        self, tmp_path, pdb_base_dir
+    ):
+        """Ligands carry the -1 sentinel whichever cell they came from; mate protein
+        atoms carry a real ASU row."""
+        data = self._dataset(tmp_path, pdb_base_dir)[0]
+        cached = torch.load(
+            tmp_path / "processed" / "geometry_mates" / "4h0b_final.pt",
+            weights_only=False,
+        )
+        emb_res_idx = cached["emb_res_idx"]
+        blocks = self._blocks(data["protein"].is_mate, cached["is_ligand"])
+
+        assert (emb_res_idx[blocks["asu_ligand"]] == -1).all()
+        assert (emb_res_idx[blocks["mate_ligand"]] == -1).all()
+
+        mate_rows = emb_res_idx[blocks["mate_protein"]]
+        assert (mate_rows >= 0).all()
+        assert (mate_rows < data["protein"].num_protein_residues).all()
+        # mates reuse ASU rows rather than introducing rows of their own
+        assert set(mate_rows.tolist()) <= set(
+            emb_res_idx[blocks["asu_protein"]].tolist()
+        )
+
+    def test_esm_encoder_over_the_real_preprocessing_path(
+        self, tmp_path, pdb_base_dir
+    ):
+        """Other integration tests run GVP, and the ESM coverage is over hand-built
+        graphs. This drives the real preprocessing path with encoder_type='esm'.
+        The ESM cache is synthesised so the broadcast is checkable atom by atom.
+        """
+        # a first pass tells us how many residues the ESM cache must cover
+        probe = self._dataset(tmp_path / "probe", pdb_base_dir)[0]
+        num_residues = int(probe["protein"].num_protein_residues)
+
+        esm_dir = tmp_path / "processed" / "esm"
+        esm_dir.mkdir(parents=True, exist_ok=True)
+        residue_emb = torch.randn(num_residues, ESM_EMBEDDING_DIM)
+        torch.save({"residue_embeddings": residue_emb}, esm_dir / "4h0b_final.pt")
+
+        data = self._dataset(tmp_path, pdb_base_dir, encoder_type="esm")[0]
+        cached = torch.load(
+            tmp_path / "processed" / "geometry_mates" / "4h0b_final.pt",
+            weights_only=False,
+        )
+        emb = data["protein"].embedding
+        emb_res_idx = cached["emb_res_idx"]
+        blocks = self._blocks(data["protein"].is_mate, cached["is_ligand"])
+
+        assert emb.shape == (data["protein"].num_nodes, ESM_EMBEDDING_DIM)
+
+        protein_nodes = blocks["asu_protein"] | blocks["mate_protein"]
+        assert torch.equal(emb[protein_nodes], residue_emb[emb_res_idx[protein_nodes]])
+        # every ligand, ASU or mate, reads as a zero row
+        ligand_nodes = blocks["asu_ligand"] | blocks["mate_ligand"]
+        assert (emb[ligand_nodes] == 0).all()
 
 
 @pytest.mark.unit
@@ -3022,15 +3325,19 @@ class TestFilterMetaSidecar:
         self._dataset(tmp_path, include_mates=True, max_bfactor_zscore=2.0)
         self._dataset(tmp_path, include_mates=False, max_bfactor_zscore=1.5)
 
-    def test_unlabelled_cache_warns(self, tmp_path, warning_log):
-        """An existing directory with no sidecar is usable but unverifiable."""
+    @pytest.mark.parametrize("preprocess", [False, True])
+    def test_unlabelled_cache_warns(self, tmp_path, warning_log, preprocess):
+        """An existing directory with no sidecar is unverifiable whether or not this
+        run also claims it."""
         geometry_dir = tmp_path / "processed" / "geometry_mates"
         geometry_dir.mkdir(parents=True)
         (geometry_dir / "6eey_final.pt").write_bytes(b"cache")
 
-        self._dataset(tmp_path, preprocess=False)
+        self._dataset(tmp_path, preprocess=preprocess)
 
         assert any(FILTER_META_FILENAME in message for message in warning_log)
+        # the writing run still claims the directory; the read-only one must not
+        assert self._meta_path(tmp_path).is_file() is preprocess
 
     def test_empty_directory_does_not_warn(self, tmp_path, warning_log):
         (tmp_path / "processed" / "geometry_mates").mkdir(parents=True)
