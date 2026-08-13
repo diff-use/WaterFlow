@@ -128,7 +128,7 @@ def run_once_on_main(work: Callable[[], None], key: str) -> dist.Store | None:
 
 
 def all_reduce_means(
-    sums: dict[str, float], count: float, device: torch.device
+    sums: dict[str, float], count: int, device: torch.device
 ) -> tuple[dict[str, float], int]:
     """
     Average per-item metric sums across ranks.
