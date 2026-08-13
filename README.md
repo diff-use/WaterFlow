@@ -280,34 +280,24 @@ uv run python -m scripts.train \
 
 ### Multi-GPU Training (DDP)
 
-Launch with `torchrun`. There is no DDP flag — the launcher's `WORLD_SIZE` /
-`RANK` / `LOCAL_RANK` are the only switch, so a run's `config.json` is identical
-whether it used one GPU or eight.
+No DDP flag — `torchrun`'s env vars are the only switch; a plain
+`python -m scripts.train` runs single-GPU as before.
 
 ```bash
 uv run torchrun --nproc_per_node=4 -m scripts.train \
     --train_list splits/train_list_0.95.txt \
     --val_list splits/valid_list_0.05.txt \
     --encoder_type gvp \
-    --batch_size 4
+    --batch_size 4  # per rank -> effective 16
 ```
 
-`--batch_size` is per rank, so the above trains at an effective batch of 16.
-
-| | Behavior across ranks |
-|---|---|
-| Data | `DistributedSampler` gives each rank a disjoint shard, reshuffled per epoch. The last shard is padded, so a few samples are counted twice in epoch metrics |
-| Gradients | All-reduced once per optimizer step, not per accumulation micro-step |
-| Metrics | Train/val/eval sums are all-reduced, so every rank sees identical averages and agrees on the best epoch |
-| Sampling eval | The fixed eval set is strided across ranks and integrated on the unwrapped model |
-| Disk and W&B | Rank 0 only: `config.json`, checkpoints, `train.log`, plots, W&B |
-
-The geometry cache is built before the process group exists, by rank 0 alone,
-with the other ranks blocked on a CPU-side store — so a cold build (which can
-take hours) never counts against an NCCL timeout. A warm cache makes it a no-op.
-
-> Checkpoints hold the unwrapped `state_dict`, so `inference.py` loads a
-> DDP-trained checkpoint with no key rewriting.
+- Each rank trains on a disjoint `DistributedSampler` shard, reshuffled per epoch.
+- Gradients all-reduce once per optimizer step; train/val/eval metrics are
+  all-reduced, so every rank agrees on the best epoch.
+- Rank 0 owns disk and W&B (config, checkpoints, logs). Checkpoints hold the
+  unwrapped `state_dict`, so `inference.py` loads them unchanged.
+- The geometry cache is built by rank 0 before the NCCL group exists,
+  coordinated on a CPU-side store — a cold build can't trip a collective timeout.
 
 ### Resuming from Checkpoints
 

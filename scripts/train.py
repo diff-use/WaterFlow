@@ -19,6 +19,7 @@ Usage:
 """
 
 import argparse
+import contextlib
 import json
 import multiprocessing as mp
 import os
@@ -812,16 +813,10 @@ def train_epoch(
 
         # Suppress the gradient all-reduce on micro-steps that are not followed by
         # an optimizer.step(), keeping comms at one all-reduce per optimizer step.
-        if ddp_is_active() and not _needs_grad_sync(
+        no_sync = ddp_is_active() and not _needs_grad_sync(
             step, len(train_loader), args.grad_accum_steps
-        ):
-            with flow_matcher.model.no_sync():
-                metrics = flow_matcher.training_step(
-                    batch,
-                    use_self_conditioning=args.use_self_cond,
-                    accumulation_steps=args.grad_accum_steps,
-                )
-        else:
+        )
+        with flow_matcher.model.no_sync() if no_sync else contextlib.nullcontext():
             metrics = flow_matcher.training_step(
                 batch,
                 use_self_conditioning=args.use_self_cond,
