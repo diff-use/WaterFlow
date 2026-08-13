@@ -52,7 +52,6 @@ def _batch_from_counts(num_waters: Tensor, device: torch.device) -> Tensor:
     )
 
 
-
 def sample_waters_uniform_ball(
     protein_pos: Tensor,
     batch_p: Tensor,

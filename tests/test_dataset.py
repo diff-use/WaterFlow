@@ -398,9 +398,7 @@ class TestDedupMateAtoms:
         # nothing coincident with the ASU survives: that is the label-leak guard
         assert (cKDTree(reference).query(kept_coords, k=1)[0] >= 0.3).all()
         # ...and no two survivors are coincident with each other either
-        assert (
-            cKDTree(kept_coords).query(kept_coords, k=2)[0][:, 1] >= 0.3
-        ).all()
+        assert (cKDTree(kept_coords).query(kept_coords, k=2)[0][:, 1] >= 0.3).all()
 
 
 class _FakeLigandAtom:
@@ -527,9 +525,7 @@ class TestDedupMateLigandsByResidue:
 
         # the imaged entity went whole, and nothing else went with it
         assert kept.shape[0] == lig_coords.shape[0] - len(target_idx)
-        surviving = {
-            (a.chain, a.resi, getattr(a, "segi", "")) for a in kept_atoms
-        }
+        surviving = {(a.chain, a.resi, getattr(a, "segi", "")) for a in kept_atoms}
         assert target_key not in surviving
         assert surviving == set(groups) - {target_key}
         # every survivor kept all of its atoms: entities are never fragmented
@@ -3197,9 +3193,7 @@ class TestMatesWithLigands:
         assert int(blocks["asu_ligand"].sum()) > 0
         assert data.num_asu_protein_atoms < data["protein"].num_nodes
 
-    def test_emb_res_idx_splits_ligands_from_mate_protein(
-        self, tmp_path, pdb_base_dir
-    ):
+    def test_emb_res_idx_splits_ligands_from_mate_protein(self, tmp_path, pdb_base_dir):
         """Ligands carry the -1 sentinel whichever cell they came from; mate protein
         atoms carry a real ASU row."""
         data = self._dataset(tmp_path, pdb_base_dir)[0]
@@ -3221,9 +3215,7 @@ class TestMatesWithLigands:
             emb_res_idx[blocks["asu_protein"]].tolist()
         )
 
-    def test_esm_encoder_over_the_real_preprocessing_path(
-        self, tmp_path, pdb_base_dir
-    ):
+    def test_esm_encoder_over_the_real_preprocessing_path(self, tmp_path, pdb_base_dir):
         """Other integration tests run GVP, and the ESM coverage is over hand-built
         graphs. This drives the real preprocessing path with encoder_type='esm'.
         The ESM cache is synthesised so the broadcast is checkable atom by atom.

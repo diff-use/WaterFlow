@@ -890,7 +890,12 @@ class TestCrystalMateAwareSampling:
         torch.manual_seed(0)
         data = self._graph(
             torch.tensor(
-                [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [500.0, 0.0, 0.0], [900.0, 0.0, 0.0]],
+                [
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [500.0, 0.0, 0.0],
+                    [900.0, 0.0, 0.0],
+                ],
                 device=device,
             ),
             torch.zeros(4, dtype=torch.long, device=device),
