@@ -12,6 +12,7 @@ WaterFlow/
 │   ├── gvp.py              # Geometric Vector Perceptron layers
 │   ├── gvp_encoder.py      # GVP-based protein encoder
 │   ├── encoder_base.py     # Encoder registry and factory (includes ESM/SLAE)
+│   ├── distributed.py      # DDP helpers (rank discovery, collectives, barriers)
 │   ├── constants.py        # Shared constants (RBF bins, etc.)
 │   └── utils.py            # Metrics, plotting, logging utilities
 ├── scripts/                # Executable scripts
@@ -21,6 +22,7 @@ WaterFlow/
 │   └── generate_slae_embeddings.py  # Precompute SLAE embeddings
 ├── tests/                  # Test suite
 │   ├── test_dataset.py     # Dataset and preprocessing tests
+│   ├── test_distributed.py # DDP helper and cache prebuild tests
 │   ├── test_flow.py        # Flow matching tests
 │   ├── test_encoder.py     # Encoder tests
 │   ├── test_forward.py     # End-to-end forward pass tests
@@ -275,6 +277,37 @@ uv run python -m scripts.train \
     --grad_accum_steps 4 \
     --processed_dir ~/flow_cache/
 ```
+
+### Multi-GPU Training (DDP)
+
+Launch with `torchrun`. There is no DDP flag — the launcher's `WORLD_SIZE` /
+`RANK` / `LOCAL_RANK` are the only switch, so a run's `config.json` is identical
+whether it used one GPU or eight.
+
+```bash
+uv run torchrun --nproc_per_node=4 -m scripts.train \
+    --train_list splits/train_list_0.95.txt \
+    --val_list splits/valid_list_0.05.txt \
+    --encoder_type gvp \
+    --batch_size 4
+```
+
+`--batch_size` is per rank, so the above trains at an effective batch of 16.
+
+| | Behavior across ranks |
+|---|---|
+| Data | `DistributedSampler` gives each rank a disjoint shard, reshuffled per epoch. The last shard is padded, so a few samples are counted twice in epoch metrics |
+| Gradients | All-reduced once per optimizer step, not per accumulation micro-step |
+| Metrics | Train/val/eval sums are all-reduced, so every rank sees identical averages and agrees on the best epoch |
+| Sampling eval | The fixed eval set is strided across ranks and integrated on the unwrapped model |
+| Disk and W&B | Rank 0 only: `config.json`, checkpoints, `train.log`, plots, W&B |
+
+The geometry cache is built before the process group exists, by rank 0 alone,
+with the other ranks blocked on a CPU-side store — so a cold build (which can
+take hours) never counts against an NCCL timeout. A warm cache makes it a no-op.
+
+> Checkpoints hold the unwrapped `state_dict`, so `inference.py` loads a
+> DDP-trained checkpoint with no key rewriting.
 
 ### Resuming from Checkpoints
 

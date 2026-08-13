@@ -907,7 +907,10 @@ class FlowMatcher:
         self.t_distort = t_distort
         self.sigma_distort = sigma_distort
         self.loss_eps = loss_eps
-        self.graph_cutoff = getattr(model, "cutoff", 8.0)
+        # DDP does not forward attribute lookups to the module it wraps, so
+        # reading `cutoff` off the wrapper would silently fall back to the
+        # default and change the water prior's sampling radius under DDP only.
+        self.graph_cutoff = getattr(getattr(model, "module", model), "cutoff", 8.0)
         self.sampling_strategy = sampling_strategy
 
     @staticmethod
