@@ -23,6 +23,7 @@ from tqdm.auto import tqdm
 
 from src.constants import (
     ALL_EDGE_TYPES,
+    DEFAULT_EDGE_CUTOFF,
     EDGE_PP,
     EDGE_PW,
     EDGE_WP,
@@ -126,7 +127,7 @@ def sample_waters_uniform_ball(
     protein_pos: Tensor,
     batch_p: Tensor,
     batch_w: Tensor,
-    cutoff: float = 8.0,
+    cutoff: float = DEFAULT_EDGE_CUTOFF,
     device: torch.device | None = None,
     anchor_mask: Tensor | None = None,
 ) -> Tensor:
@@ -368,7 +369,7 @@ class ProteinWaterUpdate(nn.Module):
         aggr_edges="sum",
         use_dst_feats=True,
         etypes: list[tuple[str, str, str]] | None = None,
-        cutoff: float = 8.0,
+        cutoff: float = DEFAULT_EDGE_CUTOFF,
         max_neighbors: int = 256,
         dynamic_edge_policy: str = "radius",
         sampling_strategy: str = "uniform_ball",
@@ -556,7 +557,13 @@ class ProteinWaterUpdate(nn.Module):
         pos_p = data["protein"].pos
         pos_w = data["water"].pos
 
-        # Protein-water and water-protein edges get the extra pass; water-water does not.
+        # The rescue only ever targets water nodes, so it runs on the two edge
+        # types that connect water to protein: protein->water and water->protein.
+        # The `isolate_axis` differs because water sits on opposite ends of them --
+        # it is the destination of PW (axis 1) and the source of WP (axis 0) -- so
+        # each pass checks the row where the water lives. Water-water is skipped: a
+        # water with no WW neighbour still exchanges messages with protein through
+        # PW/WP, so it is never truly stranded, and WW is context, not a lifeline.
         rescue = self.rescue_isolated
 
         # protein -> water (water is the destination, so it is row 1)
@@ -704,7 +711,7 @@ class FlowWaterGVP(nn.Module):
         n_update_gvps: int = 2,
         vector_gate: bool = True,
         water_input_dim: int = 16,  # 1 hot with oxygen, same as encoder
-        cutoff: float = 8.0,
+        cutoff: float = DEFAULT_EDGE_CUTOFF,
         max_neighbors: int = 256,
         dynamic_edge_policy: str = "radius",
         sampling_strategy: str = "uniform_ball",
@@ -966,7 +973,7 @@ class FlowMatcher:
         self.t_distort = t_distort
         self.sigma_distort = sigma_distort
         self.loss_eps = loss_eps
-        self.graph_cutoff = getattr(model, "cutoff", 8.0)
+        self.graph_cutoff = getattr(model, "cutoff", DEFAULT_EDGE_CUTOFF)
         self.sampling_strategy = sampling_strategy
 
     @staticmethod

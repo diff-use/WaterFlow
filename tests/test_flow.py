@@ -16,6 +16,7 @@ from src.constants import (
     ALL_EDGE_TYPES,
     EDGE_PP,
     EDGE_PW,
+    EDGE_WP,
     EDGE_WW,
     get_active_edge_types,
 )
@@ -450,6 +451,33 @@ class TestProteinWaterUpdate:
             edge_index = updater.build_edges(data)[EDGE_PW]
             connected = torch.zeros(5, dtype=torch.bool, device=device)
             connected[edge_index[1].unique()] = True
+            return int((~connected).sum())
+
+        assert stranded(knn_fallback_k=0) == 1
+        assert stranded(knn_fallback_k=3) == 0
+
+    def test_radius_strands_far_water_on_wp_and_fallback_rescues_it(self, device):
+        """The rescue is symmetric across edge direction. On water->protein the
+        water is the source, so a water parked outside `cutoff` loses its WP edges
+        too; the fallback reconnects it to its nearest protein atoms."""
+        data = HeteroData()
+        data["protein"].pos = torch.randn(10, 3, device=device)
+        data["water"].pos = torch.cat(
+            [torch.randn(4, 3, device=device), torch.full((1, 3), 500.0, device=device)]
+        )
+
+        def stranded(knn_fallback_k):
+            updater = ProteinWaterUpdate(
+                hidden_dims=(32, 4),
+                layers=1,
+                cutoff=8.0,
+                dynamic_edge_policy="knn_if_isolated",
+                knn_fallback_k=knn_fallback_k,
+            )
+            # water is the source of WP, so it lives on row 0.
+            edge_index = updater.build_edges(data)[EDGE_WP]
+            connected = torch.zeros(5, dtype=torch.bool, device=device)
+            connected[edge_index[0].unique()] = True
             return int((~connected).sum())
 
         assert stranded(knn_fallback_k=0) == 1

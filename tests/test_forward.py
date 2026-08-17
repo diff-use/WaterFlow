@@ -263,8 +263,6 @@ def test_training_step_no_nan_tripwire(device):
         encoder=encoder,
         hidden_dims=(64, 8),
         layers=2,
-        k_pw=8,
-        k_ww=8,
     ).to(device)
 
     fm = FlowMatcher(
@@ -331,8 +329,6 @@ def test_forward_with_duplicate_protein_coords_catches_nan(device):
         encoder=encoder,
         hidden_dims=(64, 8),
         layers=2,
-        k_pw=8,
-        k_ww=8,
     ).to(device)
 
     t = torch.tensor([0.5], device=device)
@@ -376,8 +372,6 @@ def test_forward_with_duplicate_protein_coords_localizes_nan(device):
         encoder=encoder,
         hidden_dims=(64, 8),
         layers=2,
-        k_pw=8,
-        k_ww=8,
     ).to(device)
 
     # ---- Pre-check: encoder input edges ----

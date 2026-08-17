@@ -14,6 +14,11 @@ SLAE_EMBEDDING_DIM = 128
 NUM_RBF = 16  # Number of RBF basis functions
 RBF_CUTOFF = 8.0  # Distance cutoff in Angstroms for RBF encoding
 
+# Default radius for dynamic edge construction. Kept equal to RBF_CUTOFF on
+# purpose: an edge longer than RBF_CUTOFF encodes to ~0 under the RBF, so
+# building edges beyond it would feed the message passing near-zero features.
+DEFAULT_EDGE_CUTOFF = RBF_CUTOFF
+
 # Edge type tuples: (src_node_type, edge_name, dst_node_type)
 EDGE_PP = ("protein", "pp", "protein")  # protein -> protein
 EDGE_WW = ("water", "ww", "water")  # water -> water
