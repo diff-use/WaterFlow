@@ -27,7 +27,7 @@ import torch.nn as nn
 from loguru import logger
 from tqdm import tqdm
 
-from src.constants import NUM_RBF
+from src.constants import DEFAULT_EDGE_CUTOFF, NUM_RBF
 from src.dataset import ProteinWaterDataset
 from src.encoder_base import build_encoder
 from src.flow import FlowMatcher, FlowWaterGVP
@@ -168,8 +168,10 @@ def parse_args():
         "--water_ratio",
         type=float,
         default=None,
-        help="Sample num_residues * water_ratio waters instead of using ground truth count. "
-        "E.g., --water_ratio 0.5 samples 50 waters for a 100-residue protein.",
+        help="Sample num_residues * water_ratio waters instead of using ground truth "
+        "count. num_residues counts ASU and symmetry-mate residues, so with "
+        "--include_mates the same ratio yields ~1.7x more waters than without: two "
+        "runs share a sampling budget only if their mate settings match.",
     )
 
     p.add_argument(
@@ -215,10 +217,10 @@ def _extract_dataset_filter_config(config: dict) -> dict:
         "max_clash_fraction": config.get("max_clash_fraction", 0.05),
         "clash_dist": config.get("clash_dist", 2.0),
         "interface_dist_threshold": config.get("interface_dist_threshold", 4.0),
-        "min_water_residue_ratio": config.get("min_water_residue_ratio", 0.6),
+        "min_water_residue_ratio": config.get("min_water_residue_ratio", 0.1),
         "max_protein_dist": config.get("max_protein_dist", 5.0),
         "min_edia": config.get("min_edia", 0.4),
-        "max_bfactor_zscore": config.get("max_bfactor_zscore", 1.5),
+        "max_bfactor_zscore": config.get("max_bfactor_zscore", 2.0),
         "filter_by_distance": config.get("filter_by_distance", True),
         "filter_by_edia": config.get("filter_by_edia", True),
         "filter_by_bfactor": config.get("filter_by_bfactor", True),
@@ -273,7 +275,7 @@ def build_model_from_config(config: dict, device: torch.device) -> nn.Module:
         drop_rate=config.get("drop_rate", 0.1),
         n_message_gvps=config.get("n_message_gvps", 2),
         n_update_gvps=config.get("n_update_gvps", 2),
-        cutoff=config.get("cutoff", 8.0),
+        cutoff=config.get("cutoff", DEFAULT_EDGE_CUTOFF),
         max_neighbors=config.get("max_neighbors", 256),
         dynamic_edge_policy=config.get("dynamic_edge_policy", "radius"),
         # "auto" depends on which prior the run uses, so pass that through.

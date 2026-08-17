@@ -16,6 +16,7 @@ from src.constants import (
     ALL_EDGE_TYPES,
     EDGE_PP,
     EDGE_PW,
+    EDGE_WP,
     EDGE_WW,
     get_active_edge_types,
 )
@@ -30,6 +31,17 @@ from src.flow import (
     sample_waters_uniform_ball,
 )
 from src.gvp_encoder import GVPEncoder, make_gvp_encoder_data, ProteinGVPEncoder
+
+
+@pytest.fixture
+def warning_log():
+    """Collect loguru warning messages; loguru does not reach pytest's caplog."""
+    from loguru import logger
+
+    messages = []
+    sink_id = logger.add(messages.append, level="WARNING", format="{message}")
+    yield messages
+    logger.remove(sink_id)
 
 
 @pytest.fixture
@@ -444,6 +456,33 @@ class TestProteinWaterUpdate:
         assert stranded(knn_fallback_k=0) == 1
         assert stranded(knn_fallback_k=3) == 0
 
+    def test_radius_strands_far_water_on_wp_and_fallback_rescues_it(self, device):
+        """The rescue is symmetric across edge direction. On water->protein the
+        water is the source, so a water parked outside `cutoff` loses its WP edges
+        too; the fallback reconnects it to its nearest protein atoms."""
+        data = HeteroData()
+        data["protein"].pos = torch.randn(10, 3, device=device)
+        data["water"].pos = torch.cat(
+            [torch.randn(4, 3, device=device), torch.full((1, 3), 500.0, device=device)]
+        )
+
+        def stranded(knn_fallback_k):
+            updater = ProteinWaterUpdate(
+                hidden_dims=(32, 4),
+                layers=1,
+                cutoff=8.0,
+                dynamic_edge_policy="knn_if_isolated",
+                knn_fallback_k=knn_fallback_k,
+            )
+            # water is the source of WP, so it lives on row 0.
+            edge_index = updater.build_edges(data)[EDGE_WP]
+            connected = torch.zeros(5, dtype=torch.bool, device=device)
+            connected[edge_index[0].unique()] = True
+            return int((~connected).sum())
+
+        assert stranded(knn_fallback_k=0) == 1
+        assert stranded(knn_fallback_k=3) == 0
+
     def test_knn_policy_never_strands_a_water(self, device):
         """KNN budgets per destination, so distance cannot isolate a node and the
         rescue is unnecessary."""
@@ -818,6 +857,101 @@ class TestUniformBallSampling:
                 device=device,
             )
 
+    def test_anchor_mask_is_per_graph(self, device):
+        """Masked-out atoms are never ball centres, and each graph stays within
+        its own eligible atoms rather than its neighbour's."""
+        torch.manual_seed(0)
+        protein_pos = torch.tensor(
+            [[0.0, 0.0, 0.0], [500.0, 0.0, 0.0], [100.0, 0.0, 0.0], [900.0, 0.0, 0.0]],
+            device=device,
+        )
+        batch_p = torch.tensor([0, 0, 1, 1], dtype=torch.long, device=device)
+        batch_w = _batch_from_counts(
+            torch.tensor([50, 50], dtype=torch.long, device=device), device
+        )
+        anchor_mask = torch.tensor([True, False, True, False], device=device)
+
+        pos = sample_waters_uniform_ball(
+            protein_pos=protein_pos,
+            batch_p=batch_p,
+            batch_w=batch_w,
+            cutoff=2.0,
+            device=device,
+            anchor_mask=anchor_mask,
+        )
+
+        assert pos[batch_w == 0][:, 0].abs().max().item() < 5.0
+        assert (pos[batch_w == 1][:, 0] - 100.0).abs().max().item() < 5.0
+
+    def test_anchor_mask_skipped_for_batch_when_a_graph_starves(
+        self, device, warning_log
+    ):
+        """If the mask would leave a water-requesting graph with no anchor, the
+        whole batch anchors on all atoms (as local_flow does) and warns."""
+        torch.manual_seed(0)
+        protein_pos = torch.tensor(
+            [
+                [0.0, 0.0, 0.0],  # graph 0, masked out
+                [10.0, 0.0, 0.0],  # graph 0, masked out -> graph 0 is starved
+                [1000.0, 0.0, 0.0],  # graph 1, eligible
+                [2000.0, 0.0, 0.0],  # graph 1, masked out
+            ],
+            device=device,
+        )
+        batch_p = torch.tensor([0, 0, 1, 1], dtype=torch.long, device=device)
+        batch_w = _batch_from_counts(
+            torch.tensor([100, 100], dtype=torch.long, device=device), device
+        )
+        anchor_mask = torch.tensor([False, False, True, False], device=device)
+        cutoff = 2.0
+
+        pos = sample_waters_uniform_ball(
+            protein_pos=protein_pos,
+            batch_p=batch_p,
+            batch_w=batch_w,
+            cutoff=cutoff,
+            device=device,
+            anchor_mask=anchor_mask,
+        )
+
+        # each water still sits within cutoff of one of its own graph's atoms
+        d0 = torch.cdist(pos[batch_w == 0], protein_pos[:2]).min(dim=1).values
+        assert d0.max().item() <= cutoff + 1e-5
+        # the mask was dropped for the whole batch, so graph 1 uses its masked-out
+        # atom at x=2000 too, not only the eligible one at x=1000
+        g1_x = pos[batch_w == 1][:, 0]
+        assert (g1_x > 1500.0).any()
+
+        assert any("all protein atoms" in message for message in warning_log)
+
+    def test_anchor_mask_none_matches_all_true_mask(self, device):
+        """An all-True mask changes neither the draws nor their order."""
+        protein_pos = torch.randn(12, 3, device=device) * 10
+        batch_p = torch.cat([torch.zeros(6), torch.ones(6)]).long().to(device)
+        batch_w = _batch_from_counts(
+            torch.tensor([20, 15], dtype=torch.long, device=device), device
+        )
+
+        torch.manual_seed(7)
+        without = sample_waters_uniform_ball(
+            protein_pos=protein_pos,
+            batch_p=batch_p,
+            batch_w=batch_w,
+            cutoff=8.0,
+            device=device,
+        )
+        torch.manual_seed(7)
+        with_mask = sample_waters_uniform_ball(
+            protein_pos=protein_pos,
+            batch_p=batch_p,
+            batch_w=batch_w,
+            cutoff=8.0,
+            device=device,
+            anchor_mask=torch.ones(12, dtype=torch.bool, device=device),
+        )
+
+        assert torch.equal(without, with_mask)
+
     def test_large_spread_protein_succeeds(self, device):
         """The scenario that crashes truncated Gaussian (sigma~50) works here."""
         torch.manual_seed(0)
@@ -945,6 +1079,144 @@ class TestScaledGaussianSampling:
         )
 
         assert pos.shape == (0, 3)
+
+
+@pytest.mark.unit
+class TestCrystalMateAwareSampling:
+    """Both samplers work from ASU atoms only when the batch carries is_mate."""
+
+    @staticmethod
+    def _matcher(strategy):
+        return FlowMatcher(model=Mock(cutoff=8.0), sampling_strategy=strategy)
+
+    @staticmethod
+    def _graph(pos, batch, is_mate=None):
+        data = HeteroData()
+        data["protein"].pos = pos
+        data["protein"].batch = batch
+        if is_mate is not None:
+            data["protein"].is_mate = is_mate
+        return data
+
+    def test_uniform_ball_anchors_on_asu_only(self, device):
+        """Waters spawn around ASU atoms, not around the distant symmetry mates."""
+        torch.manual_seed(0)
+        data = self._graph(
+            torch.tensor(
+                [
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [500.0, 0.0, 0.0],
+                    [900.0, 0.0, 0.0],
+                ],
+                device=device,
+            ),
+            torch.zeros(4, dtype=torch.long, device=device),
+            torch.tensor([False, False, True, True], device=device),
+        )
+        batch_w = torch.zeros(200, dtype=torch.long, device=device)
+
+        matcher = self._matcher("uniform_ball")
+        pos = matcher._sample_waters(data, batch_w, device)
+
+        # ASU spans x in [0, 1]; a mate anchor would land a water near 500 or 900
+        assert pos[:, 0].max().item() < 1.0 + matcher.graph_cutoff + 1e-5
+        assert pos[:, 0].min().item() > -matcher.graph_cutoff - 1e-5
+
+    def test_uniform_ball_skips_mask_for_all_mate_graph(self, device, warning_log):
+        """An all-mate graph has no ASU anchor, so the batch anchors on all atoms
+        and warns; every graph still draws from its own atoms."""
+        torch.manual_seed(0)
+        data = self._graph(
+            torch.tensor([[0.0, 0.0, 0.0], [500.0, 0.0, 0.0]], device=device),
+            torch.tensor([0, 1], dtype=torch.long, device=device),
+            torch.tensor([False, True], device=device),
+        )
+        batch_w = _batch_from_counts(
+            torch.tensor([20, 20], dtype=torch.long, device=device), device
+        )
+
+        pos = self._matcher("uniform_ball")._sample_waters(data, batch_w, device)
+
+        assert pos[batch_w == 0][:, 0].abs().max().item() < 10.0
+        assert (pos[batch_w == 1][:, 0] - 500.0).abs().max().item() < 10.0
+        assert any("all protein atoms" in message for message in warning_log)
+
+    def test_all_false_is_mate_matches_no_attribute(self, device):
+        """Dropping the .any() guard is safe: an all-True mask draws exactly what
+        no mask draws, bit for bit."""
+        protein_pos = torch.randn(12, 3, device=device) * 10
+        batch_p = torch.cat([torch.zeros(6), torch.ones(6)]).long().to(device)
+        batch_w = _batch_from_counts(
+            torch.tensor([20, 15], dtype=torch.long, device=device), device
+        )
+        matcher = self._matcher("uniform_ball")
+
+        plain = self._graph(protein_pos, batch_p)
+        flagged = self._graph(
+            protein_pos, batch_p, torch.zeros(12, dtype=torch.bool, device=device)
+        )
+
+        torch.manual_seed(7)
+        without = matcher._sample_waters(plain, batch_w, device)
+        torch.manual_seed(7)
+        with_mask = matcher._sample_waters(flagged, batch_w, device)
+
+        assert torch.equal(without, with_mask)
+
+    def test_sigma_ignores_distant_mates(self, device):
+        """Counting distant mates would inflate sigma and push the prior out past
+        the targets."""
+        torch.manual_seed(0)
+        asu = torch.randn(30, 3, device=device)
+        mates = torch.randn(30, 3, device=device) + 500.0
+
+        asu_only = self._graph(asu, torch.zeros(30, dtype=torch.long, device=device))
+        with_mates = self._graph(
+            torch.cat([asu, mates], dim=0),
+            torch.zeros(60, dtype=torch.long, device=device),
+            torch.cat(
+                [torch.zeros(30, dtype=torch.bool), torch.ones(30, dtype=torch.bool)]
+            ).to(device),
+        )
+
+        reference = FlowMatcher.compute_sigma_per_graph(asu_only, device)
+        masked = FlowMatcher.compute_sigma_per_graph(
+            with_mates, device, node_mask=FlowMatcher._asu_mask(with_mates)
+        )
+        unmasked = FlowMatcher.compute_sigma_per_graph(with_mates, device)
+
+        # adding the mates leaves sigma untouched once they are masked out
+        assert torch.allclose(masked, reference, atol=1e-4)
+        # ...and would otherwise blow it up by two orders of magnitude
+        assert unmasked.item() > 50 * reference.item()
+
+    def test_sigma_skips_mask_for_all_mate_graph(self, device, warning_log):
+        """If any graph has no ASU atom, sigma is computed over all atoms for the
+        whole batch (as local_flow does) with a warning, not a degenerate value."""
+        torch.manual_seed(0)
+        g0 = HeteroData()
+        g0["protein"].pos = torch.cat(
+            [torch.randn(20, 3), torch.randn(20, 3) + 500.0]
+        ).to(device)
+        g0["protein"].is_mate = torch.cat(
+            [torch.zeros(20, dtype=torch.bool), torch.ones(20, dtype=torch.bool)]
+        ).to(device)
+        g1 = HeteroData()
+        g1["protein"].pos = torch.randn(20, 3).to(device)
+        g1["protein"].is_mate = torch.ones(20, dtype=torch.bool, device=device)
+
+        batch = Batch.from_data_list([g0, g1])
+        masked = FlowMatcher.compute_sigma_per_graph(
+            batch, device, node_mask=FlowMatcher._asu_mask(batch)
+        )
+        full = FlowMatcher.compute_sigma_per_graph(batch, device)
+
+        # graph 1 has no ASU atom, so the mask is skipped for the whole batch:
+        # sigma matches the unmasked computation everywhere, non-degenerate
+        assert torch.allclose(masked, full)
+        assert masked[1].item() > 0.5
+        assert any("all protein atoms" in message for message in warning_log)
 
 
 @pytest.mark.unit
