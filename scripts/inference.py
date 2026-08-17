@@ -27,7 +27,7 @@ import torch.nn as nn
 from loguru import logger
 from tqdm import tqdm
 
-from src.constants import NUM_RBF
+from src.constants import DEFAULT_EDGE_CUTOFF, NUM_RBF
 from src.dataset import ProteinWaterDataset
 from src.encoder_base import build_encoder
 from src.flow import FlowMatcher, FlowWaterGVP
@@ -275,7 +275,7 @@ def build_model_from_config(config: dict, device: torch.device) -> nn.Module:
         drop_rate=config.get("drop_rate", 0.1),
         n_message_gvps=config.get("n_message_gvps", 2),
         n_update_gvps=config.get("n_update_gvps", 2),
-        cutoff=config.get("cutoff", 8.0),
+        cutoff=config.get("cutoff", DEFAULT_EDGE_CUTOFF),
         max_neighbors=config.get("max_neighbors", 256),
         dynamic_edge_policy=config.get("dynamic_edge_policy", "radius"),
         # "auto" depends on which prior the run uses, so pass that through.

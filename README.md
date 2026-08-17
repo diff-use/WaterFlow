@@ -9,6 +9,7 @@ WaterFlow/
 ├── src/                    # Core library code
 │   ├── dataset.py          # ProteinWaterDataset and data loading
 │   ├── flow.py             # FlowMatcher and FlowWaterGVP model
+│   ├── confidence.py       # ConfidenceGVP scorer, targets, vdW clustering
 │   ├── gvp.py              # Geometric Vector Perceptron layers
 │   ├── gvp_encoder.py      # GVP-based protein encoder
 │   ├── encoder_base.py     # Encoder registry and factory (includes ESM/SLAE)
@@ -23,6 +24,7 @@ WaterFlow/
 ├── tests/                  # Test suite
 │   ├── test_dataset.py     # Dataset and preprocessing tests
 │   ├── test_distributed.py # DDP helper and cache prebuild tests
+│   ├── test_confidence.py  # Confidence scorer, target and clustering tests
 │   ├── test_flow.py        # Flow matching tests
 │   ├── test_encoder.py     # Encoder tests
 │   ├── test_forward.py     # End-to-end forward pass tests
