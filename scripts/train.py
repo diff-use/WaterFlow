@@ -165,8 +165,11 @@ def parse_args():
     p.add_argument(
         "--min_water_residue_ratio",
         type=float,
-        default=0.6,
-        help="Quality: minimum waters/residue ratio required per structure.",
+        default=0.1,
+        help=(
+            "Quality: minimum waters/residue ratio required per structure. Applied "
+            "at cache-write time, so it decides which structures the cache holds."
+        ),
     )
 
     # per-water filtering (toggleable)
@@ -185,8 +188,12 @@ def parse_args():
     p.add_argument(
         "--max_bfactor_zscore",
         type=float,
-        default=1.5,
-        help="Water filter: remove waters with normalized B-factor above this threshold.",
+        default=2.0,
+        help=(
+            "Water filter: remove waters with normalized B-factor above this "
+            "threshold. Baked in at cache-write time, so a warm cache built at a "
+            "different value is refused rather than extended."
+        ),
     )
     p.add_argument(
         "--no_filter_by_distance",

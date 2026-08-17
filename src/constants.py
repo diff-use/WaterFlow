@@ -7,15 +7,17 @@ Constants for edge types and other shared values.
 NODE_FEATURE_DIM = 16  # Default node scalar feature dimension
 
 # Native widths of the cached embeddings produced by scripts/generate_*_embeddings.py.
-# These are fixed by the upstream models, not tunable: ESM3-open emits 1536-wide
-# per-residue vectors, SLAE emits 128-wide per-atom vectors. Cached encoders take the
-# width as a required config key (embedding_dim); these are the values to pass.
 ESM_EMBEDDING_DIM = 1536
 SLAE_EMBEDDING_DIM = 128
 
 # RBF (Radial Basis Function) parameters
 NUM_RBF = 16  # Number of RBF basis functions
 RBF_CUTOFF = 8.0  # Distance cutoff in Angstroms for RBF encoding
+
+# Default radius for dynamic edge construction. Kept equal to RBF_CUTOFF on
+# purpose: an edge longer than RBF_CUTOFF encodes to ~0 under the RBF, so
+# building edges beyond it would feed the message passing near-zero features.
+DEFAULT_EDGE_CUTOFF = RBF_CUTOFF
 
 # Edge type tuples: (src_node_type, edge_name, dst_node_type)
 EDGE_PP = ("protein", "pp", "protein")  # protein -> protein
