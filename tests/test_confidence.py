@@ -111,15 +111,21 @@ class TestClusterWatersVdw:
         conf = torch.tensor([0.9, 0.8], device=device)
         out_pos, out_conf = cluster_waters_vdw(pos, conf, radius=1.52)
         assert out_pos.size(0) == 2
-        assert out_conf[0].item() >= out_conf[1].item()
+        # Each water is its own singleton cluster, so its centroid is its own
+        # position and confidence, emitted highest-confidence first.
+        assert torch.allclose(out_pos, pos)
+        assert out_conf[0].item() == pytest.approx(0.9)
+        assert out_conf[1].item() == pytest.approx(0.8)
 
     def test_threshold_filters_pre_cluster(self, device):
+        # 0.5 sits exactly on the threshold and must survive: the cut is conf >= threshold.
         pos = torch.tensor(
-            [[0.0, 0.0, 0.0], [5.0, 0.0, 0.0], [10.0, 0.0, 0.0]], device=device
+            [[0.0, 0.0, 0.0], [5.0, 0.0, 0.0], [10.0, 0.0, 0.0], [15.0, 0.0, 0.0]],
+            device=device,
         )
-        conf = torch.tensor([0.1, 0.6, 0.9], device=device)
+        conf = torch.tensor([0.1, 0.5, 0.6, 0.9], device=device)
         out_pos, out_conf = cluster_waters_vdw(pos, conf, radius=1.52, threshold=0.5)
-        assert out_pos.size(0) == 2  # 0.1 dropped
+        assert out_pos.size(0) == 3  # only 0.1 dropped; the 0.5 boundary is kept
         assert (out_conf >= 0.5).all()
 
     def test_threshold_runs_before_clustering(self, device):
@@ -265,6 +271,12 @@ def _make_hetero(device, n_prot=10, n_wat=5, cached_pw=False):
 
 @pytest.mark.unit
 class TestConfidenceGVP:
+    def test_auto_edge_policy_is_rejected(self, gvp_encoder):
+        # "auto" needs a sampling strategy the confidence model lacks; it must
+        # raise rather than silently resolve to "radius".
+        with pytest.raises(ValueError, match="auto"):
+            ConfidenceGVP(encoder=gvp_encoder, dynamic_edge_policy="auto")
+
     def test_forward_output_shape(self, device, gvp_encoder):
         data = _make_hetero(device, n_prot=10, n_wat=5)
         model = ConfidenceGVP(
@@ -332,7 +344,8 @@ class TestConfidenceGVP:
         )
         assert set(model.updater.etypes) == {EDGE_PW, EDGE_PP}
 
-    def test_gradients_flow(self, device, gvp_encoder):
+    def test_gradients_reach_the_encoder(self, device, gvp_encoder):
+        """Gradient must reach the warm-started backbone, not just the head."""
         data = _make_hetero(device, n_prot=10, n_wat=5)
         model = ConfidenceGVP(
             encoder=gvp_encoder,
@@ -341,15 +354,12 @@ class TestConfidenceGVP:
         ).to(device)
 
         scores = model(data)
-        target = torch.rand_like(scores)
-        loss = F.mse_loss(scores, target)
-        loss.backward()
+        F.mse_loss(scores, torch.rand_like(scores)).backward()
 
-        has_grad = any(
+        assert any(
             p.grad is not None and p.grad.abs().sum().item() > 0
-            for p in model.parameters()
+            for p in model.encoder.parameters()
         )
-        assert has_grad
 
     def test_score_head_receives_gradient(self, device, gvp_encoder):
         """A head that never learns would leave the backbone doing all the work."""

@@ -183,7 +183,9 @@ def cluster_waters_vdw(
         return positions, confidences
 
     # --- Round 1: absorb into confidence-weighted centroids ---
-    order = torch.argsort(confidences, descending=True)
+    # stable so ties keep input order, which makes the whole routine deterministic
+    # and lets both later stages rely on the descending order instead of re-sorting.
+    order = torch.argsort(confidences, descending=True, stable=True)
     pos_sorted = positions[order]
     conf_sorted = confidences[order]
 
@@ -204,10 +206,11 @@ def cluster_waters_vdw(
         cluster_pos = pos_sorted[within]
         cluster_conf = conf_sorted[within]
 
-        # Fall back to an unweighted mean when the weights sum to 0, so an
-        # all-zero-confidence cluster yields a position rather than NaN.
+        # Confidences are sigmoid outputs (>= 0), so the weights sum to 0 only
+        # when every member scored 0; fall back to an unweighted mean there to
+        # yield a position rather than NaN.
         w_sum = cluster_conf.sum()
-        if w_sum.abs() > 0:
+        if w_sum > 0:
             centroid = (cluster_pos * cluster_conf.unsqueeze(-1)).sum(dim=0) / w_sum
         else:
             centroid = cluster_pos.mean(dim=0)
@@ -224,9 +227,9 @@ def cluster_waters_vdw(
 
     # --- Round 2: NMS between centroids ---
     keep_mask = torch.ones(cent_pos.size(0), dtype=torch.bool, device=cent_pos.device)
-    # Already in descending seed order, but sort explicitly rather than rely on it.
-    cent_order = torch.argsort(cent_conf, descending=True)
-    for idx in cent_order.tolist():
+    # Centroids are already in descending confidence order: seeds are visited
+    # high-to-low and each centroid inherits its seed's (max) confidence.
+    for idx in range(cent_pos.size(0)):
         if not keep_mask[idx]:
             continue
         d2 = ((cent_pos - cent_pos[idx]) ** 2).sum(dim=-1)
@@ -234,12 +237,8 @@ def cluster_waters_vdw(
         collide[idx] = False  # never drop self
         keep_mask[collide] = False
 
-    cent_pos = cent_pos[keep_mask]
-    cent_conf = cent_conf[keep_mask]
-
-    # Descending order gives downstream thresholding a stable prefix.
-    final_order = torch.argsort(cent_conf, descending=True)
-    return cent_pos[final_order], cent_conf[final_order]
+    # Masking preserves the descending order downstream thresholding relies on.
+    return cent_pos[keep_mask], cent_conf[keep_mask]
 
 
 # ---------------------------------------------------------------------------
@@ -260,8 +259,10 @@ class ConfidenceGVP(nn.Module):
     radius query plus a nearest-neighbour pass for candidates it left with no
     edges -- candidates can land in sparse regions the generator never visits.
 
-    Keeping the backbone identical to the generator is what lets the confidence
-    network warm-start from a flow checkpoint.
+    Keeping the backbone (encoder, encoder_to_flow, updater) identical to the
+    generator is what lets those weights warm-start from a flow checkpoint. The
+    scalar encoders differ -- the generator concatenates a time channel these do
+    not -- and the score head is new, so those two are trained from scratch.
     """
 
     def __init__(
@@ -304,6 +305,13 @@ class ConfidenceGVP(nn.Module):
             water_input_dim: Input dimension for water node features.
         """
         super().__init__()
+        # "auto" resolves against a sampling strategy the confidence model does not
+        # have, so it would silently fall through to "radius". Reject it instead.
+        if dynamic_edge_policy == "auto":
+            raise ValueError(
+                "ConfidenceGVP has no sampling strategy to resolve 'auto'; pass a "
+                "concrete dynamic_edge_policy such as 'radius' or 'knn_if_isolated'."
+            )
         self.encoder = encoder
         self.hidden_dims = hidden_dims
         self.edge_scalar_dim = edge_scalar_dim
