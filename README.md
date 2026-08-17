@@ -72,14 +72,16 @@ WaterFlow processes structure files through several stages to create training-re
 - For atoms with alternate conformations, the highest-occupancy conformer is selected
 
 **Crystal Contact Detection**
-- Uses PyMOL's `symexp` to generate symmetry mates within 5.0Å cutoff
-- Symmetry mate atoms are included as additional protein context when `include_mates=True`
-- Mate atoms are stored separately for proper handling during training
+- Uses PyMOL's `symexp` to generate symmetry mates, keeping whole residues and whole ligand entities with any atom within the cutoff of the ASU. Runs only when `include_mates=True`; a no-mates cache never invokes PyMOL
+- Protein mates and ligand mates are selected separately by PyMOL's own classifiers, so `is_ligand` stays exact for mate nodes too
+- **Mate waters are never selected.** A mate water is a symmetry image of an ASU water, which is what the model predicts, so keeping it as context leaks the label
+- Symmetry also maps atoms onto themselves (special positions) and reaches one residue through two operators. Mate atoms within 0.3Å of an ASU atom, a target water, or an already-kept mate atom are dropped (`dedup_mate_atoms`); mate ligands are judged whole, so a ligand is never fragmented (`dedup_mate_ligands_by_residue`)
+- A mate keeps its source residue's `(chain, res_id, ins_code)`, so it inherits that residue's ESM row through `emb_res_idx` instead of a zero vector, and it joins the distance-filter reference so a water in a crystal contact — near a neighbour surface but far from the ASU — is not dropped as solvent-far
 
 **Graph Representation**
 - Node types: `protein` (ASU + symmetry mates + ligands), `water` (ground truth)
-- ASU ligand atoms are appended after ASU and mate atoms and carry the boolean `is_ligand` mask plus `residue_index = -1` (they have no residue embedding, so residue pooling masks them out)
-- `is_ligand` marks **ASU ligands only**. Symmetry-mate generation is currently unfiltered, so mate nodes can include HETATM and water atoms that `is_ligand` does not mark — see `TODO(mates)` in `ProteinWaterDataset._preprocess_one`. Don't treat `is_ligand` as an exhaustive ligand selector
+- Ligand atoms are appended after ASU and mate atoms and carry the boolean `is_ligand` mask plus `residue_index = -1` (they have no residue embedding, so residue pooling masks them out)
+- `is_mate` marks every non-ASU node, protein or ligand. The flow prior anchors on `~is_mate` so sampled waters start where the targets live
 - Edge types (defined in `src/constants.py`):
   - `('protein', 'pp', 'protein')`: protein-protein edges
   - `('protein', 'pw', 'water')`: protein to water
@@ -111,23 +113,29 @@ Preprocessed data is cached under `--processed_dir` in a three-layer architectur
 <processed_dir>/
 ├── geometry/              # Graph structures; see cache directory naming below
 │   └── <pdb_id>_final.pt
-│       - protein_pos: centered protein coordinates (N, 3)
+│       - protein_pos: centered node coordinates (N, 3)
 │       - protein_x: element one-hot encoding (N, 16)
 │       - protein_res_idx: residue indices for grouping
-│       - is_ligand: bool mask marking the appended ASU ligand atoms (N,)
+│       - is_ligand: bool mask marking the ligand atoms (N,)
+│       - is_mate: bool mask marking the symmetry-mate atoms (N,)
+│       - emb_res_idx: embedding row per atom; -1 means no row (N,)
 │       - water_pos, water_x: water coordinates and features
-│       - num_asu_protein: ASU atom count (mate boundary metadata)
-│       # Note: When include_mates=True, mate atoms are concatenated into
-│       # protein_pos/protein_x, and ASU ligand atoms are appended after those.
-│       # Node order is [ASU protein | mates | ASU ligands]. Recover blocks via:
-│       #   ASU protein atoms = protein_pos[:num_asu_protein]
-│       #   ASU ligand atoms  = protein_pos[is_ligand]          # always last
-│       #   Mate atoms        = protein_pos[num_asu_protein:][~is_ligand[num_asu_protein:]]
+│       - num_asu_protein: ASU protein atom count (mate boundary metadata)
+│       # The protein_* names predate mates and ligands: N is the total node
+│       # count and these arrays hold every node, not just protein atoms (same
+│       # for the data["protein"] node type). Select blocks with the masks.
 │       #
-│       # is_ligand marks ASU ligands ONLY -- it is not an exhaustive ligand
-│       # selector. The mate block is unfiltered (see TODO(mates) in
-│       # _preprocess_one), so mate atoms may include HETATM/ligand/water atoms
-│       # that are NOT marked by is_ligand.
+│       # Node order is [ASU protein | mate protein | ASU ligand | mate ligand],
+│       # so the two masks recover every block:
+│       #   ASU protein  = ~is_mate & ~is_ligand    (== the first num_asu_protein)
+│       #   mate protein =  is_mate & ~is_ligand
+│       #   ASU ligand   = ~is_mate &  is_ligand
+│       #   mate ligand  =  is_mate &  is_ligand
+│       #
+│       # emb_res_idx indexes the ESM table: mate atoms carry the row of the ASU
+│       # residue they are a symmetry image of, and every ligand carries -1,
+│       # which reads as a zero row.
+├── <geometry_dir>/_filter_meta.json   # settings this directory was built with
 ├── esm/                   # ESM embeddings (per-residue)
 │   └── <pdb_id>_final.pt
 │       - residue_embeddings: ESM3 embeddings (N_res, embed_dim)
@@ -153,13 +161,29 @@ configs that produce different graphs never share a directory:
 
 The base name comes from `--geometry_cache_name` (default `geometry`).
 
+**Filter Provenance:**
+
+Filtering happens *before* the cache is written, so the thresholds are a property of the
+directory, not of the run reading it — and the `.pt` files record none of them. Each geometry
+directory therefore carries a `_filter_meta.json` sidecar holding the per-water filters and
+their toggles, the structure-level checks that decide which entries exist at all
+(`min_water_residue_ratio`, `max_com_dist`, `max_clash_fraction`, `clash_dist`,
+`interface_dist_threshold`), and the graph parameters behind the cached PP edges (`cutoff`,
+`max_neighbors`).
+
+The first run with `preprocess=True` writes it; every later run compares against it and
+**refuses to start** on a mismatch rather than appending differently filtered entries to the
+same directory. A disabled filter records `null` for its threshold, which cannot have changed
+the cached waters. Directories built before this existed have no sidecar: they load, and warn
+that their provenance is unverifiable, until a preprocessing run stamps them — so check your
+thresholds match the cache before that first run.
+
 **Cache Generation Notes:**
 - Geometry cache is generated automatically when `preprocess=True` (default)
 - ESM/SLAE caches require running the respective `generate_*_embeddings.py` scripts first
 - Preprocessing failures are logged to `<geometry_dir>/preprocessing_failures.log`
-- Geometry caches built before ligand support lack the `is_ligand` field and will fail to
-  load with a `KeyError`. Delete the geometry cache directory and let it regenerate — the
-  cached graphs are stale, not merely missing a field
+- A cache file missing any field the loader reads (`is_ligand`, `is_mate`, `emb_res_idx`, …)
+  raises `KeyError`. Delete the geometry cache directory and let it regenerate
 
 ## Environment Setup
 
@@ -303,7 +327,7 @@ These checks determine whether a structure is included in training:
 | `--max_com_dist` | `25.0` | Max protein-water center-of-mass distance (A) |
 | `--max_clash_fraction` | `0.05` | Max fraction of waters clashing with protein |
 | `--clash_dist` | `2.0` | Distance threshold for clash detection (A) |
-| `--min_water_residue_ratio` | `0.6` | Minimum waters per residue ratio |
+| `--min_water_residue_ratio` | `0.1` | Minimum waters per residue ratio |
 
 ### Per-Water Quality Filters
 
@@ -313,7 +337,7 @@ These filters remove individual low-quality waters (can be toggled):
 |-----------|---------|-------------|-------------|
 | `--max_protein_dist` | `5.0` | `--no_filter_by_distance` | Remove waters far from protein |
 | `--min_edia` | `0.4` | `--no_filter_by_edia` | Remove waters with low EDIA scores |
-| `--max_bfactor_zscore` | `1.5` | `--no_filter_by_bfactor` | Remove waters with high B-factor |
+| `--max_bfactor_zscore` | `2.0` | `--no_filter_by_bfactor` | Remove waters with high B-factor |
 
 <details>
 <summary><strong>About EDIA Scores</strong></summary>
@@ -355,6 +379,13 @@ uv run python -m scripts.inference \
 | `--threshold` | `1.0` | Distance threshold for precision/recall (A) |
 | `--water_ratio` | `None` | Sample `num_residues * ratio` waters (if not set, uses ground truth count) |
 | `--use_sc` | `false` | Use self-conditioning during integration |
+
+> **`--water_ratio` counts mate residues too.** `num_residues` covers ASU *and* mate
+> residues, so `--include_mates` emits ~1.7x more waters at the same ratio (~440 vs
+> ~263 particles at ratio 1, against ~238 true waters). Two runs share a sampling
+> budget only if their mate settings match; compare density-sensitive metrics at
+> parity, not at equal ratio. `--include_mates` is inherited from the training config
+> when the flag is absent.
 
 ### Output Structure
 

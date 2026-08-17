@@ -83,7 +83,8 @@ def pdb_1deu():
 
 @pytest.fixture
 def pdb_4h0b():
-    """4h0b - has non-water ligand HETATMs for ligand support tests."""
+    """4h0b - has non-water ligand HETATMs for ligand support tests. P6 space group,
+    so a water on the 6-fold axis has a symmetry copy ~0A away (special position)."""
     return _resolve_test_path("4h0b", ".pdb")
 
 

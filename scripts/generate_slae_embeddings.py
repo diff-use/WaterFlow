@@ -1,9 +1,8 @@
 """
 Precompute SLAE embeddings for protein structures and save to separate cache files.
 
-NOTE: This SLAE encoder is legacy and is NOT currently used. We primarily use the
-ESM encoder (see scripts/generate_esm_embeddings.py). This script is retained for
-reference/reproducibility only.
+NOTE: The SLAE encoder is NOT currently used. We primarily use the ESM encoder
+(see scripts/generate_esm_embeddings.py); this script is kept for reproducibility.
 
 This script:
 1. Reads a split file containing PDB entries
