@@ -369,13 +369,6 @@ def parse_args():
     )
     p.add_argument("--step_gamma", type=float, default=0.5, help="StepLR gamma")
 
-    # flow matching
-    p.add_argument("--use_self_cond", action="store_true")
-    p.add_argument("--p_self_cond", type=float, default=0.5)
-    p.add_argument("--use_distortion", action="store_true")
-    p.add_argument("--p_distort", type=float, default=0.2)
-    p.add_argument("--t_distort", type=float, default=0.5)
-    p.add_argument("--sigma_distort", type=float, default=0.5)
 
     # checkpointing
     p.add_argument("--save_dir", type=str, default="/home/srivasv/flow_checkpoints")
@@ -680,7 +673,6 @@ def run_eval_sampling(
         out = flow_matcher.rk4_integrate(
             graph,
             num_steps=args.rk4_steps,
-            use_sc=args.use_self_cond,
             device=device,
             return_trajectory=True,
         )[0]  # rk4_integrate returns a list, get the single result
@@ -772,7 +764,6 @@ def train_epoch(
 
         metrics = flow_matcher.training_step(
             batch,
-            use_self_conditioning=args.use_self_cond,
             accumulation_steps=args.grad_accum_steps,
         )
 
@@ -1119,12 +1110,7 @@ def main():
 
     flow_matcher = FlowMatcher(
         model=model,
-        p_self_cond=args.p_self_cond,
         sampling_strategy=args.sampling_strategy,
-        use_distortion=args.use_distortion,
-        p_distort=args.p_distort,
-        t_distort=args.t_distort,
-        sigma_distort=args.sigma_distort,
     )
 
     optimizer = AdamW(

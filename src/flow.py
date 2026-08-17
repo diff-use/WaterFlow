@@ -810,19 +810,6 @@ class FlowWaterGVP(nn.Module):
             k_wp=k_wp,
         )
 
-        self.sc_vec_encoder = GVP(
-            in_dims=(0, 1),
-            out_dims=(0, v_h),
-            activations=(None, None),
-            vector_gate=True,
-        )
-
-        self.sc_sca_encoder = nn.Sequential(
-            nn.Linear(1, s_h),
-            nn.GELU(),
-            nn.LayerNorm(s_h),
-        )
-
         # Water vector field head: project (s_h, v_h) -> (s_h // 4, 1) -> single vector channel
         # NOTE: vector_gate=True requires scalar input features. GVP gating works by
         # computing gate values from scalars via a learned linear map, then applying
@@ -837,7 +824,6 @@ class FlowWaterGVP(nn.Module):
         self,
         data: HeteroData,
         t: torch.Tensor,
-        self_cond: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """
         Predict velocity field for water nodes given protein context and time.
@@ -851,8 +837,6 @@ class FlowWaterGVP(nn.Module):
                     positions: (N_w, 3) Cartesian coordinates
                     features: (N_w, 16) element one-hot encoding
             t: (B,) flow time per complex in batch, values in [0, 1]
-            self_cond: Optional self-conditioning dict with 'x1_pred' key containing
-                previous prediction (N_w, 3) for iterative refinement
 
         Returns:
             (N_w, 3) predicted velocity vector field at each water node
@@ -886,25 +870,6 @@ class FlowWaterGVP(nn.Module):
             device=device,
         )
 
-        # self conditioning
-        if (
-            self_cond is not None
-            and ("x1_pred" in self_cond)
-            and self_cond["x1_pred"] is not None
-        ):
-            delta = self_cond["x1_pred"] - data["water"].pos
-            delta_vec = delta.unsqueeze(1)
-
-            # vector conditioning (equivariant)
-            s_empty = torch.empty(data["water"].num_nodes, 0, device=device)
-            _, v_sc = self.sc_vec_encoder((s_empty, delta_vec))
-            v_w = v_w + v_sc
-
-            # scalar conditioning (invariant) on ||delta||
-            d_mag = delta.norm(dim=-1, keepdim=True)
-            s_sc = self.sc_sca_encoder(d_mag)
-            s_w = s_w + s_sc
-
         # build hetero feature dict for GVP multi-edge updates
         x_dict = {
             "protein": (s_p, v_p_latent),
@@ -934,11 +899,6 @@ class FlowMatcher:
     def __init__(
         self,
         model,
-        p_self_cond: float = 0.5,
-        use_distortion: bool = False,
-        p_distort: float = 0.2,
-        t_distort: float = 0.5,
-        sigma_distort: float = 0.5,
         loss_eps: float = 1e-3,
         sampling_strategy: str = "uniform_ball",
     ):
@@ -947,11 +907,6 @@ class FlowMatcher:
 
         Args:
             model: FlowWaterGVP model instance
-            p_self_cond: Probability of using self-conditioning during training
-            use_distortion: Whether to apply late-stage path distortion
-            p_distort: Probability of applying distortion per sample
-            t_distort: Time threshold after which distortion may be applied
-            sigma_distort: Standard deviation of distortion noise
             loss_eps: Small constant for numerical stability in loss weighting
             sampling_strategy: Source distribution for flow matching noise.
                 "uniform_ball" samples uniformly in balls around protein atoms.
@@ -967,11 +922,6 @@ class FlowMatcher:
                 f"got '{sampling_strategy}'"
             )
         self.model = model
-        self.p_self_cond = p_self_cond
-        self.use_distortion = use_distortion
-        self.p_distort = p_distort
-        self.t_distort = t_distort
-        self.sigma_distort = sigma_distort
         self.loss_eps = loss_eps
         self.graph_cutoff = getattr(model, "cutoff", DEFAULT_EDGE_CUTOFF)
         self.sampling_strategy = sampling_strategy
@@ -1112,7 +1062,6 @@ class FlowMatcher:
     def training_step(
         self,
         batch: HeteroData,
-        use_self_conditioning: bool = True,
         accumulation_steps: int = 1,
     ) -> dict[str, object]:
         """
@@ -1122,7 +1071,6 @@ class FlowMatcher:
 
         Args:
             batch: HeteroData batch
-            use_self_conditioning: Whether to use self-conditioning
             accumulation_steps: Number of gradient accumulation steps (loss is scaled by 1/accumulation_steps)
 
         Returns:
@@ -1165,26 +1113,9 @@ class FlowMatcher:
 
         x_t = (1.0 - t_per_atom) * x0_star + t_per_atom * x1_star
 
-        # late stage path distortion
-        if self.use_distortion:
-            indicator = (t_per_atom >= self.t_distort).float()
-            if indicator.any():
-                mask = (torch.rand_like(t_per_atom) < self.p_distort).float()
-                eps = torch.randn_like(x_t) * self.sigma_distort
-                x_t = x_t + indicator * mask * eps
-
-        # self-conditioning
-        self_cond = None
-        if use_self_conditioning and torch.rand(1).item() < self.p_self_cond:
-            with torch.no_grad():
-                batch["water"].pos = x_t
-                v_pred_sc = self.model(batch, t, self_cond=None)
-                x1_pred_sc = x_t + (1.0 - t_per_atom) * v_pred_sc
-            self_cond = {"x1_pred": x1_pred_sc}
-
         # forward pass
         batch["water"].pos = x_t
-        v_pred = self.model(batch, t, self_cond=self_cond)
+        v_pred = self.model(batch, t)
 
         # target velocity
         v_target = x1_star - x0_star
@@ -1258,7 +1189,7 @@ class FlowMatcher:
         x_t = (1.0 - t_per_atom) * x0_star + t_per_atom * x1_star
 
         batch["water"].pos = x_t
-        v_pred = self.model(batch, t, self_cond=None)
+        v_pred = self.model(batch, t)
 
         v_target = x1_star - x0_star
 
@@ -1407,8 +1338,6 @@ class FlowMatcher:
         self,
         graphs: HeteroData | list[HeteroData],
         num_steps: int = 100,
-        use_sc: bool = True,
-        sc_ema_alpha: float = 0.2,
         device: str | torch.device = "cuda",
         water_ratio: float | None = None,
         water_count: int | None = None,
@@ -1419,8 +1348,6 @@ class FlowMatcher:
         Args:
             graphs: Single HeteroData or list of HeteroData graphs to process
             num_steps: Number of integration steps
-            use_sc: Whether to use self-conditioning
-            sc_ema_alpha: EMA decay for self-conditioning
             device: Device to run on
             water_ratio: If provided, sample num_residues * water_ratio waters
                         instead of using ground truth water count. Ignored when
@@ -1459,8 +1386,6 @@ class FlowMatcher:
 
         x, batch_w = self._setup_water_nodes(g, water_ratio, water_count, device)
 
-        x1_pred_ema = x.clone()
-
         ts = torch.linspace(0, 1, num_steps, device=device)
         dt = ts[1] - ts[0]
 
@@ -1469,19 +1394,8 @@ class FlowMatcher:
             t = t_scalar.expand(num_graphs)  # (num_graphs,) all same value
 
             g["water"].pos = x
-            self_cond = {"x1_pred": x1_pred_ema} if use_sc else None
-            v = self.model(g, t, self_cond=self_cond)
+            v = self.model(g, t)
             x = x + dt * v
-
-            if use_sc:
-                t_next_scalar = ts[i + 1]
-                t_next = t_next_scalar.expand(num_graphs)
-                g["water"].pos = x
-                v_next = self.model(g, t_next, self_cond={"x1_pred": x1_pred_ema})
-                x1_pred_now = x + (1.0 - t_next_scalar) * v_next
-                x1_pred_ema = (
-                    1.0 - sc_ema_alpha
-                ) * x1_pred_ema + sc_ema_alpha * x1_pred_now
 
         # split results by graph
         x_cpu = x.detach().cpu()
@@ -1512,8 +1426,6 @@ class FlowMatcher:
         self,
         graphs: HeteroData | list[HeteroData],
         num_steps: int = 500,
-        use_sc: bool = True,
-        sc_ema_alpha: float = 0.2,
         device: str | torch.device = "cuda",
         return_trajectory: bool = True,
         water_ratio: float | None = None,
@@ -1525,8 +1437,6 @@ class FlowMatcher:
         Args:
             graphs: Single HeteroData or list of HeteroData graphs to process
             num_steps: Number of integration steps
-            use_sc: Whether to use self-conditioning
-            sc_ema_alpha: EMA decay for self-conditioning
             device: Device to run on
             return_trajectory: Whether to return full trajectory and metrics
             water_ratio: If provided, sample num_residues * water_ratio waters
@@ -1566,8 +1476,6 @@ class FlowMatcher:
 
         x, batch_w = self._setup_water_nodes(g, water_ratio, water_count, device)
 
-        x1_pred_ema = x.clone()
-
         ts = torch.linspace(0, 1, num_steps, device=device)
         dt = ts[1] - ts[0]
 
@@ -1587,8 +1495,7 @@ class FlowMatcher:
 
             def f(xpos, t_tensor):
                 g["water"].pos = xpos
-                self_cond = {"x1_pred": x1_pred_ema} if use_sc else None
-                return self.model(g, t_tensor, self_cond=self_cond)
+                return self.model(g, t_tensor)
 
             k1 = f(x, t0)
             k2 = f(x + 0.5 * dt * k1, (t0_scalar + 0.5 * dt).expand(num_graphs))
@@ -1596,16 +1503,6 @@ class FlowMatcher:
             k4 = f(x + dt * k3, (t0_scalar + dt).expand(num_graphs))
 
             x = x + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
-
-            if use_sc:
-                t1_scalar = ts[step + 1]
-                t1 = t1_scalar.expand(num_graphs)
-                g["water"].pos = x
-                v_next = self.model(g, t1, self_cond={"x1_pred": x1_pred_ema})
-                x1_pred_now = x + (1.0 - t1_scalar) * v_next
-                x1_pred_ema = (
-                    1.0 - sc_ema_alpha
-                ) * x1_pred_ema + sc_ema_alpha * x1_pred_now
 
             if return_trajectory:
                 x_cpu = x.detach().cpu()
@@ -1646,7 +1543,6 @@ class FlowMatcher:
         graphs: HeteroData | list[HeteroData],
         num_steps: int = 100,
         method: str = "euler",
-        use_sc: bool = True,
         device: str = "cuda",
     ) -> np.ndarray | list[np.ndarray]:
         """
@@ -1656,7 +1552,6 @@ class FlowMatcher:
             graphs: Single HeteroData or list of HeteroData graphs
             num_steps: Number of integration steps
             method: 'euler' or 'rk4'
-            use_sc: Whether to use self-conditioning
             device: Device to run on
 
         Returns:
@@ -1666,11 +1561,11 @@ class FlowMatcher:
         single_input = isinstance(graphs, HeteroData)
 
         if method == "euler":
-            results = self.euler_integrate(graphs, num_steps, use_sc, device=device)
+            results = self.euler_integrate(graphs, num_steps, device=device)
             results = [r["water_pred"] for r in results]
         elif method == "rk4":
             results = self.rk4_integrate(
-                graphs, num_steps, use_sc, device=device, return_trajectory=False
+                graphs, num_steps, device=device, return_trajectory=False
             )
             results = [r["water_pred"] for r in results]
         else:
