@@ -10,14 +10,23 @@ import pytest
 import torch
 import torch.nn.functional as F
 from torch_geometric.data import Batch, Data, HeteroData
-from torch_geometric.nn import knn
+from torch_geometric.nn import knn, radius
 
+from src.constants import (
+    ALL_EDGE_TYPES,
+    EDGE_PP,
+    EDGE_PW,
+    EDGE_WP,
+    EDGE_WW,
+    get_active_edge_types,
+)
 from src.flow import (
     _batch_from_counts,
-    build_knn_edges,
+    build_dynamic_edges,
     FlowMatcher,
     FlowWaterGVP,
     ProteinWaterUpdate,
+    resolve_edge_policy,
     sample_waters_scaled_gaussian,
     sample_waters_uniform_ball,
 )
@@ -114,14 +123,14 @@ def mock_encoder(device):
 
 
 @pytest.mark.unit
-class TestBuildKnnEdges:
+class TestBuildDynamicEdgesKnn:
     def test_basic_knn(self, device):
         src = torch.tensor(
             [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]], device=device
         )
         dst = torch.tensor([[0.5, 0.0, 0.0], [1.5, 0.0, 0.0]], device=device)
 
-        edges = build_knn_edges(src, dst, k=2)
+        edges = build_dynamic_edges(src, dst, k=2, policy="knn", r=8.0)
 
         assert edges.shape[0] == 2
         assert edges.shape[1] >= 4  # At least 2 dst points × 2 neighbors each
@@ -139,7 +148,7 @@ class TestBuildKnnEdges:
         src = torch.empty(0, 3, device=device)
         dst = torch.randn(5, 3, device=device)
 
-        edges = build_knn_edges(src, dst, k=3)
+        edges = build_dynamic_edges(src, dst, k=3, policy="knn", r=8.0)
 
         assert edges.shape == (2, 0)
 
@@ -147,14 +156,14 @@ class TestBuildKnnEdges:
         src = torch.randn(5, 3, device=device)
         dst = torch.empty(0, 3, device=device)
 
-        edges = build_knn_edges(src, dst, k=3)
+        edges = build_dynamic_edges(src, dst, k=3, policy="knn", r=8.0)
 
         assert edges.shape == (2, 0)
 
     def test_self_edges_removed(self, device):
         pos = torch.randn(10, 3, device=device)
 
-        edges = build_knn_edges(pos, pos, k=5)
+        edges = build_dynamic_edges(pos, pos, k=5, policy="knn", r=8.0)
 
         # No self-loops
         assert (edges[0] != edges[1]).all()
@@ -165,19 +174,26 @@ class TestBuildKnnEdges:
         batch_src = torch.cat([torch.zeros(5), torch.ones(5)]).long().to(device)
         batch_dst = torch.cat([torch.zeros(4), torch.ones(4)]).long().to(device)
 
-        edges = build_knn_edges(src, dst, k=3, batch_src=batch_src, batch_dst=batch_dst)
+        edges = build_dynamic_edges(
+            src, dst, k=3, batch_src=batch_src, batch_dst=batch_dst, policy="knn", r=8.0
+        )
 
         assert edges.shape[0] == 2
         assert edges.shape[1] > 0
 
 
 @pytest.mark.unit
-class TestBuildKnnEdgesDirection:
-    """Exact-set KNN direction tests on asymmetric geometry.
+class TestBuildDynamicEdgesDirection:
+    """Row-convention tests for both policies, on asymmetric geometry.
 
-    srcs are spread out, both dsts sit near src[0], so "k nearest srcs per dst"
-    (correct) and "k nearest dsts per src" (the x/y swap) give different edge
-    sets -- no distance ties to mask a mix-up.
+    The KNN cases spread srcs out and put both dsts near src[0], so "k nearest
+    srcs per dst" (correct) and "k nearest dsts per src" (the x/y swap) give
+    different edge sets -- no distance ties to mask a mix-up. The radius cases
+    keep the two index ranges different sizes for the same reason.
+
+    Both policies feed row 0 = src, row 1 = dst, but reach it differently: KNN
+    swaps the rows PyG returns, radius inverts the arguments instead. Each needs
+    its own pin.
     """
 
     SRC = [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [20.0, 0.0, 0.0]]
@@ -189,7 +205,7 @@ class TestBuildKnnEdgesDirection:
         src = torch.tensor(self.SRC, device=device)
         dst = torch.tensor(self.DST, device=device)
 
-        edges = build_knn_edges(src, dst, k=1)
+        edges = build_dynamic_edges(src, dst, k=1, policy="knn", r=8.0)
 
         edge_set = set(zip(edges[0].tolist(), edges[1].tolist()))
         assert edge_set == {(0, 0), (0, 1)}, f"got {sorted(edge_set)}"
@@ -201,7 +217,7 @@ class TestBuildKnnEdgesDirection:
         dst = torch.tensor(self.DST, device=device)
         k = 2
 
-        edges = build_knn_edges(src, dst, k=k)
+        edges = build_dynamic_edges(src, dst, k=k, policy="knn", r=8.0)
 
         dst_row = edges[1]
         for d in range(len(self.DST)):
@@ -222,14 +238,14 @@ class TestBuildKnnEdgesDirection:
         )
         dst = torch.tensor([[19.0, 0.0, 0.0], [21.0, 0.0, 0.0]], device=device)
 
-        edges = build_knn_edges(src, dst, k=1)
+        edges = build_dynamic_edges(src, dst, k=1, policy="knn", r=8.0)
 
         assert edges[0].max().item() == 2  # src[2]; >= len(dst), so a swap breaks
         assert edges[1].max().item() < len(dst)
 
     def test_torch_geometric_knn_row_convention_unchanged(self, device):
         """Pin knn's undocumented rows: row 0 = y (query), row 1 = x (neighbor).
-        build_knn_edges swaps them, so a flip here would reverse every edge."""
+        build_dynamic_edges swaps them, so a flip here would reverse every edge."""
         x = torch.tensor([[0.0, 0.0], [10.0, 0.0], [20.0, 0.0]], device=device)  # N=3
         y = torch.tensor([[0.1, 0.0], [19.9, 0.0]], device=device)  # M=2
 
@@ -237,6 +253,78 @@ class TestBuildKnnEdgesDirection:
 
         assert out[0].tolist() == [0, 1]  # queries (y), in order
         assert out[1].tolist() == [0, 2]  # nearest x: y[0]->x[0], y[1]->x[2]
+
+    def test_torch_geometric_radius_row_convention_unchanged(self, device):
+        """Pin radius's rows: row 0 = y (query), row 1 = x (neighbor) -- the same
+        convention as knn. build_dynamic_edges relies on this by passing src as
+        `y`, so it lands in row 0 with no swap. Index ranges are kept distinct
+        (3 x's vs 2 y's) so a flip cannot pass silently."""
+        x = torch.tensor(
+            [[0.0, 0.0], [0.1, 0.0], [0.2, 0.0], [10.0, 0.0], [10.1, 0.0]],
+            device=device,
+        )  # N=5
+        y = torch.tensor([[0.05, 0.0], [10.05, 0.0]], device=device)  # M=2
+
+        out = radius(x, y, r=0.5)
+
+        assert out[0].max().item() <= 1  # queries (y), max index 1
+        assert out[1].max().item() == 4  # neighbours (x), reaches index 4
+
+    def test_radius_rows_are_src_then_dst(self, device):
+        """Row 0 = src, row 1 = dst under the radius policy too, pinned by index
+        range: 2 srcs and 5 dsts, so a swap puts an out-of-range index in row 0."""
+        src = torch.tensor([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], device=device)
+        dst = torch.tensor(
+            [
+                [0.1, 0.0, 0.0],
+                [0.2, 0.0, 0.0],
+                [0.3, 0.0, 0.0],
+                [10.1, 0.0, 0.0],
+                [10.2, 0.0, 0.0],
+            ],
+            device=device,
+        )
+
+        edges = build_dynamic_edges(src, dst, policy="radius", k=1, r=1.0)
+
+        assert edges[0].max().item() < len(src)
+        assert edges[1].max().item() == 4  # dst[4]; >= len(src), so a swap breaks
+
+    def test_radius_self_graph_has_no_self_loops(self, device):
+        pos = torch.tensor(
+            [[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [99.0, 0.0, 0.0]], device=device
+        )
+
+        edges = build_dynamic_edges(pos, pos, policy="radius", k=1, r=1.0)
+
+        assert (edges[0] != edges[1]).all()
+        assert set(zip(edges[0].tolist(), edges[1].tolist())) == {(0, 1), (1, 0)}
+
+
+@pytest.mark.unit
+class TestResolveEdgePolicy:
+    """Replaying a recorded config must reproduce the original run. Every run on
+    record carries "auto", so rejecting it would strand all of them."""
+
+    @pytest.mark.parametrize(
+        "policy,strategy,expected",
+        [
+            # "auto" reads off the prior: the uniform ball never strands a water,
+            # the Gaussian can, so only the latter earns the rescue.
+            ("auto", "uniform_ball", "radius"),
+            ("auto", "scaled_gaussian", "knn_if_isolated"),
+            # An explicit policy ignores the prior.
+            ("radius", "scaled_gaussian", "radius"),
+            ("knn", "uniform_ball", "knn"),
+            ("knn_if_isolated", "uniform_ball", "knn_if_isolated"),
+        ],
+    )
+    def test_resolves(self, policy, strategy, expected):
+        assert resolve_edge_policy(policy, strategy) == expected
+
+    def test_unknown_value_raises(self):
+        with pytest.raises(ValueError, match="dynamic_edge_policy"):
+            resolve_edge_policy("knn_if_lonely")
 
 
 @pytest.mark.unit
@@ -289,20 +377,143 @@ class TestProteinWaterUpdate:
         assert ("protein", "pw", "water") in updater.etypes
         assert ("water", "ww", "water") in updater.etypes
 
-    def test_init_always_includes_all_edge_types(self):
+    def test_init_defaults_to_all_edge_types(self):
         updater = ProteinWaterUpdate(
             hidden_dims=(128, 16),
             rbf_dim=16,
             layers=2,
         )
 
-        assert ("protein", "pp", "protein") in updater.etypes
-        assert ("water", "wp", "protein") in updater.etypes
+        assert set(updater.etypes) == set(ALL_EDGE_TYPES)
+
+    def test_init_rejects_unknown_etype(self):
+        with pytest.raises(ValueError, match="subset"):
+            ProteinWaterUpdate(
+                hidden_dims=(128, 16),
+                layers=1,
+                etypes=[EDGE_PW, ("water", "xx", "water")],
+            )
+
+    def test_knn_if_isolated_builds_a_radius_graph_and_rescues(self):
+        """It differs from plain radius only by the rescue; build_edges is handed
+        "radius" either way."""
+        updater = ProteinWaterUpdate(
+            hidden_dims=(128, 16), layers=1, dynamic_edge_policy="knn_if_isolated"
+        )
+
+        assert updater.dynamic_edge_policy == "radius"
+        assert updater.rescue_isolated
+
+    def test_plain_radius_does_not_rescue(self):
+        """The rescue belongs to knn_if_isolated, so a positive knn_fallback_k
+        must not switch it on by itself."""
+        updater = ProteinWaterUpdate(
+            hidden_dims=(128, 16),
+            layers=1,
+            dynamic_edge_policy="radius",
+            knn_fallback_k=8,
+        )
+
+        assert not updater.rescue_isolated
+
+    def test_init_rejects_negative_fallback_k(self):
+        with pytest.raises(ValueError, match="knn_fallback_k"):
+            ProteinWaterUpdate(hidden_dims=(128, 16), layers=1, knn_fallback_k=-1)
+
+    def test_ablated_etypes_are_absent_from_edge_dict(self, simple_hetero_data):
+        updater = ProteinWaterUpdate(
+            hidden_dims=(128, 16),
+            layers=1,
+            etypes=get_active_edge_types(disable_ww=True, disable_wp=True),
+        )
+
+        edge_dict = updater.build_edges(simple_hetero_data)
+
+        assert set(edge_dict) == {EDGE_PW, EDGE_PP}
+
+    def test_radius_strands_far_water_and_fallback_rescues_it(self, device):
+        """A water parked far outside `cutoff` gets no radius PW edges. With the
+        rescue enabled it is reconnected to its nearest protein atoms anyway."""
+        data = HeteroData()
+        data["protein"].pos = torch.randn(10, 3, device=device)
+        data["water"].pos = torch.cat(
+            [torch.randn(4, 3, device=device), torch.full((1, 3), 500.0, device=device)]
+        )
+
+        def stranded(knn_fallback_k):
+            updater = ProteinWaterUpdate(
+                hidden_dims=(32, 4),
+                layers=1,
+                cutoff=8.0,
+                dynamic_edge_policy="knn_if_isolated",
+                knn_fallback_k=knn_fallback_k,
+            )
+            edge_index = updater.build_edges(data)[EDGE_PW]
+            connected = torch.zeros(5, dtype=torch.bool, device=device)
+            connected[edge_index[1].unique()] = True
+            return int((~connected).sum())
+
+        assert stranded(knn_fallback_k=0) == 1
+        assert stranded(knn_fallback_k=3) == 0
+
+    def test_radius_strands_far_water_on_wp_and_fallback_rescues_it(self, device):
+        """The rescue is symmetric across edge direction. On water->protein the
+        water is the source, so a water parked outside `cutoff` loses its WP edges
+        too; the fallback reconnects it to its nearest protein atoms."""
+        data = HeteroData()
+        data["protein"].pos = torch.randn(10, 3, device=device)
+        data["water"].pos = torch.cat(
+            [torch.randn(4, 3, device=device), torch.full((1, 3), 500.0, device=device)]
+        )
+
+        def stranded(knn_fallback_k):
+            updater = ProteinWaterUpdate(
+                hidden_dims=(32, 4),
+                layers=1,
+                cutoff=8.0,
+                dynamic_edge_policy="knn_if_isolated",
+                knn_fallback_k=knn_fallback_k,
+            )
+            # water is the source of WP, so it lives on row 0.
+            edge_index = updater.build_edges(data)[EDGE_WP]
+            connected = torch.zeros(5, dtype=torch.bool, device=device)
+            connected[edge_index[0].unique()] = True
+            return int((~connected).sum())
+
+        assert stranded(knn_fallback_k=0) == 1
+        assert stranded(knn_fallback_k=3) == 0
+
+    def test_knn_policy_never_strands_a_water(self, device):
+        """KNN budgets per destination, so distance cannot isolate a node and the
+        rescue is unnecessary."""
+        data = HeteroData()
+        data["protein"].pos = torch.randn(10, 3, device=device)
+        data["water"].pos = torch.cat(
+            [torch.randn(4, 3, device=device), torch.full((1, 3), 500.0, device=device)]
+        )
+        updater = ProteinWaterUpdate(
+            hidden_dims=(32, 4), layers=1, dynamic_edge_policy="knn", k_pw=3
+        )
+
+        edge_index = updater.build_edges(data)[EDGE_PW]
+
+        assert set(edge_index[1].tolist()) == {0, 1, 2, 3, 4}
+
+    def test_cached_pw_edges_are_used_verbatim(self, simple_hetero_data, device):
+        """A dataset that precomputes PW edges (the confidence pipeline) must not
+        have them rebuilt underneath it."""
+        cached = torch.tensor([[0, 1], [2, 3]], device=device)
+        simple_hetero_data[EDGE_PW].edge_index = cached
+        updater = ProteinWaterUpdate(hidden_dims=(128, 16), layers=1)
+
+        edge_dict = updater.build_edges(simple_hetero_data)
+
+        assert torch.equal(edge_dict[EDGE_PW], cached)
 
     def test_build_edges(self, simple_hetero_data):
         updater = ProteinWaterUpdate(hidden_dims=(128, 16), layers=1)
 
-        edge_dict = updater.build_edges(simple_hetero_data, k_pw=4, k_ww=3)
+        edge_dict = updater.build_edges(simple_hetero_data)
 
         assert ("protein", "pw", "water") in edge_dict
         assert ("water", "ww", "water") in edge_dict
@@ -493,22 +704,24 @@ class TestFlowMatcher:
         assert "rmsd" in result
         assert result["loss"] >= 0
 
-    def test_scaled_gaussian_auto_policy_enables_knn_fallback(
-        self, device, gvp_encoder
-    ):
+    def test_edge_config_propagates_to_updater(self, device, gvp_encoder):
+        """Edge construction is configured once on the model and used for both
+        training and integration, so it must reach the updater that builds the
+        edges. An earlier design resolved it per batch and let the two diverge."""
         model = FlowWaterGVP(
             encoder=gvp_encoder,
             hidden_dims=(64, 8),
             layers=1,
+            dynamic_edge_policy="knn",
+            cutoff=6.0,
+            knn_fallback_k=0,
+            disable_ww=True,
         ).to(device)
 
-        flow_matcher = FlowMatcher(
-            model,
-            sampling_strategy="scaled_gaussian",
-            dynamic_edge_policy="auto",
-        )
-
-        assert flow_matcher._effective_dynamic_edge_policy() == "knn_if_isolated"
+        assert model.updater.dynamic_edge_policy == "knn"
+        assert model.updater.cutoff == 6.0
+        assert model.updater.knn_fallback_k == 0
+        assert EDGE_WW not in model.updater.etypes
 
     @pytest.mark.slow
     def test_euler_integrate(self, flow_matcher, simple_hetero_data, device):
@@ -1187,7 +1400,7 @@ class TestWaterEdgeConnectivity:
         """Ensure every water has at least one protein-water edge."""
         updater = ProteinWaterUpdate(hidden_dims=(128, 16), layers=1)
 
-        edge_dict = updater.build_edges(simple_hetero_data, k_pw=4, k_ww=3)
+        edge_dict = updater.build_edges(simple_hetero_data)
         pw_edges = edge_dict[("protein", "pw", "water")]
 
         n_water = simple_hetero_data["water"].num_nodes
@@ -1202,7 +1415,7 @@ class TestWaterEdgeConnectivity:
         """Ensure every water has at least one water-water edge (if multiple waters exist)."""
         updater = ProteinWaterUpdate(hidden_dims=(128, 16), layers=1)
 
-        edge_dict = updater.build_edges(simple_hetero_data, k_pw=4, k_ww=3)
+        edge_dict = updater.build_edges(simple_hetero_data)
         ww_edges = edge_dict[("water", "ww", "water")]
 
         n_water = simple_hetero_data["water"].num_nodes
@@ -1221,7 +1434,7 @@ class TestWaterEdgeConnectivity:
         """Ensure all waters in a batched graph have edges."""
         updater = ProteinWaterUpdate(hidden_dims=(128, 16), layers=1)
 
-        edge_dict = updater.build_edges(batched_hetero_data, k_pw=4, k_ww=3)
+        edge_dict = updater.build_edges(batched_hetero_data)
         pw_edges = edge_dict[("protein", "pw", "water")]
         ww_edges = edge_dict[("water", "ww", "water")]
 
@@ -1256,7 +1469,7 @@ class TestWaterEdgeConnectivity:
         )
 
         updater = ProteinWaterUpdate(hidden_dims=(128, 16), layers=1)
-        edge_dict = updater.build_edges(data, k_pw=4, k_ww=3)
+        edge_dict = updater.build_edges(data)
 
         pw_edges = edge_dict[("protein", "pw", "water")]
         ww_edges = edge_dict[("water", "ww", "water")]
