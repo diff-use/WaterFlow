@@ -52,6 +52,41 @@ def _batch_from_counts(num_waters: Tensor, device: torch.device) -> Tensor:
     )
 
 
+def _eligible_mask_or_skip(
+    batch_p: Tensor,
+    mask: Tensor,
+    num_graphs: int,
+    warn_msg: str,
+    requesting: Tensor | None = None,
+) -> Tensor | None:
+    """Restrict protein atoms to *mask*, unless doing so would empty a graph.
+
+    An ASU-only mask should always leave every graph with at least one atom. If
+    it somehow does not, applying it would starve a graph (no anchor to sample
+    from / a degenerate sigma at the origin), so we skip the mask entirely and
+    warn rather than silently corrupt that graph.
+
+    Args:
+        batch_p: (N_protein,) graph index per protein atom.
+        mask: (N_protein,) bool eligibility mask over the same atoms.
+        num_graphs: Total graph count, so empty graphs are counted.
+        warn_msg: Message logged when the mask would empty a graph.
+        requesting: Optional graph indices that must stay non-empty; when None,
+            every graph must. `sample_waters_uniform_ball` only cares about
+            water-requesting graphs, so it passes `batch_w`.
+
+    Returns:
+        The bool mask to apply, or None if it would empty a graph (skip it).
+    """
+    eligible = mask.to(batch_p.device).bool()
+    counts = torch.bincount(batch_p[eligible], minlength=num_graphs)
+    empty = counts == 0 if requesting is None else counts[requesting] == 0
+    if empty.any():
+        logger.warning(warn_msg)
+        return None
+    return eligible
+
+
 def sample_waters_uniform_ball(
     protein_pos: Tensor,
     batch_p: Tensor,
@@ -106,18 +141,19 @@ def sample_waters_uniform_ball(
 
     protein_pos = protein_pos.to(device)
 
-    # Drop to the eligible anchors (ASU-only). Skip the mask, rather than starve a
-    # graph, if it would leave a water-requesting graph with no anchor -- an
-    # invariant violation the dataset should never produce, so warn if it happens.
+    # Drop to the eligible anchors (ASU-only), keeping only water-requesting graphs
+    # non-empty; the helper skips the mask (with a warning) if it would leave such
+    # a graph with no anchor -- an invariant the dataset should never violate.
     if anchor_mask is not None:
-        eligible = anchor_mask.to(device).bool()
-        counts = torch.bincount(batch_p[eligible], minlength=num_graphs)
-        if (counts[batch_w] == 0).any():
-            logger.warning(
-                "sample_waters_uniform_ball: anchor mask leaves a water-requesting "
-                "graph with no anchor; anchoring the batch on all protein atoms."
-            )
-        else:
+        eligible = _eligible_mask_or_skip(
+            batch_p,
+            anchor_mask,
+            num_graphs,
+            "sample_waters_uniform_ball: anchor mask leaves a water-requesting "
+            "graph with no anchor; anchoring the batch on all protein atoms.",
+            requesting=batch_w,
+        )
+        if eligible is not None:
             protein_pos = protein_pos[eligible]
             batch_p = batch_p[eligible]
 
@@ -836,18 +872,19 @@ class FlowMatcher:
                 "they have zero protein atoms."
             )
 
-        # Restrict to the masked atoms (ASU-only). Skip the mask, rather than yield
-        # a degenerate sigma, if it would leave a graph with no atoms -- which the
-        # dataset should never produce, so warn if it happens.
+        # Restrict to the masked atoms (ASU-only). Every graph must stay non-empty
+        # here (each yields a sigma), so no `requesting`; the helper skips the mask
+        # (with a warning) rather than yield a degenerate origin-sigma for a graph
+        # the mask would empty -- which the dataset should never produce.
         if node_mask is not None:
-            eligible = node_mask.to(pos.device).bool()
-            counts = torch.bincount(batch_p[eligible], minlength=num_graphs)
-            if (counts == 0).any():
-                logger.warning(
-                    "compute_sigma_per_graph: node mask leaves a graph with no "
-                    "atoms; computing sigma over all protein atoms."
-                )
-            else:
+            eligible = _eligible_mask_or_skip(
+                batch_p,
+                node_mask,
+                num_graphs,
+                "compute_sigma_per_graph: node mask leaves a graph with no "
+                "atoms; computing sigma over all protein atoms.",
+            )
+            if eligible is not None:
                 pos = pos[eligible]
                 batch_p = batch_p[eligible]
 

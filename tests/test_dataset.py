@@ -482,13 +482,24 @@ class TestDedupMateLigandsByResidue:
 
     @pytest.mark.integration
     def test_real_mate_ligands_are_kept_or_dropped_whole(self, pdb_4h0b):
-        """Real mate ligands from 4h0b, judged as entities.
+        """Real mate ligands from 4h0b, judged as whole entities.
 
-        No fixture puts a ligand on a special position, so against the true ASU
-        reference nothing drops: every mate ligand here is a genuine neighbour-cell
-        copy. Referencing one entity against itself builds the drop case from real
-        atoms -- it goes whole, and the others are not fragmented.
+        Entities are keyed the way dedup_mate_ligands_by_residue keys them --
+        symmetry image (atom.model) included -- so each group is one physical
+        ligand copy. Against the true ASU reference every copy is a genuine
+        neighbour and survives. We then drive a single multi-atom entity across
+        the image_frac threshold by seeding the reference with a controlled
+        fraction of its own atoms, and confirm no other entity is fragmented.
         """
+
+        def key(atom):
+            return (
+                getattr(atom, "model", ""),
+                atom.chain,
+                atom.resi,
+                getattr(atom, "segi", ""),
+            )
+
         protein_atoms, water_atoms, ligand_atoms = parse_asu_with_biotite(pdb_4h0b)
         crystal = get_crystal_contacts_pymol(
             str(pdb_4h0b), cutoff=8.0, include_ligands=True
@@ -500,43 +511,61 @@ class TestDedupMateLigandsByResidue:
         asu_reference = np.concatenate(
             [protein_atoms.coord, water_atoms.coord, ligand_atoms.coord], axis=0
         )
-        kept, kept_atoms = dedup_mate_ligands_by_residue(
+
+        # Genuine neighbour-cell ligands: none coincide with the ASU, all survive.
+        kept, _ = dedup_mate_ligands_by_residue(
             lig_coords, lig_atoms, asu_reference, tol=0.3
         )
         assert kept.shape[0] == lig_coords.shape[0], (
             "genuine neighbour-cell ligands must all survive the ASU reference"
         )
 
-        # now make one entity a symmetry image by referencing it against itself
         groups = {}
         for i, atom in enumerate(lig_atoms):
-            groups.setdefault(
-                (atom.chain, atom.resi, getattr(atom, "segi", "")), []
-            ).append(i)
+            groups.setdefault(key(atom), []).append(i)
         assert len(groups) > 1, "need more than one entity to show the others survive"
-        target_key, target_idx = next(iter(groups.items()))
 
-        kept, kept_atoms = dedup_mate_ligands_by_residue(
-            lig_coords,
-            lig_atoms,
-            np.concatenate([asu_reference, lig_coords[target_idx]], axis=0),
-            tol=0.3,
-        )
+        # A single multi-atom entity: only with several atoms does a partial
+        # reference give a meaningful fraction (a 1-atom ligand is 0% or 100%).
+        target_key = max(groups, key=lambda k: len(groups[k]))
+        target_idx = groups[target_key]
+        n = len(target_idx)
+        assert n >= 5, "need a multi-atom entity to exercise the image_frac boundary"
+        others = set(groups) - {target_key}
 
-        # the imaged entity went whole, and nothing else went with it
-        assert kept.shape[0] == lig_coords.shape[0] - len(target_idx)
-        surviving = {(a.chain, a.resi, getattr(a, "segi", "")) for a in kept_atoms}
-        assert target_key not in surviving
-        assert surviving == set(groups) - {target_key}
-        # every survivor kept all of its atoms: entities are never fragmented
-        for key, idxs in groups.items():
-            if key == target_key:
-                continue
-            assert sum(
-                1
-                for a in kept_atoms
-                if (a.chain, a.resi, getattr(a, "segi", "")) == key
-            ) == len(idxs)
+        def survivors_when(extra_ref_idx):
+            """Dedup with the target's own atoms `extra_ref_idx` seeded into the
+            reference; return the surviving entity keys and the intactness check."""
+            ref = np.concatenate([asu_reference, lig_coords[extra_ref_idx]], axis=0)
+            _, atoms = dedup_mate_ligands_by_residue(
+                lig_coords, lig_atoms, ref, tol=0.3
+            )
+            present = [key(a) for a in atoms]
+            # No entity is fragmented: a survivor keeps all its atoms, a dropped
+            # one keeps none.
+            intact = all(
+                present.count(k) in (0, len(idxs)) for k, idxs in groups.items()
+            )
+            return set(present), intact
+
+        # Whole image: every target atom coincides (frac 1.0 > 0.5) -> target drops.
+        surviving, intact = survivors_when(target_idx)
+        assert surviving == others, "the imaged entity drops whole, nothing else"
+        assert intact
+
+        # Partial image below threshold: ~40% coincide (<= 0.5) -> kept whole.
+        below = target_idx[: int(0.4 * n)]
+        assert 0 < len(below) / n <= 0.5
+        surviving, intact = survivors_when(below)
+        assert surviving == set(groups), "a below-threshold image is kept whole"
+        assert intact
+
+        # Partial image above threshold: ~60% coincide (> 0.5) -> target drops.
+        above = target_idx[: int(0.6 * n) + 1]
+        assert len(above) / n > 0.5
+        surviving, intact = survivors_when(above)
+        assert surviving == others, "an above-threshold image drops whole"
+        assert intact
 
 
 @pytest.mark.unit
@@ -3190,8 +3219,12 @@ class TestMatesWithLigands:
         blocks = self._blocks(data["protein"].is_mate, cached["is_ligand"])
 
         assert data.num_asu_protein_atoms == int(blocks["asu_protein"].sum())
-        assert int(blocks["asu_ligand"].sum()) > 0
-        assert data.num_asu_protein_atoms < data["protein"].num_nodes
+        # The invariant SLAE/ESM alignment relies on: the ASU ligand block sits
+        # behind the protein count, so no ligand atom lands within the first
+        # num_asu_protein_atoms rows those embeddings index.
+        asu_ligand_idx = blocks["asu_ligand"].nonzero().flatten()
+        assert asu_ligand_idx.numel() > 0, "4h0b must populate the ASU ligand block"
+        assert asu_ligand_idx.min().item() >= data.num_asu_protein_atoms
 
     def test_emb_res_idx_splits_ligands_from_mate_protein(self, tmp_path, pdb_base_dir):
         """Ligands carry the -1 sentinel whichever cell they came from; mate protein

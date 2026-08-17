@@ -317,10 +317,18 @@ def dedup_mate_ligands_by_residue(
         return lig_coords, lig_atoms
 
     ref_tree = cKDTree(reference_coords)
-    # Group atom indices by ligand entity (chain, residue id, segment).
+    # Group atom indices by ligand entity. atom.model is the symmetry-object id, so
+    # two neighbour-cell images of one ligand stay separate entities: without it
+    # they collide into one group and a single image_frac is averaged over both,
+    # which can dilute a genuine ASU-image copy below the drop threshold.
     groups = {}
     for i, atom in enumerate(lig_atoms):
-        key = (atom.chain, atom.resi, getattr(atom, "segi", ""))
+        key = (
+            getattr(atom, "model", ""),
+            atom.chain,
+            atom.resi,
+            getattr(atom, "segi", ""),
+        )
         groups.setdefault(key, []).append(i)
 
     keep_idx: list[int] = []
