@@ -137,7 +137,7 @@ def _default_b_factors(atoms: bts.AtomArray, coords: np.ndarray) -> np.ndarray:
     """Per-water default B-factor from the local environment.
 
     Each water takes the mean B-factor of the kept atoms near it, plus an offset.
-    A water with no atom in range uses the overall mean. Returns zeros when atoms 
+    A water with no atom in range uses the overall mean. Returns zeros when atoms
     has no b_factor.
     """
 

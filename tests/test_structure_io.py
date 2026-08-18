@@ -74,9 +74,7 @@ class TestMergeWaters:
         # Two atoms within 4 A of the water (B = 10, 30) and one far away (B = 80);
         # the water should take mean(10, 30) + 10.0.
         prot = bts.AtomArray(3)
-        prot.coord = np.array(
-            [[0, 0, 0], [2, 0, 0], [100, 0, 0]], dtype=np.float32
-        )
+        prot.coord = np.array([[0, 0, 0], [2, 0, 0], [100, 0, 0]], dtype=np.float32)
         prot.chain_id[:] = "A"
         prot.res_id[:] = [1, 2, 3]
         prot.ins_code[:] = ""
