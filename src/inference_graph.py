@@ -2,13 +2,13 @@
 
 """Build the flow-model input graph from a raw PDB/CIF at inference time.
 
-The training `ProteinWaterDataset` couples graph construction to ground-truth
+The training ProteinWaterDataset couples graph construction to ground-truth
 water quality filtering and a training cache. Inference needs only the geometry
 half -- protein + symmetry mates + hets, no waters -- so this module imports the
-independent building blocks from `src.dataset`/`src.utils` and replicates just
+independent building blocks from src.dataset/src.utils and replicates just
 the inline assembly that isn't already a standalone function.
 
-The produced `HeteroData` matches what `ProteinWaterDataset.__getitem__` yields
+The produced HeteroData matches what ProteinWaterDataset.__getitem__ yields
 (same node order, residue indexing, PP edges and embedding attachment) but with
 empty water nodes: the flow model samples candidate waters itself.
 """
@@ -56,29 +56,29 @@ def build_inference_graph(
     cache_load_mmap: bool = True,
     out_dir: str | Path | None = None,
 ) -> HeteroData:
-    """Parse a structure into the flow model's `HeteroData`, ready for sampling.
+    """Parse a structure into the flow model's HeteroData, ready for sampling.
 
     Waters in the file are dropped; the kept atoms are protein + hets (and their
-    symmetry mates when ``include_mates``). Coordinates are centred on the ASU
+    symmetry mates when include_mates). Coordinates are centred on the ASU
     protein centroid, exactly as training preprocessing does.
 
     Args:
         struc_path: Path to a PDB or CIF file.
-        encoder_type: ``"gvp"`` (no embeddings), ``"slae"`` or ``"esm"`` (loads a
-            precomputed embedding from ``processed_dir/<encoder_type>``).
+        encoder_type: "gvp" (no embeddings), "slae" or "esm" (loads a
+            precomputed embedding from processed_dir/<encoder_type>).
         processed_dir: Cache root holding the embedding directory. Required for
-            ``slae``/``esm``; unused for ``gvp``.
-        include_mates: Add crystallographic symmetry mates (PyMOL ``symexp``).
+            slae/esm; unused for gvp.
+        include_mates: Add crystallographic symmetry mates (PyMOL symexp).
         include_ligands: Keep hetero atoms (ligands, ions, cofactors, nucleic
             acids) and their mates.
         cutoff, max_neighbors: PP radius-graph parameters (match the flow run).
         cache_key: Key for the embedding lookup. Defaults to the file stem
-            (e.g. ``6eey_final``).
-        out_dir: If given, the graph is also saved to ``out_dir/<cache_key>.pt``.
+            (e.g. 6eey_final).
+        out_dir: If given, the graph is also saved to out_dir/<cache_key>.pt.
 
     Returns:
-        HeteroData with centred ``protein`` nodes (+ optional embeddings), empty
-        ``water`` nodes, and cached PP edges.
+        HeteroData with centred protein nodes (+ optional embeddings), empty
+        water nodes, and cached PP edges.
     """
     struc_path = str(struc_path)
     if cache_key is None:
@@ -236,7 +236,7 @@ def _build_mates(
     asu_reskey_to_residx: dict[tuple[str, int, str], int],
     cache_key: str,
 ):
-    """Deduped, centred symmetry-mate tensors, mirroring `_preprocess_one`.
+    """Deduped, centred symmetry-mate tensors, mirroring _preprocess_one.
 
     Returns (mate_pos, mate_x, mate_res_idx, mate_emb_res_idx, mate_lig_coords,
     mate_lig_atoms). All empty when there are no mates.
@@ -259,7 +259,7 @@ def _build_mates(
         )
 
     # Drop mate atoms coincident with an ASU atom or an already-kept mate image.
-    # Deliberate divergence from training: `_preprocess_one` also puts the ASU
+    # Deliberate divergence from training: _preprocess_one also puts the ASU
     # (filtered) waters in this reference, so a mate on a special position atop a
     # water is dropped there. Inference has no waters, so such a mate is kept --
     # a rare special-position case with negligible effect on the graph.
@@ -350,7 +350,7 @@ def _assemble_hetero(
     processed_dir,
     cache_load_mmap,
 ) -> HeteroData:
-    """Build the HeteroData and attach embeddings, mirroring `__getitem__`."""
+    """Build the HeteroData and attach embeddings, mirroring __getitem__."""
     data = HeteroData()
 
     num_residues = int(final_res_idx.max().item() + 1) if final_res_idx.numel() else 0
@@ -400,7 +400,7 @@ def _attach_embeddings(
     emb_res_idx: torch.Tensor,
     cache_load_mmap: bool,
 ) -> None:
-    """Load and attach cached embeddings, mirroring `_annotate_data_with_embeddings`."""
+    """Load and attach cached embeddings, mirroring _annotate_data_with_embeddings."""
     if encoder_type == "gvp":
         return
     embedding_dir = Path(processed_dir) / encoder_type
