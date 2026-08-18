@@ -7,7 +7,7 @@ candidate waters from a trained flow checkpoint, scores them with a confidence
 checkpoint, clusters and selects the final set, and writes out predicted-water
 structures (PDB/CIF) plus their coordinates.
 
-This is the *prediction* entry point; `inference.py` remains the cache-based
+This is the *prediction* entry point; inference.py remains the cache-based
 evaluation/benchmark tool. Shared flow machinery is imported, not duplicated.
 
 Usage:
@@ -142,9 +142,9 @@ def select_waters(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Cluster candidates and cull to the final set.
 
-    ``confidence``: threshold is applied *before* clustering (sub-threshold
+    confidence: threshold is applied *before* clustering (sub-threshold
     candidates cannot pull a centroid), then all resulting centroids are kept.
-    ``density`` (added in PR4) will instead keep the top N by confidence.
+    density (added in PR4) will instead keep the top N by confidence.
     """
     if mode == "confidence":
         return cluster_waters_vdw(
