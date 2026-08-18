@@ -430,14 +430,11 @@ def test_build_cache_is_a_noop_on_a_warm_cache(
     assert recorded_shards == []
 
 
-def test_build_cache_runs_single_shard_without_a_pool(
-    cache_args, recorded_shards, monkeypatch
+def test_build_cache_single_core_builds_one_shard(
+    cache_args, recorded_shards, inline_pool, monkeypatch
 ):
-    """
-    With one usable core the pool is skipped entirely.
-
-    No inline_pool fixture here: reaching mp.get_context would spawn real workers.
-    """
+    """One usable core still routes through the pool as a single shard, so PyMOL
+    never runs in this (parent) process."""
     monkeypatch.setattr(train.os, "cpu_count", lambda: 1)
     train.build_cache(cache_args)
 

@@ -306,8 +306,10 @@ uv run python -m scripts.train \
 
 ### Multi-GPU Training (DDP)
 
-No DDP flag — `torchrun`'s env vars are the only switch; a plain
-`python -m scripts.train` runs single-GPU as before.
+To train on several GPUs on one machine, launch the same script with `torchrun`
+and set `--nproc_per_node` to the number of GPUs you want to use. Launching with 
+`torchrun` turns on multi-GPU training, and the plain `python -m scripts.train` 
+command still trains on a single GPU.
 
 ```bash
 uv run torchrun --nproc_per_node=4 -m scripts.train \
@@ -316,14 +318,6 @@ uv run torchrun --nproc_per_node=4 -m scripts.train \
     --encoder_type gvp \
     --batch_size 4  # per rank -> effective 16
 ```
-
-- Each rank trains on a disjoint `DistributedSampler` shard, reshuffled per epoch.
-- Gradients all-reduce once per optimizer step; train/val/eval metrics are
-  all-reduced, so every rank agrees on the best epoch.
-- Rank 0 owns disk and W&B (config, checkpoints, logs). Checkpoints hold the
-  unwrapped `state_dict`, so `inference.py` loads them unchanged.
-- The geometry cache is built by rank 0 before the NCCL group exists,
-  coordinated on a CPU-side store — a cold build can't trip a collective timeout.
 
 ### Resuming from Checkpoints
 

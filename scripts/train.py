@@ -771,16 +771,6 @@ def run_eval_sampling(
     return avg_metrics
 
 
-def _collective_device(args: argparse.Namespace) -> torch.device:
-    """
-    Device for DDP collective buffers.
-
-    NCCL requires this rank's own CUDA device; the CPU fallback only ever runs
-    single-process, where the collective is a no-op.
-    """
-    return torch.device(args.device if torch.cuda.is_available() else "cpu")
-
-
 def _needs_grad_sync(step: int, n_batches: int, accum_steps: int) -> bool:
     """
     Whether this micro-step's backward must all-reduce gradients under DDP.
@@ -800,6 +790,7 @@ def train_epoch(
     optimizer: AdamW,
     warmup_scheduler,
     args: argparse.Namespace,
+    device: torch.device,
     epoch: int,
     optimizer_step_count: int,
 ) -> tuple[dict[str, float], int, int]:
@@ -813,7 +804,7 @@ def train_epoch(
 
     pbar = tqdm(train_loader, desc=f"Epoch {epoch} [Train]")
     for step, batch in enumerate(pbar):
-        batch = batch.to(args.device)
+        batch = batch.to(device)
         if batch["water"].num_nodes == 0:
             skipped_batches += 1
             continue
@@ -901,12 +892,14 @@ def train_epoch(
 
     final_global_step = (epoch - 1) * len(train_loader) + len(train_loader) - 1
 
-    # One collective per epoch so metrics cover every rank's shard. Must run before
-    # the zero-batch check, or a rank that skipped everything would never enter it.
+    # All-reduce the metric sums once per epoch, so the logged numbers cover every
+    # rank's shard. Must run before the zero-batch check below: a rank that skipped
+    # all its batches would return early and never join the all-reduce, hanging the
+    # rest.
     train_metrics, processed_batches = all_reduce_means(
         {"train/epoch_loss": total_loss, "train/epoch_rmsd": total_rmsd},
         processed_batches,
-        _collective_device(args),
+        device,
     )
 
     if processed_batches == 0:
@@ -929,7 +922,7 @@ def train_epoch(
 def val_epoch(
     flow_matcher: FlowMatcher,
     val_loader: DataLoader,
-    args: argparse.Namespace,
+    device: torch.device,
     epoch: int,
 ) -> dict[str, float]:
     """Single validation epoch."""
@@ -939,7 +932,7 @@ def val_epoch(
     processed_batches = 0
 
     for batch in tqdm(val_loader, desc=f"Epoch {epoch} [Val]"):
-        batch = batch.to(args.device)
+        batch = batch.to(device)
         if batch["water"].num_nodes == 0:
             skipped_batches += 1
             continue
@@ -952,7 +945,7 @@ def val_epoch(
     val_metrics, processed_batches = all_reduce_means(
         {"val/loss": total_loss, "val/rmsd": total_rmsd},
         processed_batches,
-        _collective_device(args),
+        device,
     )
 
     if processed_batches == 0:
@@ -1081,9 +1074,9 @@ def build_cache(args: argparse.Namespace) -> None:
     for lst in (args.train_list, args.val_list):
         with open(lst) as f:
             ids.update(line.strip() for line in f if line.strip())
-    sorted_ids = sorted(ids)
-    if not sorted_ids:
+    if not ids:
         return
+    sorted_ids = sorted(ids)
 
     tmpdir = Path(tempfile.mkdtemp(prefix="wf_build_"))
     try:
@@ -1096,19 +1089,16 @@ def build_cache(args: argparse.Namespace) -> None:
             preprocess=False,
             **dataset_kwargs,
         )
-        missing = [
-            entry["cache_key"]
-            for entry in probe.entries
-            if not (probe.geometry_dir / f"{entry['cache_key']}.pt").is_file()
-        ]
+        # Entries can repeat a cache_key; dedup so each file is stat-ed once.
+        keys = list(dict.fromkeys(entry["cache_key"] for entry in probe.entries))
+        missing = [k for k in keys if not (probe.geometry_dir / f"{k}.pt").is_file()]
         if not missing:
             return  # warm cache: nothing to build
 
         logger.info(f"build_cache: preprocessing {len(missing)} missing entries")
+        # One worker per CPU over disjoint key shards. A single shard still goes
+        # through the pool, so PyMOL never runs in this (parent) process.
         n_shards = max(1, min(len(missing), os.cpu_count() or 1))
-        if n_shards == 1:
-            _build_cache_shard(str(union), args.processed_dir, dataset_kwargs)
-            return
         shard_files = []
         for i in range(n_shards):
             shard = tmpdir / f"shard_{i}.txt"
@@ -1121,6 +1111,9 @@ def build_cache(args: argparse.Namespace) -> None:
                 _build_cache_shard,
                 [(shard, args.processed_dir, dataset_kwargs) for shard in shard_files],
             )
+    except Exception:
+        logger.exception("build_cache failed; other ranks will block until timeout")
+        raise
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -1129,16 +1122,23 @@ def main():
     """Run the full training pipeline."""
     args = parse_args()
 
-    # Build the cache before the NCCL group exists: a cold build can take hours and
-    # would trip a GPU-collective timeout. The store is reused as NCCL's rendezvous.
+    # Build the cache on rank 0 before the NCCL group exists. A warm cache is a
+    # no-op probe; only a first cold build is slow, and coordinating that on the
+    # NCCL group would trip its collective watchdog (minutes). A CPU store has no
+    # such watchdog, so rank 0 can take as long as it needs; it is then reused as
+    # NCCL's rendezvous.
     store = run_once_on_main(lambda: build_cache(args), key="wf_cache_ready")
 
     # Under torchrun each rank binds its own GPU; a plain launch yields (0, 0, 1).
     rank, local_rank, world_size = setup_distributed(store=store)
     main_proc = is_main_process(rank)
+    # Under torchrun each rank owns the GPU that setup_distributed pinned with
+    # set_device(local_rank); a plain launch uses --device (CPU if no CUDA). We do
+    # not write this back to args, so the recorded config stays rank-independent.
     if ddp_is_active():
-        args.device = f"cuda:{local_rank}"
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+        device = torch.device("cuda", local_rank)
+    else:
+        device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
     if args.run_name is None:
         args.run_name = generate_run_name(args)
@@ -1324,6 +1324,7 @@ def main():
             optimizer,
             warmup_scheduler,
             args,
+            device,
             epoch,
             optimizer_step_count,
         )
@@ -1331,7 +1332,7 @@ def main():
         train_metrics["epoch"] = epoch
         wandb.log(train_metrics, step=global_step)
 
-        val_metrics = val_epoch(flow_matcher, val_loader, args, epoch)
+        val_metrics = val_epoch(flow_matcher, val_loader, device, epoch)
         val_metrics["epoch"] = epoch
         wandb.log(val_metrics, step=global_step)
 

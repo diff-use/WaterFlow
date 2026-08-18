@@ -116,7 +116,8 @@ def run_once_on_main(work: Callable[[], None], key: str) -> dist.Store | None:
     host = os.environ["MASTER_ADDR"]
     port = int(os.environ["MASTER_PORT"])
     # Client of torchrun's agent store (is_master=False) -- the agent already owns
-    # MASTER_PORT. The timeout covers a cold build, which can take hours.
+    # MASTER_PORT. The timeout is how long peers wait on rank 0; it only bites on a
+    # first cold build (a warm cache returns at once), so it is set generously.
     store = dist.TCPStore(host, port, world, False, timeout=timedelta(hours=24))
 
     if rank == 0:
@@ -159,7 +160,8 @@ def all_reduce_means(
     if ddp_is_active():
         dist.all_reduce(totals, op=dist.ReduceOp.SUM)
 
-    total_count = int(totals[-1].item())
+    total_count = totals[-1].item()
     if total_count == 0:
         return {}, 0
-    return {k: (totals[i] / totals[-1]).item() for i, k in enumerate(keys)}, total_count
+    means = {k: (totals[i] / total_count).item() for i, k in enumerate(keys)}
+    return means, int(total_count)
