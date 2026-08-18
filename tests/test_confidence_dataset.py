@@ -229,7 +229,9 @@ class TestConfidenceDataset:
         from torch_geometric.data import Batch
 
         gt = torch.tensor([[0.0, 0.0, 0.0]])
-        flow = _FakeFlowDataset(["a", "b"], gt_by_key={"a": gt, "b": gt}, embedding_dim=8)
+        flow = _FakeFlowDataset(
+            ["a", "b"], gt_by_key={"a": gt, "b": gt}, embedding_dim=8
+        )
         _write_candidate(tmp_path / "a.pt", torch.randn(3, 3))
         _write_candidate(tmp_path / "b.pt", torch.randn(5, 3))
         ds = ConfidenceDataset(flow, candidate_dir=tmp_path)
