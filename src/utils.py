@@ -660,3 +660,34 @@ def save_protein_plot(
     ax.set_title(f"Step {step}")
     plt.savefig(f"{save_dir}/step_{step}.png")
     plt.close()
+
+
+def auc_pr_and_best_f1(scores: Tensor, labels: Tensor) -> tuple[float, float]:
+    """
+    Average precision and best F1 from one sorted-score precision-recall sweep.
+
+    Scores a *ranking*, so it cannot be averaged from per-shard sums the way a
+    loss can -- pool the candidates first (see `all_gather_concat`), then compute.
+    best_f1 is the max of 2PR/(P+R) over every score threshold.
+
+    Args:
+        scores: (N,) candidate scores; higher ranks first.
+        labels: (N,) binary labels aligned with `scores`.
+
+    Returns:
+        (auc_pr, best_f1); both nan when there are no positives to rank.
+    """
+    if labels.numel() == 0 or labels.sum() == 0:
+        return float("nan"), float("nan")
+
+    lab = labels[torch.argsort(scores, descending=True)].double()
+    tp = torch.cumsum(lab, dim=0)
+    precision = tp / torch.arange(1, lab.numel() + 1, device=lab.device)
+    recall = tp / lab.sum()
+    rec_prev = torch.cat([recall.new_zeros(1), recall[:-1]])
+    ap = torch.sum((recall - rec_prev) * precision).item()
+
+    best_f1 = (
+        (2.0 * precision * recall / (precision + recall).clamp_min(1e-12)).max().item()
+    )
+    return ap, best_f1

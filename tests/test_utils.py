@@ -12,6 +12,7 @@ Organized by category to match utils.py structure:
 All test cases created with assistance from Claude Code and refined.
 """
 
+import math
 from pathlib import Path
 
 import biotite.structure as bts
@@ -26,6 +27,7 @@ matplotlib.use("Agg")
 
 
 from src.utils import (
+    auc_pr_and_best_f1,
     compute_edge_features,
     compute_edge_geometry,
     compute_placement_metrics,
@@ -680,3 +682,53 @@ class TestSaveProteinPlot:
 #         )
 
 #         assert Path(gif_path).exists()
+
+
+@pytest.mark.unit
+class TestAucPrAndBestF1:
+    def test_perfect_ranking_scores_one(self):
+        ap, best_f1 = auc_pr_and_best_f1(
+            torch.tensor([0.9, 0.8, 0.2, 0.1]), torch.tensor([1.0, 1.0, 0.0, 0.0])
+        )
+
+        assert ap == pytest.approx(1.0)
+        assert best_f1 == pytest.approx(1.0)
+
+    def test_only_the_order_matters(self):
+        """A monotone rescale of the scores must not move the metrics."""
+        labels = torch.tensor([1.0, 0.0, 1.0, 0.0])
+        base = auc_pr_and_best_f1(torch.tensor([0.9, 0.7, 0.5, 0.3]), labels)
+        rescaled = auc_pr_and_best_f1(torch.tensor([90.0, 7.0, 0.05, 3e-3]), labels)
+
+        assert base == pytest.approx(rescaled)
+
+    def test_no_positives_is_nan(self):
+        ap, best_f1 = auc_pr_and_best_f1(
+            torch.tensor([0.9, 0.1]), torch.tensor([0.0, 0.0])
+        )
+
+        assert math.isnan(ap) and math.isnan(best_f1)
+
+    def test_empty_input_is_nan(self):
+        ap, best_f1 = auc_pr_and_best_f1(torch.empty(0), torch.empty(0))
+
+        assert math.isnan(ap) and math.isnan(best_f1)
+
+    def test_matches_hand_computed_curve(self):
+        # Ranked labels [1, 0, 1]: precision 1.0 at recall 0.5, 2/3 at recall 1.0;
+        # F1 over thresholds = 2/3, 1/2, 4/5 -> best 4/5.
+        ap, best_f1 = auc_pr_and_best_f1(
+            torch.tensor([0.9, 0.6, 0.3]), torch.tensor([1.0, 0.0, 1.0])
+        )
+
+        assert ap == pytest.approx(0.5 * 1.0 + 0.5 * (2 / 3))
+        assert best_f1 == pytest.approx(4 / 5)
+
+    def test_worse_ranking_scores_lower(self):
+        """The selection signal: best.pt is chosen on AUC-PR."""
+        scores = torch.tensor([0.9, 0.6, 0.3])
+        best, _ = auc_pr_and_best_f1(scores, torch.tensor([1.0, 1.0, 0.0]))
+        worst, _ = auc_pr_and_best_f1(scores, torch.tensor([0.0, 1.0, 1.0]))
+
+        assert best == pytest.approx(1.0)
+        assert worst < best
