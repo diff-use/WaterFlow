@@ -109,7 +109,12 @@ def _write_candidate_cache(
 
     (out / "generation.json").write_text(
         json.dumps(
-            {**run_info, "n_written": n_written, "n_skipped": n_skipped, "n_total": n_total},
+            {
+                **run_info,
+                "n_written": n_written,
+                "n_skipped": n_skipped,
+                "n_total": n_total,
+            },
             indent=2,
         )
     )
