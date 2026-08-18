@@ -24,12 +24,11 @@ from torch import Tensor
 from torch.utils.data import Dataset
 from torch_geometric.data import HeteroData
 
-from src.confidence import smootherstep_confidence
-from src.constants import ELEM_IDX, ELEMENT_VOCAB
+from src.confidence import nearest_gt_distance, smootherstep_confidence
+from src.constants import ELEM_IDX, NODE_FEATURE_DIM
 from src.dataset import ProteinWaterDataset
 
 
-WATER_FEATURE_DIM = len(ELEMENT_VOCAB) + 1  # matches element_onehot in src/dataset.py
 OXYGEN_INDEX = ELEM_IDX["O"]
 
 
@@ -41,7 +40,7 @@ def _oxygen_features(n: int, device: torch.device | None = None) -> Tensor:
     runs per structure per epoch); equivalence is pinned by a unit test.
     """
     idx = torch.full((n,), OXYGEN_INDEX, dtype=torch.long, device=device)
-    return F.one_hot(idx, num_classes=WATER_FEATURE_DIM).float()
+    return F.one_hot(idx, num_classes=NODE_FEATURE_DIM).float()
 
 
 class ConfidenceDataset(Dataset):
@@ -106,8 +105,8 @@ class ConfidenceDataset(Dataset):
             raise ValueError("r_out must exceed r_in.")
         if self.accept_radius < 0:
             raise ValueError("accept_radius must be non-negative.")
-        if self.max_candidates is not None and self.max_candidates < 0:
-            raise ValueError("max_candidates must be non-negative.")
+        if self.max_candidates is not None and self.max_candidates < 1:
+            raise ValueError("max_candidates must be positive.")
 
         # Map each flow-dataset index to its candidate file (cheap existence
         # checks via the entries list).
@@ -154,26 +153,25 @@ class ConfidenceDataset(Dataset):
 
     def _compute_targets(
         self, candidate_pos: Tensor, gt_pos: Tensor
-    ) -> tuple[Tensor, Tensor, Tensor]:
-        """Return (training target, within-`accept_radius` label, nearest-GT index).
+    ) -> tuple[Tensor, Tensor]:
+        """Return (training target, within-`accept_radius` label).
 
-        The nearest-GT distance / argmin is computed once and reused for: the
-        regression target (soft smootherstep, or a hard 1[d<=accept_radius] when
-        `hard_label`), the AUC-PR label (1[d<=accept_radius]), and the
-        per-candidate nearest-GT index (for the optional coverage loss, which
-        groups candidates by the GT site they could cover).
+        The nearest-GT distance (shared with `confidence.nearest_gt_distance`, so
+        both paths agree) drives the regression target (soft smootherstep, or a
+        hard 1[d<=accept_radius] when `hard_label`) and the AUC-PR label
+        (1[d<=accept_radius]).
         """
         if candidate_pos.numel() == 0 or gt_pos.numel() == 0:
             empty = candidate_pos.new_empty(0)
-            return empty, empty, candidate_pos.new_empty(0, dtype=torch.long)
-        d, gt_index = torch.cdist(candidate_pos, gt_pos).min(dim=1)  # (Nc,), (Nc,)
+            return empty, empty
+        d = nearest_gt_distance(candidate_pos, gt_pos)  # (Nc,)
         label = (d <= self.accept_radius).float()
         target = (
             label
             if self.hard_label
             else smootherstep_confidence(d, r_in=self.r_in, r_out=self.r_out)
         )
-        return target, label, gt_index
+        return target, label
 
     def __getitem__(self, idx: int) -> HeteroData:
         flow_idx = self._indices[idx]
@@ -181,7 +179,7 @@ class ConfidenceDataset(Dataset):
 
         gt_pos: Tensor = data["water"].pos.float().clone()
         candidate_pos: Tensor = torch.load(
-            self._paths[idx], map_location="cpu", weights_only=False
+            self._paths[idx], map_location="cpu", weights_only=True
         )["candidate_pos"].float()
         # Optional per-structure cap: random subsample of the candidate cloud.
         # Free for quality (candidates are scored independently -- no
@@ -195,16 +193,13 @@ class ConfidenceDataset(Dataset):
             candidate_pos = candidate_pos[sel]
         n_cand = candidate_pos.size(0)
 
-        target, label_1A, gt_index = self._compute_targets(candidate_pos, gt_pos)
+        target, within_accept_radius = self._compute_targets(candidate_pos, gt_pos)
 
         # Swap GT water nodes for the candidates to be scored.
         data["water"].pos = candidate_pos
         data["water"].x = _oxygen_features(n_cand, device=candidate_pos.device)
         data["water"].num_nodes = n_cand
         data["water"].target_confidence = target
-        data["water"].label_1A = label_1A
-        data["water"].gt_index = gt_index
-        data.n_gt = torch.tensor([gt_pos.size(0)], dtype=torch.long)
-        data["water"].gt_pos = gt_pos
+        data["water"].within_accept_radius = within_accept_radius
 
         return data

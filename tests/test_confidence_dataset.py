@@ -75,7 +75,6 @@ class TestConfidenceDataset:
         assert sample["water"].num_nodes == 3
         assert torch.equal(sample["water"].pos, cand)
         assert (sample["water"].x[:, ELEM_IDX["O"]] == 1.0).all()  # oxygen one-hot
-        assert torch.equal(sample["water"].gt_pos, gt)
 
         # target on the fly: candidate on GT -> ~1; far candidate -> ~0
         tc = sample["water"].target_confidence
@@ -133,7 +132,7 @@ class TestConfidenceDataset:
         with pytest.raises(ValueError):
             ConfidenceDataset(flow, candidate_dir=tmp_path, accept_radius=-1.0)
         with pytest.raises(ValueError):
-            ConfidenceDataset(flow, candidate_dir=tmp_path, max_candidates=-3)
+            ConfidenceDataset(flow, candidate_dir=tmp_path, max_candidates=0)
 
     def test_no_candidates_at_all_raises(self, tmp_path):
         flow = _FakeFlowDataset(["k"])
@@ -145,7 +144,7 @@ class TestConfidenceDataset:
         with pytest.raises(TypeError):
             ConfidenceDataset(object(), candidate_dir=tmp_path)
 
-    def test_label_and_gt_index_track_nearest_gt(self, tmp_path):
+    def test_label_tracks_nearest_gt(self, tmp_path):
         # candidates at 0.5 A and 3 A from GT site 1; accept_radius default 1.0
         gt = torch.tensor([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]])
         cand = torch.tensor([[10.5, 0.0, 0.0], [13.0, 0.0, 0.0]])
@@ -153,9 +152,9 @@ class TestConfidenceDataset:
         _write_candidate(tmp_path / "k.pt", cand)
         sample = ConfidenceDataset(flow, candidate_dir=tmp_path)[0]
 
-        assert torch.equal(sample["water"].label_1A, torch.tensor([1.0, 0.0]))
-        assert torch.equal(sample["water"].gt_index, torch.tensor([1, 1]))
-        assert torch.equal(sample.n_gt, torch.tensor([2]))
+        assert torch.equal(
+            sample["water"].within_accept_radius, torch.tensor([1.0, 0.0])
+        )
 
     def test_hard_label_replaces_the_soft_target(self, tmp_path):
         gt = torch.tensor([[0.0, 0.0, 0.0]])
@@ -168,7 +167,9 @@ class TestConfidenceDataset:
 
         # soft target is strictly between the plateau and the floor at 0.8 A
         assert 0.0 < soft["water"].target_confidence[0].item() < 1.0
-        assert torch.equal(hard["water"].target_confidence, hard["water"].label_1A)
+        assert torch.equal(
+            hard["water"].target_confidence, hard["water"].within_accept_radius
+        )
         assert torch.equal(hard["water"].target_confidence, torch.tensor([1.0, 0.0]))
 
     def test_accept_radius_widens_the_label(self, tmp_path):
@@ -178,8 +179,8 @@ class TestConfidenceDataset:
         _write_candidate(tmp_path / "k.pt", cand)
         narrow = ConfidenceDataset(flow, candidate_dir=tmp_path)[0]
         wide = ConfidenceDataset(flow, candidate_dir=tmp_path, accept_radius=2.0)[0]
-        assert narrow["water"].label_1A.item() == 0.0
-        assert wide["water"].label_1A.item() == 1.0
+        assert narrow["water"].within_accept_radius.item() == 0.0
+        assert wide["water"].within_accept_radius.item() == 1.0
 
     def test_max_candidates_subsamples_the_cloud(self, tmp_path):
         gt = torch.tensor([[0.0, 0.0, 0.0]])
@@ -220,8 +221,32 @@ class TestConfidenceDataset:
         sample = ConfidenceDataset(flow, candidate_dir=tmp_path)[0]
         assert sample["water"].num_nodes == 3
         assert sample["water"].target_confidence.shape == (0,)
-        assert sample["water"].label_1A.shape == (0,)
-        assert sample["water"].gt_index.shape == (0,)
+        assert sample["water"].within_accept_radius.shape == (0,)
+
+    def test_items_batch_via_pyg(self, tmp_path):
+        """Different-sized candidate clouds must collate through
+        Batch.from_data_list -- what a DataLoader does to train on many at once."""
+        from torch_geometric.data import Batch
+
+        gt = torch.tensor([[0.0, 0.0, 0.0]])
+        flow = _FakeFlowDataset(
+            ["a", "b"], gt_by_key={"a": gt, "b": gt}, embedding_dim=8
+        )
+        _write_candidate(tmp_path / "a.pt", torch.randn(3, 3))
+        _write_candidate(tmp_path / "b.pt", torch.randn(5, 3))
+        ds = ConfidenceDataset(flow, candidate_dir=tmp_path)
+
+        batch = Batch.from_data_list([ds[0], ds[1]])
+
+        assert batch.num_graphs == 2
+        # candidate water nodes and their per-candidate targets concatenate (3 + 5)
+        assert batch["water"].num_nodes == 8
+        assert batch["water"].target_confidence.shape == (8,)
+        assert batch["water"].within_accept_radius.shape == (8,)
+        assert batch["water"].batch.tolist() == [0, 0, 0, 1, 1, 1, 1, 1]
+        # protein graph and PP edges carried and offset per graph
+        assert batch["protein"].num_nodes == 12
+        assert batch[EDGE_PP].edge_index.shape[1] == 6
 
 
 @pytest.mark.unit
