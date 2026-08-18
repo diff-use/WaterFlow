@@ -65,6 +65,15 @@ missing-argument = "ignore"
 # Dict.get() returns union types that don't narrow well
 invalid-argument-type = "ignore"
 
+# torch.distributed declares its API under `if is_available():`, so every member
+# reads as conditionally defined. Scoped to the one module that uses it -- the
+# training scripts reach DDP through src/distributed.py, not torch.distributed.
+[[tool.ty.overrides]]
+include = ["src/distributed.py"]
+
+[tool.ty.overrides.rules]
+possibly-missing-attribute = "ignore"
+
 [tool.ruff.lint]
 fixable = ["I001", "F401", "UP"]
 ignore = ["E402", "E501", "E721", "E731", "E741", "F722", "F821", "UP015", "UP037"]

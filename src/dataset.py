@@ -29,7 +29,8 @@ from loguru import logger
 from scipy.spatial import cKDTree
 from scipy.spatial.distance import cdist
 from torch import Tensor
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Sampler
+from torch.utils.data.distributed import DistributedSampler
 from torch_cluster import radius_graph
 from torch_geometric.data import Batch, HeteroData
 from tqdm import tqdm
@@ -1727,6 +1728,8 @@ def get_dataloader(
     pin_memory: bool = True,
     prefetch_factor: int = 4,
     persistent_workers: bool = True,
+    sampler: Sampler | None = None,
+    distributed: bool = False,
     **dataset_kwargs,
 ) -> DataLoader:
     """
@@ -1746,6 +1749,12 @@ def get_dataloader(
         pin_memory: Pin memory for faster CPU-GPU transfer (default True)
         prefetch_factor: Number of batches to prefetch per worker (default 4)
         persistent_workers: Keep workers alive between epochs (default True)
+        sampler: Optional sampler (e.g. DistributedSampler for DDP). When
+                 provided, `shuffle` is ignored (the sampler owns ordering).
+        distributed: If True (and no explicit sampler is given), build a
+                 DistributedSampler from the env-configured process group so each
+                 DDP rank sees a disjoint shard. Call
+                 `loader.sampler.set_epoch(epoch)` each epoch to reshuffle.
         **dataset_kwargs: Additional arguments passed to ProteinWaterDataset
                          (e.g., cutoff, include_mates, duplicate_single_sample)
 
@@ -1764,10 +1773,18 @@ def get_dataloader(
         **dataset_kwargs,
     )
 
+    if sampler is None and distributed:
+        # drop_last=False keeps every sample; the sampler pads the last shard by
+        # repeating a few, which double-counts them in epoch metrics. Accepted:
+        # dropping instead gives ranks uneven shards and stalls the all-reduce.
+        sampler = DistributedSampler(dataset, shuffle=shuffle, drop_last=False)
+
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=shuffle,
+        # A sampler is mutually exclusive with shuffle; let the sampler own ordering.
+        shuffle=shuffle if sampler is None else False,
+        sampler=sampler,
         num_workers=num_workers,
         pin_memory=pin_memory,
         prefetch_factor=prefetch_factor if num_workers > 0 else None,

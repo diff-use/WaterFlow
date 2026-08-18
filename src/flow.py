@@ -923,7 +923,16 @@ class FlowMatcher:
             )
         self.model = model
         self.loss_eps = loss_eps
-        self.graph_cutoff = getattr(model, "cutoff", DEFAULT_EDGE_CUTOFF)
+        # Read the graph cutoff off the flow model. Under DDP the attribute lives
+        # on the wrapped `.module` (DDP does not forward attribute lookups), so
+        # fall through to it; otherwise a DDP run would silently use the default
+        # radius and change the water prior only under DDP.
+        if hasattr(model, "cutoff"):
+            self.graph_cutoff = model.cutoff
+        elif hasattr(model, "module") and hasattr(model.module, "cutoff"):
+            self.graph_cutoff = model.module.cutoff
+        else:
+            self.graph_cutoff = DEFAULT_EDGE_CUTOFF
         self.sampling_strategy = sampling_strategy
 
     @staticmethod

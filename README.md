@@ -9,9 +9,11 @@ WaterFlow/
 ├── src/                    # Core library code
 │   ├── dataset.py          # ProteinWaterDataset and data loading
 │   ├── flow.py             # FlowMatcher and FlowWaterGVP model
+│   ├── confidence.py       # ConfidenceGVP scorer, targets, vdW clustering
 │   ├── gvp.py              # Geometric Vector Perceptron layers
 │   ├── gvp_encoder.py      # GVP-based protein encoder
 │   ├── encoder_base.py     # Encoder registry and factory (includes ESM/SLAE)
+│   ├── distributed.py      # DDP helpers (rank discovery, collectives, barriers)
 │   ├── constants.py        # Shared constants (RBF bins, etc.)
 │   └── utils.py            # Metrics, plotting, logging utilities
 ├── scripts/                # Executable scripts
@@ -21,6 +23,8 @@ WaterFlow/
 │   └── generate_slae_embeddings.py  # Precompute SLAE embeddings
 ├── tests/                  # Test suite
 │   ├── test_dataset.py     # Dataset and preprocessing tests
+│   ├── test_distributed.py # DDP helper and cache prebuild tests
+│   ├── test_confidence.py  # Confidence scorer, target and clustering tests
 │   ├── test_flow.py        # Flow matching tests
 │   ├── test_encoder.py     # Encoder tests
 │   ├── test_forward.py     # End-to-end forward pass tests
@@ -298,6 +302,21 @@ uv run python -m scripts.train \
     --batch_size 1 \
     --grad_accum_steps 4 \
     --processed_dir ~/flow_cache/
+```
+
+### Multi-GPU Training (DDP)
+
+To train on several GPUs on one machine, launch the same script with `torchrun`
+and set `--nproc_per_node` to the number of GPUs you want to use. Launching with 
+`torchrun` turns on multi-GPU training, and the plain `python -m scripts.train` 
+command still trains on a single GPU.
+
+```bash
+uv run torchrun --nproc_per_node=4 -m scripts.train \
+    --train_list splits/train_list_0.95.txt \
+    --val_list splits/valid_list_0.05.txt \
+    --encoder_type gvp \
+    --batch_size 4  # per rank -> effective 16
 ```
 
 ### Resuming from Checkpoints
