@@ -15,6 +15,9 @@ Usage:
         --flow_run_dir <flow_run> --confidence_run_dir <conf_run> \\
         --struc protein.cif --out_dir out/ \\
         --selection confidence --threshold 0.5
+
+    Density mode keeps a fixed count instead of a cutoff:
+        ... --selection density --density_ratio 0.6
 """
 
 from __future__ import annotations
@@ -40,6 +43,8 @@ from src.utils import setup_logging_for_tqdm
 
 
 VDW_RADIUS_A = 1.52  # oxygen vdW radius; clustering/NMS radius
+DEFAULT_CONFIDENCE_THRESHOLD = 0.5  # confidence-mode cutoff when unset
+DEFAULT_DENSITY_RATIO = 0.6  # density-mode waters per ASU residue when unset
 
 
 # ---------------------------------------------------------------------------
@@ -138,19 +143,34 @@ def select_waters(
     *,
     mode: str,
     threshold: float | None = None,
+    density_ratio: float | None = None,
+    num_asu_residues: int | None = None,
     radius: float = VDW_RADIUS_A,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Cluster candidates and cull to the final set.
+    """Cluster the scored candidates and cull to the final set of waters.
 
-    ``confidence``: threshold is applied *before* clustering (sub-threshold
-    candidates cannot pull a centroid), then all resulting centroids are kept.
-    ``density`` (added in PR4) will instead keep the top N by confidence.
+    ``confidence``: the threshold is applied *before* clustering, so a
+    sub-threshold candidate cannot pull a centroid off-site; every resulting
+    centroid is kept.
+    ``density``: cluster with no cutoff, then keep the highest-confidence
+    ``N = floor(density_ratio * num_asu_residues)`` centroids. ``cluster_waters_vdw``
+    returns centroids in descending confidence, so this is a slice.
     """
     if mode == "confidence":
         return cluster_waters_vdw(
             candidate_pos, confidences, radius=radius, threshold=threshold
         )
-    raise ValueError(f"Unknown selection mode: {mode!r} (only 'confidence' so far)")
+    if mode == "density":
+        if density_ratio is None or num_asu_residues is None:
+            raise ValueError(
+                "density selection needs density_ratio and num_asu_residues"
+            )
+        centroids, centroid_conf = cluster_waters_vdw(
+            candidate_pos, confidences, radius=radius, threshold=None
+        )
+        n_keep = int(density_ratio * num_asu_residues)  # floor for a positive ratio
+        return centroids[:n_keep], centroid_conf[:n_keep]
+    raise ValueError(f"Unknown selection mode: {mode!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +241,8 @@ def predict_structures(
             conf,
             mode=args.selection,
             threshold=args.threshold,
+            density_ratio=args.density_ratio,
+            num_asu_residues=int(graph["protein"].num_protein_residues),
         )
         # Back to the input frame, then write structure + coordinates.
         water_xyz = sel_pos.numpy() + center
@@ -279,14 +301,28 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--selection",
         default="confidence",
-        choices=["confidence"],
+        choices=["confidence", "density"],
         help="Final-water selection rule.",
     )
     p.add_argument(
         "--threshold",
         type=float,
-        default=0.5,
-        help="Confidence cutoff (confidence mode).",
+        default=None,
+        help=(
+            f"Confidence cutoff for --selection confidence "
+            f"(default {DEFAULT_CONFIDENCE_THRESHOLD}). Not allowed with density."
+        ),
+    )
+    p.add_argument(
+        "--density_ratio",
+        type=float,
+        default=None,
+        help=(
+            f"Waters per ASU residue for --selection density "
+            f"(default {DEFAULT_DENSITY_RATIO}); keeps "
+            f"floor(density_ratio * num_ASU_residues) by confidence. "
+            f"Not allowed with confidence."
+        ),
     )
 
     p.add_argument(
@@ -310,6 +346,20 @@ def parse_args() -> argparse.Namespace:
     args = p.parse_args()
     if args.pdb_list and not args.base_pdb_dir:
         p.error("--pdb_list requires --base_pdb_dir")
+
+    # --threshold belongs to confidence mode and --density_ratio to density mode.
+    # Reject the other one rather than silently ignoring it, and fill the mode's
+    # own default when the user left it unset.
+    if args.selection == "confidence":
+        if args.density_ratio is not None:
+            p.error("--density_ratio only applies to --selection density")
+        if args.threshold is None:
+            args.threshold = DEFAULT_CONFIDENCE_THRESHOLD
+    else:  # density
+        if args.threshold is not None:
+            p.error("--threshold only applies to --selection confidence")
+        if args.density_ratio is None:
+            args.density_ratio = DEFAULT_DENSITY_RATIO
     return args
 
 

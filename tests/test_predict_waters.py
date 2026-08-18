@@ -5,6 +5,7 @@ collection, frame recovery). The integration test runs the whole pipeline with
 tiny untrained gvp models, so it needs no trained checkpoints or embeddings.
 """
 
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,6 +18,7 @@ from scripts.predict_waters import (
     _kept_atoms_and_center,
     build_confidence_model,
     load_state_dict_lenient,
+    parse_args,
     predict_structures,
     select_waters,
 )
@@ -42,7 +44,71 @@ class TestSelectWaters:
 
     def test_unknown_mode_raises(self):
         with pytest.raises(ValueError, match="mode"):
+            select_waters(torch.zeros(1, 3), torch.ones(1), mode="bogus")
+
+    def test_density_keeps_top_n_by_confidence(self):
+        # Four far-apart candidates -> four singleton clusters, so the kept
+        # count is set by the density formula alone, not by clustering merges.
+        pos = torch.tensor([[0.0, 0, 0], [10.0, 0, 0], [20.0, 0, 0], [30.0, 0, 0]])
+        conf = torch.tensor([0.2, 0.9, 0.5, 0.7])
+        # floor(0.6 * 5) = 3 kept, highest confidence first
+        sel_pos, sel_conf = select_waters(
+            pos, conf, mode="density", density_ratio=0.6, num_asu_residues=5
+        )
+        assert sel_pos.shape[0] == 3
+        assert torch.allclose(sel_conf, torch.tensor([0.9, 0.7, 0.5]))
+
+    def test_density_applies_no_cutoff(self):
+        # A near-zero confidence candidate still survives in density mode: it is
+        # kept because it lands within the top-N count, not filtered by a cutoff.
+        pos = torch.tensor([[0.0, 0, 0], [10.0, 0, 0]])
+        conf = torch.tensor([0.9, 0.01])
+        sel_pos, _ = select_waters(
+            pos, conf, mode="density", density_ratio=1.0, num_asu_residues=2
+        )
+        assert sel_pos.shape[0] == 2
+
+    def test_density_requires_ratio_and_residue_count(self):
+        with pytest.raises(ValueError, match="density"):
             select_waters(torch.zeros(1, 3), torch.ones(1), mode="density")
+
+
+@pytest.mark.unit
+class TestSelectionCLI:
+    """--selection wiring: each mode owns one knob and rejects the other's."""
+
+    @staticmethod
+    def _argv(*extra: str) -> list[str]:
+        return [
+            "predict_waters",
+            "--flow_run_dir", "f",
+            "--confidence_run_dir", "c",
+            "--struc", "s.pdb",
+            "--out_dir", "o",
+            *extra,
+        ]
+
+    def test_confidence_fills_default_threshold(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", self._argv("--selection", "confidence"))
+        args = parse_args()
+        assert args.threshold == 0.5 and args.density_ratio is None
+
+    def test_density_fills_default_ratio(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", self._argv("--selection", "density"))
+        args = parse_args()
+        assert args.density_ratio == 0.6 and args.threshold is None
+
+    def test_confidence_rejects_density_ratio(self, monkeypatch):
+        argv = self._argv("--selection", "confidence", "--density_ratio", "0.6")
+        monkeypatch.setattr(sys, "argv", argv)
+        with pytest.raises(SystemExit):
+            parse_args()
+
+    def test_density_rejects_threshold(self, monkeypatch):
+        argv = self._argv("--selection", "density", "--threshold", "0.5")
+        monkeypatch.setattr(sys, "argv", argv)
+        with pytest.raises(SystemExit):
+            parse_args()
 
 
 @pytest.mark.unit
@@ -117,6 +183,7 @@ class TestEndToEnd:
             water_ratio=1.0,
             selection="confidence",
             threshold=0.0,  # keep all, so the write path is exercised
+            density_ratio=None,
             out_dir=str(out_dir),
             out_format=".pdb",
         )
