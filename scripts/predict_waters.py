@@ -301,7 +301,7 @@ def parse_args() -> argparse.Namespace:
         default=8.0,
         help="Candidates = ratio * num_residues.",
     )
-    p.add_argument("--num_steps", type=int, default=100)
+    p.add_argument("--num_steps", type=int, default=20)
     p.add_argument("--method", default="euler", choices=["euler", "rk4"])
     p.add_argument("--batch_size", type=int, default=4)
     p.add_argument("--device", default="cuda")
