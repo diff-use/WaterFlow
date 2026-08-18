@@ -24,7 +24,7 @@ from loguru import logger
 from torch_cluster import radius_graph
 from torch_geometric.data import HeteroData
 
-from src.constants import EDGE_PP, ELEMENT_VOCAB, NUM_RBF
+from src.constants import EDGE_PP, NODE_FEATURE_DIM, NUM_RBF
 from src.dataset import (
     _make_undirected,
     _parse_pdb_resi,
@@ -41,9 +41,6 @@ from src.utils import (
     normalize_ins_code,
     sanitize_res_names_for_esm,
 )
-
-
-_WATER_FEATURE_DIM = len(ELEMENT_VOCAB) + 1
 
 
 def build_inference_graph(
@@ -245,7 +242,7 @@ def _build_mates(
     mate_lig_atoms). All empty when there are no mates.
     """
     mate_pos = torch.zeros((0, 3), dtype=torch.float32)
-    mate_x = torch.zeros((0, _WATER_FEATURE_DIM), dtype=torch.float32)
+    mate_x = torch.zeros((0, NODE_FEATURE_DIM), dtype=torch.float32)
     mate_res_idx = torch.empty(0, dtype=torch.long)
     mate_emb_res_idx = torch.empty(0, dtype=torch.long)
     mate_lig_coords = np.zeros((0, 3), dtype=float)
@@ -379,7 +376,7 @@ def _assemble_hetero(
     )
 
     # Empty water nodes: the flow model samples candidates itself.
-    data["water"].x = torch.zeros((0, _WATER_FEATURE_DIM), dtype=torch.float32)
+    data["water"].x = torch.zeros((0, NODE_FEATURE_DIM), dtype=torch.float32)
     data["water"].pos = torch.zeros((0, 3), dtype=torch.float32)
     data["water"].num_nodes = 0
 
