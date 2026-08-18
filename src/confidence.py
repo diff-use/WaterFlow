@@ -32,7 +32,7 @@ from src.gvp import GVP
 # ---------------------------------------------------------------------------
 
 
-def _nearest_gt_distance(candidate_pos: Tensor, gt_pos: Tensor) -> Tensor:
+def nearest_gt_distance(candidate_pos: Tensor, gt_pos: Tensor) -> Tensor:
     """
     Distance from each candidate to its nearest ground-truth water.
 
@@ -128,7 +128,7 @@ def smootherstep_target(
     if candidate_pos.numel() == 0:
         return candidate_pos.new_empty(0)
     return smootherstep_confidence(
-        _nearest_gt_distance(candidate_pos, gt_pos), r_in=r_in, r_out=r_out
+        nearest_gt_distance(candidate_pos, gt_pos), r_in=r_in, r_out=r_out
     )
 
 
