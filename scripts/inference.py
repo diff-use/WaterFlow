@@ -132,11 +132,6 @@ def parse_args():
         default=100,
         help="Number of integration steps (default: 100)",
     )
-    p.add_argument(
-        "--use_sc",
-        action="store_true",
-        help="Use self-conditioning during integration",
-    )
 
     p.add_argument(
         "--save_gifs",
@@ -321,7 +316,6 @@ def run_inference_batch(
     graphs: list,
     method: str,
     num_steps: int,
-    use_sc: bool,
     device: str,
     water_ratio: float = None,
 ) -> list:
@@ -333,7 +327,6 @@ def run_inference_batch(
         graphs: List of HeteroData graphs
         method: Integration method ('euler' or 'rk4')
         num_steps: Number of integration steps
-        use_sc: Whether to use self-conditioning
         device: Device to run on
         water_ratio: If provided, sample num_residues * water_ratio waters
 
@@ -347,7 +340,6 @@ def run_inference_batch(
         results = flow_matcher.rk4_integrate(
             graphs,
             num_steps=num_steps,
-            use_sc=use_sc,
             device=device,
             return_trajectory=True,
             water_ratio=water_ratio,
@@ -356,7 +348,6 @@ def run_inference_batch(
         results = flow_matcher.euler_integrate(
             graphs,
             num_steps=num_steps,
-            use_sc=use_sc,
             device=device,
             water_ratio=water_ratio,
         )
@@ -441,7 +432,6 @@ def main():
     # Create FlowMatcher
     flow_matcher = FlowMatcher(
         model=model,
-        p_self_cond=config.get("p_self_cond", 0.5),
         sampling_strategy=config.get("sampling_strategy", "uniform_ball"),
     )
 
@@ -476,7 +466,6 @@ def main():
 
     # run inference
     logger.info(f"Running inference with method={args.method}, steps={args.num_steps}")
-    logger.info(f"Self-conditioning: {args.use_sc}")
     logger.info(f"Threshold for metrics: {args.threshold}Å")
     logger.info(f"Batch size: {args.batch_size}")
 
@@ -526,7 +515,6 @@ def main():
             batch_graphs,
             method=args.method,
             num_steps=args.num_steps,
-            use_sc=args.use_sc,
             device=args.device,
             water_ratio=args.water_ratio,
         )
@@ -627,7 +615,6 @@ def main():
                         "checkpoint": args.checkpoint,
                         "method": args.method,
                         "num_steps": args.num_steps,
-                        "use_sc": args.use_sc,
                         "threshold": args.threshold,
                         "include_mates": include_mates,
                         "water_ratio": args.water_ratio,
