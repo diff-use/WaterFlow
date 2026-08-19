@@ -1,0 +1,15 @@
+# Keep large experiment data on /mnt/diffuse-shared/waterflow (also exposed as
+# /data inside the ACTL image), not in the synced source checkout.
+data/
+flow_cache/
+wandb/
+logs/
+outputs/
+checkpoints/
+*.ckpt
+*.h5
+*.hdf5
+*.pt
+*.pth
+*.safetensors
+*.wandb

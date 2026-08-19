@@ -2,6 +2,65 @@
 
 Predicting water molecule placements on protein surfaces using flow matching conditioned on learned protein structure embeddings.
 
+## Running on ACTL
+
+The Astera ACTL overlay image is in the actl catalog as the `waterflow` alias,
+scoped to the diffuse namespace. Launch from this checkout with:
+
+```bash
+actl pod profiles -n diffuse
+actl pod up waterflow --profile single --image waterflow --pvc-size 100Gi -n diffuse --yes
+```
+
+The alias is the supported way in: it resolves to the current published tag for
+you, so nothing here has to be updated when that tag moves. Run `actl pod images`
+to see what it points at.
+
+If you need the raw reference (a `docker pull` outside actl, say), it is:
+
+```bash
+$ASTERA_REGISTRY/library/waterflow:main-actl-2026-06-09
+```
+
+`$ASTERA_REGISTRY` is Astera's internal Harbor host. It is deliberately not
+spelled out here because this repository is public. `actl pod images` prints the
+resolved reference, and CI reads the host from the `ASTERA_REGISTRY` repository
+secret.
+
+The selected diffuse profile auto-mounts the shared volume at `/mnt/diffuse-shared`. The ACTL image exposes `/mnt/diffuse-shared/waterflow` as `/data`, so the container defaults are persistent:
+
+```text
+/data/pdb          # input PDB tree
+/data/cache        # preprocessed geometry/ESM/SLAE caches
+/data/checkpoints  # training checkpoints
+/data/outputs      # inference outputs
+/data/logs         # W&B/offline logs
+/data/splits       # train/val/test split files
+```
+
+Inside the ACTL shell:
+
+```bash
+waterflow train \
+  --encoder_type gvp \
+  --train_list /data/splits/train_list_0.95.txt \
+  --val_list /data/splits/valid_list_0.05.txt \
+  --batch_size 4
+```
+
+`waterflow` uses the synced checkout under `/home/dev/workspace` when available,
+so edits to `src/` and `scripts/` are picked up without rebuilding the image.
+
+To build the ACTL overlay locally:
+
+```bash
+docker buildx build --platform linux/amd64 \
+  -f Dockerfile.astera \
+  --build-arg WATERFLOW_BASE_IMAGE=docker.io/diffuseproject/waterflow:latest@sha256:cfa4d600c88adf5223814e2c1861de85bf6047fe279c0df44f44cb4a8e6c65dc \
+  -t "$ASTERA_REGISTRY/library/waterflow:main-actl-2026-06-09" \
+  .
+```
+
 ## Project Structure
 
 ```
