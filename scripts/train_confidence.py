@@ -254,6 +254,11 @@ def parse_args() -> argparse.Namespace:
     )
     # model / system
     p.add_argument("--device", type=str, default="cuda")
+    p.add_argument(
+        "--use_amp",
+        action="store_true",
+        help="Enable bfloat16 autocast mixed precision (CUDA only).",
+    )
     p.add_argument("--log_level", type=str, default="INFO")
     return p.parse_args()
 
@@ -440,6 +445,7 @@ def train_one_epoch(
     device: torch.device,
     args: argparse.Namespace,
     step_counter: int,
+    use_amp: bool = False,
     wandb_run=None,
 ) -> tuple[float, int]:
     """
@@ -486,11 +492,12 @@ def train_one_epoch(
         )
 
         with sync_ctx:
-            if is_empty:
-                loss = sum(p.sum() for p in params) * 0.0
-            else:
-                preds = model(batch, return_logits=True)
-                loss = F.binary_cross_entropy_with_logits(preds, target)
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=use_amp):
+                if is_empty:
+                    loss = sum(p.sum() for p in params) * 0.0
+                else:
+                    preds = model(batch, return_logits=True)
+                    loss = F.binary_cross_entropy_with_logits(preds, target)
             (loss / accum).backward()
 
         if is_boundary:
@@ -530,6 +537,7 @@ def validate(
     loader: DataLoader,
     device: torch.device,
     args: argparse.Namespace,
+    use_amp: bool = False,
 ) -> dict[str, float]:
     """
     Score the validation split.
@@ -557,8 +565,9 @@ def validate(
         target = batch["water"].target_confidence
         if target.numel() == 0:
             continue
-        preds = model(batch, return_logits=True)
-        loss = F.binary_cross_entropy_with_logits(preds, target)
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=use_amp):
+            preds = model(batch, return_logits=True)
+            loss = F.binary_cross_entropy_with_logits(preds, target)
         # MAE is reported in probability space, for interpretability.
         probs = torch.sigmoid(preds)
         abs_err += (probs - target).abs().sum().item()
@@ -713,6 +722,14 @@ def main() -> None:
             min_lr=args.plateau_min_lr,
         )
 
+    # bfloat16 autocast has fp32-equivalent range, so no loss scaling is needed.
+    use_amp = args.use_amp
+    if use_amp and device.type != "cuda":
+        logger.warning("--use_amp requested but device is not CUDA; ignoring.")
+        use_amp = False
+    elif use_amp:
+        logger.info("AMP enabled: bfloat16 autocast.")
+
     # Rank 0 only, so every downstream wandb_run guard is implicitly a rank guard.
     wandb_run = None
     if args.wandb_project is not None and main_proc:
@@ -758,11 +775,12 @@ def main() -> None:
             device,
             args,
             step_counter,
+            use_amp,
             wandb_run,
         )
         # Metrics are all-reduced inside, so every rank steps the scheduler on the
         # same value and their learning rates stay in sync.
-        val_metrics = validate(model, val_loader, device, args)
+        val_metrics = validate(model, val_loader, device, args, use_amp)
         if step_counter > args.warmup_steps:
             if isinstance(main_scheduler, ReduceLROnPlateau):
                 main_scheduler.step(val_metrics["loss"])
