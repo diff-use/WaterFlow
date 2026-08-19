@@ -89,7 +89,7 @@ class TestMergeWaters:
         assert np.allclose(merged[merged.res_name == "HOH"].b_factor, 20.0 + 10.0)
 
     def test_b_factor_falls_back_to_global_mean_when_isolated(self):
-        # A water with no atom within 4 A uses the overall mean + offset.
+        # A water with no atom within 5 A uses the overall mean + offset.
         prot = _make_protein(b_factor=42.0)
         merged = merge_waters(prot, np.array([[1000.0, 0, 0]], dtype=np.float32))
         assert np.allclose(merged[merged.res_name == "HOH"].b_factor, 42.0 + 10.0)
