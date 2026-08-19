@@ -4,26 +4,28 @@ Predicting water molecule placements on protein surfaces using flow matching con
 
 ## Running on ACTL
 
-The Astera ACTL overlay image is published as:
-
-```bash
-harbor.astera.sh/library/waterflow:main-actl-2026-06-09
-```
-
-Once the ACTL catalog alias is available, launch from this checkout with:
+The Astera ACTL overlay image is in the actl catalog as the `waterflow` alias,
+scoped to the diffuse namespace. Launch from this checkout with:
 
 ```bash
 actl pod profiles -n diffuse
 actl pod up waterflow --profile single --image waterflow --pvc-size 100Gi -n diffuse --yes
 ```
 
-Before the alias lands, use the full image reference:
+The alias is the supported way in: it resolves to the current published tag for
+you, so nothing here has to be updated when that tag moves. Run `actl pod images`
+to see what it points at.
+
+If you need the raw reference (a `docker pull` outside actl, say), it is:
 
 ```bash
-actl pod up waterflow --profile single \
-  --image harbor.astera.sh/library/waterflow:main-actl-2026-06-09 \
-  --pvc-size 100Gi -n diffuse --yes
+$ASTERA_REGISTRY/library/waterflow:main-actl-2026-06-09
 ```
+
+`$ASTERA_REGISTRY` is Astera's internal Harbor host. It is deliberately not
+spelled out here because this repository is public. `actl pod images` prints the
+resolved reference, and CI reads the host from the `ASTERA_REGISTRY` repository
+secret.
 
 The selected diffuse profile auto-mounts the shared volume at `/mnt/diffuse-shared`. The ACTL image exposes `/mnt/diffuse-shared/waterflow` as `/data`, so the container defaults are persistent:
 
@@ -55,7 +57,7 @@ To build the ACTL overlay locally:
 docker buildx build --platform linux/amd64 \
   -f Dockerfile.astera \
   --build-arg WATERFLOW_BASE_IMAGE=docker.io/diffuseproject/waterflow:latest@sha256:cfa4d600c88adf5223814e2c1861de85bf6047fe279c0df44f44cb4a8e6c65dc \
-  -t harbor.astera.sh/library/waterflow:main-actl-2026-06-09 \
+  -t "$ASTERA_REGISTRY/library/waterflow:main-actl-2026-06-09" \
   .
 ```
 
