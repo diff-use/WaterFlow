@@ -23,6 +23,7 @@ import contextlib
 import json
 import multiprocessing as mp
 import os
+import random
 import shutil
 import tempfile
 from datetime import datetime
@@ -381,9 +382,28 @@ def parse_args():
         help="eta_min = lr * eta_min_factor",
     )
     p.add_argument(
+        "--lr_decay_epochs",
+        type=int,
+        default=None,
+        help="Cosine T_max in epochs, decoupled from --epochs so the LR can fully "
+        "anneal over a chosen window and then hold at eta_min. Defaults to --epochs.",
+    )
+    p.add_argument(
         "--step_size", type=int, default=50, help="StepLR step size (epochs)"
     )
     p.add_argument("--step_gamma", type=float, default=0.5, help="StepLR gamma")
+
+    # mixed precision / optimizer
+    p.add_argument(
+        "--use_amp",
+        action="store_true",
+        help="Run the training forward pass under bfloat16 autocast (CUDA only).",
+    )
+    p.add_argument(
+        "--fused_adamw",
+        action="store_true",
+        help="Use the fused AdamW implementation (CUDA only).",
+    )
 
     # flow matching
     p.add_argument("--use_self_cond", action="store_true")
@@ -404,7 +424,30 @@ def parse_args():
     p.add_argument("--save_every", type=int, default=10)
     p.add_argument("--eval_every", type=int, default=5)
     p.add_argument("--n_eval_samples", type=int, default=3)
-    p.add_argument("--rk4_steps", type=int, default=100)
+    p.add_argument(
+        "--eval_method",
+        type=str,
+        default="euler",
+        choices=["euler", "rk4"],
+        help="Integrator for the sampling eval.",
+    )
+    p.add_argument(
+        "--eval_steps", type=int, default=50, help="Integration steps for the sampling eval."
+    )
+    p.add_argument(
+        "--selection_metric",
+        type=str,
+        default="val_loss",
+        choices=["val_loss", "f1", "auc_pr", "blend"],
+        help="Metric that selects best.pt. 'val_loss' uses the per-epoch validation "
+        "loss; 'f1'/'auc_pr'/'blend' use the sampling-eval metrics, rolling-3 "
+        "smoothed to absorb sampling noise. 'blend' = 0.85*F1 + 0.15*AUC-PR.",
+    )
+    p.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from the latest epoch checkpoint under save_dir/run_name.",
+    )
     p.add_argument(
         "--save_gifs", action="store_true", help="Save trajectory GIFs during eval"
     )
@@ -413,6 +456,18 @@ def parse_args():
         type=float,
         default=1.0,
         help="Distance threshold in Angstroms for precision/recall (default: 1.0)",
+    )
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Global seed for weight init and data shuffling. Unset leaves them unseeded.",
+    )
+    p.add_argument(
+        "--val_seed",
+        type=int,
+        default=1234,
+        help="Seed for eval-sample selection and eval integration, for reproducible eval.",
     )
 
     # logging / wandb
@@ -686,12 +741,20 @@ def run_eval_sampling(
         run_dir: Path to run directory for saving outputs
     """
     flow_matcher.model.eval()
+    # Fix the eval-sampling RNG so the per-epoch generative metrics are comparable
+    # across epochs (the water prior and integration both draw noise).
+    torch.manual_seed(args.val_seed)
 
     # Each rank integrates a disjoint stride of eval_indices; the metric sums are
     # all-reduced below so every rank ends with identical averages.
     rank, world_size = ddp_rank_and_world()
     results = []
 
+    integrate = (
+        flow_matcher.euler_integrate
+        if args.eval_method == "euler"
+        else flow_matcher.rk4_integrate
+    )
     for i, idx in enumerate(eval_indices):
         # Shard by global position i, so plot/GIF filenames never collide.
         if i % world_size != rank:
@@ -700,13 +763,13 @@ def run_eval_sampling(
         if graph["water"].num_nodes == 0:
             continue
 
-        out = flow_matcher.rk4_integrate(
+        # rk4 returns a per-frame trajectory (used for GIFs); euler does not.
+        out = integrate(
             graph,
-            num_steps=args.rk4_steps,
+            num_steps=args.eval_steps,
             use_sc=args.use_self_cond,
             device=device,
-            return_trajectory=True,
-        )[0]  # rk4_integrate returns a list, get the single result
+        )[0]  # integrators return a list; take the single result
 
         # compute metrics
         final_metrics = compute_placement_metrics(
@@ -967,6 +1030,14 @@ def count_parameters(model):
     return trainable, total
 
 
+def _latest_epoch_checkpoint(ckpt_dir: Path) -> Path | None:
+    """Highest-numbered epoch_<n>.pt in ckpt_dir, or None if there is none."""
+    ckpts = list(ckpt_dir.glob("epoch_*.pt"))
+    if not ckpts:
+        return None
+    return max(ckpts, key=lambda p: int(p.stem.split("_")[1]))
+
+
 def save_checkpoint(
     model,
     optimizer,
@@ -976,6 +1047,8 @@ def save_checkpoint(
     optimizer_step_count,
     path,
     best=False,
+    best_val_loss=None,
+    best_sel_score=None,
 ):
     """
     Save model checkpoint with optimizer and scheduler states.
@@ -1003,6 +1076,8 @@ def save_checkpoint(
             "main_scheduler_state_dict": main_scheduler.state_dict()
             if main_scheduler
             else None,
+            "best_val_loss": best_val_loss,
+            "best_sel_score": best_sel_score,
         },
         path,
     )
@@ -1033,8 +1108,9 @@ def build_scheduler(optimizer, args):
     # Main scheduler (stepped per epoch, after warmup)
     main_scheduler = None
     if args.scheduler == "cosine":
+        t_max = args.lr_decay_epochs if args.lr_decay_epochs is not None else args.epochs
         main_scheduler = CosineAnnealingLR(
-            optimizer, T_max=args.epochs, eta_min=args.lr * args.eta_min_factor
+            optimizer, T_max=t_max, eta_min=args.lr * args.eta_min_factor
         )
     elif args.scheduler == "step":
         main_scheduler = StepLR(
@@ -1122,6 +1198,13 @@ def main():
     """Run the full training pipeline."""
     args = parse_args()
 
+    # Seed weight init and data shuffling when requested; left unseeded otherwise.
+    if args.seed is not None:
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        torch.cuda.manual_seed_all(args.seed)
+
     # Build the cache on rank 0 before the NCCL group exists. A warm cache is a
     # no-op probe; only a first cold build is slow, and coordinating that on the
     # NCCL group would trip its collective watchdog (minutes). A CPU store has no
@@ -1139,6 +1222,9 @@ def main():
         device = torch.device("cuda", local_rank)
     else:
         device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+
+    if args.use_amp and device.type != "cuda":
+        logger.warning("--use_amp set but device is not CUDA; training without AMP.")
 
     if args.run_name is None:
         args.run_name = generate_run_name(args)
@@ -1201,7 +1287,7 @@ def main():
     )
 
     # sample fixed eval indices
-    np.random.seed(42)
+    np.random.seed(args.val_seed)
     eval_indices = np.random.choice(
         len(val_loader.dataset),
         min(args.n_eval_samples, len(val_loader.dataset)),
@@ -1300,19 +1386,46 @@ def main():
         p_distort=args.p_distort,
         t_distort=args.t_distort,
         sigma_distort=args.sigma_distort,
+        use_amp=args.use_amp,
     )
 
+    # fused AdamW is a CUDA-only kernel; it silently requires all params on GPU.
     optimizer = AdamW(
         [p for p in raw_model.parameters() if p.requires_grad],
         lr=args.lr,
         weight_decay=args.weight_decay,
+        fused=args.fused_adamw and device.type == "cuda",
     )
     warmup_scheduler, main_scheduler = build_scheduler(optimizer, args)
 
     best_val_loss = float("inf")
+    best_sel_score = float("-inf")
+    sel_history: list[float] = []
     optimizer_step_count = 0
+    start_epoch = 0
 
-    for epoch in range(1, args.epochs + 1):
+    if args.resume:
+        ckpt_path = _latest_epoch_checkpoint(run_dir / "checkpoints")
+        if ckpt_path is None:
+            raise FileNotFoundError(
+                f"--resume set but no epoch_*.pt found under {run_dir / 'checkpoints'}."
+            )
+        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+        raw_model.load_state_dict(ckpt["model_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        if warmup_scheduler is not None and ckpt.get("warmup_scheduler_state_dict"):
+            warmup_scheduler.load_state_dict(ckpt["warmup_scheduler_state_dict"])
+        if main_scheduler is not None and ckpt.get("main_scheduler_state_dict"):
+            main_scheduler.load_state_dict(ckpt["main_scheduler_state_dict"])
+        start_epoch = ckpt["epoch"]
+        optimizer_step_count = ckpt["optimizer_step_count"]
+        best_val_loss = ckpt.get("best_val_loss")
+        best_val_loss = float("inf") if best_val_loss is None else best_val_loss
+        best_sel_score = ckpt.get("best_sel_score")
+        best_sel_score = float("-inf") if best_sel_score is None else best_sel_score
+        logger.info(f"Resumed from {ckpt_path} at epoch {start_epoch}.")
+
+    for epoch in range(start_epoch + 1, args.epochs + 1):
         # Without this every epoch replays the same shard order on every rank.
         if ddp_is_active():
             train_loader.sampler.set_epoch(epoch)
@@ -1336,44 +1449,26 @@ def main():
         val_metrics["epoch"] = epoch
         wandb.log(val_metrics, step=global_step)
 
-        # Step main scheduler per epoch (after warmup completes)
+        # Step the main scheduler once per epoch after warmup. A cosine scheduler
+        # holds at eta_min once it reaches T_max; stepping past T_max would make the
+        # LR climb back up, so stop stepping there (matters when lr_decay_epochs < epochs).
         if main_scheduler is not None and optimizer_step_count >= args.warmup_steps:
-            main_scheduler.step()
+            past_cosine_horizon = (
+                isinstance(main_scheduler, CosineAnnealingLR)
+                and main_scheduler.last_epoch >= main_scheduler.T_max
+            )
+            if not past_cosine_horizon:
+                main_scheduler.step()
 
         logger.info(
             f"Epoch {epoch}: train_loss={train_metrics['train/epoch_loss']:.4f}, "
             f"val_loss={val_metrics['val/loss']:.4f}, val_rmsd={val_metrics['val/rmsd']:.2f}"
         )
 
-        # val/loss is all-reduced, so every rank agrees on the best epoch and
-        # updates best_val_loss identically; only rank 0 writes it out.
-        if val_metrics["val/loss"] < best_val_loss:
-            best_val_loss = val_metrics["val/loss"]
-            if main_proc:
-                save_checkpoint(
-                    raw_model,
-                    optimizer,
-                    warmup_scheduler,
-                    main_scheduler,
-                    epoch,
-                    optimizer_step_count,
-                    run_dir / "checkpoints" / "best.pt",
-                    best=True,
-                )
-
-        if epoch % args.save_every == 0 and main_proc:
-            save_checkpoint(
-                raw_model,
-                optimizer,
-                warmup_scheduler,
-                main_scheduler,
-                epoch,
-                optimizer_step_count,
-                run_dir / "checkpoints" / f"epoch_{epoch}.pt",
-            )
-
-        # All ranks enter: run_eval_sampling ends in a collective. Swap in the
-        # unwrapped module so no DDP forward machinery fires during integration.
+        # Sampling eval runs before selection so a generative --selection_metric can
+        # use this epoch's numbers. All ranks enter (it ends in a collective); swap in
+        # the unwrapped module so no DDP forward machinery fires during integration.
+        eval_metrics = {}
         if epoch % args.eval_every == 0:
             wrapped = flow_matcher.model
             flow_matcher.model = raw_model
@@ -1398,6 +1493,59 @@ def main():
                     f"F1={eval_metrics['eval/avg_f1']:.3f}, "
                     f"AUC-PR={eval_metrics['eval/avg_auc_pr']:.3f}"
                 )
+
+        # Every quantity below is all-reduced, so all ranks select the same epoch;
+        # only rank 0 writes to disk. best_val_loss is kept as checkpoint metadata
+        # regardless of which metric drives selection.
+        if val_metrics["val/loss"] < best_val_loss:
+            best_val_loss = val_metrics["val/loss"]
+
+        improved = False
+        if args.selection_metric == "val_loss":
+            sel = -val_metrics["val/loss"]
+            if sel > best_sel_score:
+                best_sel_score = sel
+                improved = True
+        elif eval_metrics:  # generative metric, defined only on eval epochs
+            if args.selection_metric == "blend":
+                raw = (
+                    0.85 * eval_metrics["eval/avg_f1"]
+                    + 0.15 * eval_metrics["eval/avg_auc_pr"]
+                )
+            else:
+                raw = eval_metrics[f"eval/avg_{args.selection_metric}"]
+            sel_history.append(raw)
+            sel = sum(sel_history[-3:]) / len(sel_history[-3:])  # rolling-3 smoothed
+            if sel > best_sel_score:
+                best_sel_score = sel
+                improved = True
+
+        if improved and main_proc:
+            save_checkpoint(
+                raw_model,
+                optimizer,
+                warmup_scheduler,
+                main_scheduler,
+                epoch,
+                optimizer_step_count,
+                run_dir / "checkpoints" / "best.pt",
+                best=True,
+                best_val_loss=best_val_loss,
+                best_sel_score=best_sel_score,
+            )
+
+        if epoch % args.save_every == 0 and main_proc:
+            save_checkpoint(
+                raw_model,
+                optimizer,
+                warmup_scheduler,
+                main_scheduler,
+                epoch,
+                optimizer_step_count,
+                run_dir / "checkpoints" / f"epoch_{epoch}.pt",
+                best_val_loss=best_val_loss,
+                best_sel_score=best_sel_score,
+            )
 
         # Realign ranks: rank 0 may have spent extra time writing checkpoints.
         ddp_barrier()

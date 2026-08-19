@@ -941,6 +941,7 @@ class FlowMatcher:
         sigma_distort: float = 0.5,
         loss_eps: float = 1e-3,
         sampling_strategy: str = "uniform_ball",
+        use_amp: bool = False,
     ):
         """
         Initialize flow matcher for training and inference.
@@ -956,6 +957,8 @@ class FlowMatcher:
             sampling_strategy: Source distribution for flow matching noise.
                 "uniform_ball" samples uniformly in balls around protein atoms.
                 "scaled_gaussian" samples from N(0, sigma^2*I).
+            use_amp: Run the training forward pass under bfloat16 autocast (CUDA
+                only). The loss is still reduced in fp32, so it is a no-op off CUDA.
 
         Note:
             Edge construction is configured on the model, not here, so training
@@ -973,6 +976,7 @@ class FlowMatcher:
         self.t_distort = t_distort
         self.sigma_distort = sigma_distort
         self.loss_eps = loss_eps
+        self.use_amp = use_amp
         # Read the graph cutoff off the flow model. Under DDP the attribute lives
         # on the wrapped `.module` (DDP does not forward attribute lookups), so
         # fall through to it; otherwise a DDP run would silently use the default
@@ -1193,15 +1197,18 @@ class FlowMatcher:
 
         # forward pass
         batch["water"].pos = x_t
-        v_pred = self.model(batch, t, self_cond=self_cond)
+        with torch.autocast(
+            "cuda", dtype=torch.bfloat16, enabled=self.use_amp and device.type == "cuda"
+        ):
+            v_pred = self.model(batch, t, self_cond=self_cond)
 
-        # target velocity
-        v_target = x1_star - x0_star
+            # target velocity
+            v_target = x1_star - x0_star
 
-        # weighted MSE loss (upweight near t=1)
-        w = 1.0 / (self.loss_eps + (1.0 - t_per_atom))
-        per_atom_mse = (v_pred - v_target).pow(2).mean(dim=-1, keepdim=True)
-        loss = (w * per_atom_mse).sum() / w.sum()
+            # weighted MSE loss (upweight near t=1), reduced in fp32
+            w = 1.0 / (self.loss_eps + (1.0 - t_per_atom))
+            per_atom_mse = (v_pred.float() - v_target).pow(2).mean(dim=-1, keepdim=True)
+            loss = (w * per_atom_mse).sum() / w.sum()
 
         # training RMSD
         with torch.no_grad():
