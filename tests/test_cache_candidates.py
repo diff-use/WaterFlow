@@ -99,17 +99,24 @@ class TestWriteCandidateCache:
 
 @pytest.mark.unit
 class TestDefaultCandidateDir:
-    def test_namespaced_by_run_ratio_and_seed(self, tmp_path):
-        out = cc.default_candidate_dir(tmp_path, "/runs/my_run", 3.0, 1)
+    def test_namespaced_by_sampling_inputs(self, tmp_path):
+        out = cc.default_candidate_dir(
+            tmp_path, "/runs/my_run", "best.pt", 3.0, 1, "euler", 100
+        )
 
-        assert out == tmp_path / "candidate_cache" / "my_run_r3_s1"
+        assert out == tmp_path / "candidate_cache" / "my_run_best_euler100_r3_s1"
 
     def test_distinct_configs_never_collide(self, tmp_path):
         dirs = {
-            cc.default_candidate_dir(tmp_path, run, ratio, seed)
+            cc.default_candidate_dir(
+                tmp_path, run, ckpt, ratio, seed, method, steps
+            )
             for run in ("/runs/a", "/runs/b")
+            for ckpt in ("best.pt", "epoch_50.pt")
             for ratio in (2.0, 3.0)
             for seed in (0, 1)
+            for method in ("euler", "rk4")
+            for steps in (50, 100)
         }
 
-        assert len(dirs) == 8
+        assert len(dirs) == 2 * 2 * 2 * 2 * 2 * 2

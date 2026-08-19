@@ -2,13 +2,13 @@
 Generate the candidate cache for confidence-model training.
 
 Samples candidate waters from a trained flow checkpoint over the flow dataset
-cache layout and writes one `<pdb_id>.pt = {"candidate_pos": (Nc, 3)}` per
-structure, plus a `generation.json` record of how it was made. Train the confidence
-model on the result with `scripts/train_confidence.py --candidate_dir <out_dir>`.
+cache layout and writes one <pdb_id>.pt = {"candidate_pos": (Nc, 3)} per
+structure, plus a generation.json record of how it was made. Train the confidence
+model on the result with scripts/train_confidence.py --candidate_dir <out_dir>.
 
 Everything the confidence model needs (protein graph, embeddings, GT waters, PP edges) 
 is loaded from the flow caches at train time. Model loading and integration reuse the flow inference
-machinery verbatim, so candidates are sampled exactly as `scripts/inference.py`
+machinery verbatim, so candidates are sampled exactly as scripts/inference.py
 would sample them.
 
 Example:
@@ -45,15 +45,25 @@ from src.utils import setup_logging_for_tqdm
 def default_candidate_dir(
     processed_dir: str | Path,
     flow_run_dir: str | Path,
+    checkpoint: str,
     water_ratio: float,
     seed: int,
+    method: str,
+    num_steps: int,
 ) -> Path:
-    """Namespaced candidate dir so caches from different checkpoints, ratios, or
-    seeds never collide: `{processed_dir}/candidate_cache/<run_name>_r{ratio}_s{seed}`.
+    """Namespaced candidate dir so caches that were sampled differently never collide:
+    {processed_dir}/candidate_cache/<run>_<ckpt>_<method><steps>_r{ratio}_s{seed}.
+
+    Every input that changes the sampled candidates is in the name, because
+    generation skips structures whose <pdb_id>.pt already exists -- two runs that
+    shared a directory would silently reuse each other's stale caches.
     """
     run_name = Path(flow_run_dir).name
+    ckpt = Path(checkpoint).stem
     return (
-        Path(processed_dir) / "candidate_cache" / f"{run_name}_r{water_ratio:g}_s{seed}"
+        Path(processed_dir)
+        / "candidate_cache"
+        / f"{run_name}_{ckpt}_{method}{num_steps}_r{water_ratio:g}_s{seed}"
     )
 
 
@@ -68,19 +78,19 @@ def _write_candidate_cache(
 ) -> dict:
     """Sample and write one thin candidate file per uncached structure.
 
-    Split from `generate_candidate_cache` so the loop and skip logic runs against a
+    Split from generate_candidate_cache so the loop and skip logic runs against a
     plain dataset and sampler instead of a live flow checkpoint.
 
     Args:
-        dataset: Indexable structures. `dataset.entries[i]["cache_key"]` names the
-            output file, which equals the sampled graph's `pdb_id` and the key
-            `ConfidenceDataset` reads back.
-        sample_batch: Callable `(graphs) -> [{"pdb_id", "water_pred"}, ...]`.
-        out: Directory for the `<pdb_id>.pt` files and `generation.json`.
+        dataset: Indexable structures. dataset.entries[i]["cache_key"] names the
+            output file, which equals the sampled graph's pdb_id and the key
+            ConfidenceDataset reads back.
+        sample_batch: Callable (graphs) -> [{"pdb_id", "water_pred"}, ...].
+        out: Directory for the <pdb_id>.pt files and generation.json.
         run_info: Generation parameters recorded, with the counts, in
-            `generation.json`.
-        batch_size: Structures sampled per `sample_batch` call.
-        overwrite: Re-generate even if a `<pdb_id>.pt` already exists.
+            generation.json.
+        batch_size: Structures sampled per sample_batch call.
+        overwrite: Re-generate even if a <pdb_id>.pt already exists.
 
     Returns:
         dict stats: {"out_dir", "n_written", "n_skipped", "n_total"}.
@@ -154,19 +164,21 @@ def generate_candidate_cache(
 
     Args:
         flow_run_dir: Flow training run dir (contains config.json + checkpoints/).
-        pdb_list: Text file of `<pdb_id>_final` keys, one per line.
+        pdb_list: Text file of <pdb_id>_final keys, one per line.
         processed_dir: Cache root shared with flow training (geometry + esm).
         base_pdb_dir: Base PDB dir, as used by flow training.
-        out_dir: Output dir. Defaults to `default_candidate_dir(...)`.
-        checkpoint: Checkpoint filename under `{flow_run_dir}/checkpoints`.
-        water_ratio: Oversampling ratio — sample `num_residues * water_ratio` waters.
+        out_dir: Output dir. Defaults to default_candidate_dir(...).
+        checkpoint: Checkpoint filename under {flow_run_dir}/checkpoints.
+        water_ratio: Oversampling ratio — sample num_residues * water_ratio waters.
         seed: RNG seed for the sampling prior (reproducible candidates).
         num_steps, method: Integration settings, as in inference.
         batch_size: Graphs per integration batch.
-        geometry_cache_name / include_mates: Optional overrides; default to the
-            flow config's values so the graph matches what the flow model saw.
+        geometry_cache_name: Geometry cache base name; defaults to the flow config.
+        include_mates: Whether to include symmetry mates in the graph. None (default)
+            uses whatever the flow checkpoint was trained with; pass False to drop
+            them regardless.
         device: 'cuda' or 'cpu'.
-        overwrite: Re-generate even if a `<pdb_id>.pt` already exists.
+        overwrite: Re-generate even if a <pdb_id>.pt already exists.
 
     Returns:
         dict stats: {"out_dir", "n_written", "n_skipped", "n_total"}.
@@ -213,10 +225,16 @@ def generate_candidate_cache(
     out = (
         Path(out_dir)
         if out_dir is not None
-        else default_candidate_dir(processed_dir, run_dir, water_ratio, seed)
+        else default_candidate_dir(
+            processed_dir, run_dir, checkpoint, water_ratio, seed, method, num_steps
+        )
     )
     torch.manual_seed(seed)  # reproducible sampling prior
 
+    # Fix the model and integration settings so the write loop only has to call
+    # sample_batch(graphs); tests substitute their own sampler in its place.
+    # graphs are PyG graphs from the dataset; each result is
+    # {"pdb_id": str, "water_pred": (Nc, 3) array}.
     def sample_batch(graphs):
         return run_inference_batch(
             flow_matcher,
@@ -278,7 +296,7 @@ def parse_args() -> argparse.Namespace:
         "--out_dir",
         default=None,
         help="Output dir. Default: "
-        "{processed_dir}/candidate_cache/<run>_r{ratio}_s{seed}.",
+        "{processed_dir}/candidate_cache/<run>_<ckpt>_<method><steps>_r{ratio}_s{seed}.",
     )
     p.add_argument(
         "--checkpoint",
@@ -313,10 +331,9 @@ def parse_args() -> argparse.Namespace:
         help="Override geometry cache base name (default: flow config).",
     )
     p.add_argument(
-        "--include_mates",
+        "--no_mates",
         action="store_true",
-        default=None,
-        help="Force-include symmetry mates (default: flow config).",
+        help="Drop symmetry mates from the graph. Default: match the flow checkpoint.",
     )
     p.add_argument("--device", default="cuda")
     p.add_argument(
@@ -344,7 +361,7 @@ def main() -> None:
         method=args.method,
         batch_size=args.batch_size,
         geometry_cache_name=args.geometry_cache_name,
-        include_mates=args.include_mates,
+        include_mates=False if args.no_mates else None,
         device=args.device,
         overwrite=args.overwrite,
     )
