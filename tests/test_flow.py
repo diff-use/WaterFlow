@@ -621,21 +621,6 @@ class TestFlowWaterGVP:
 
         assert v_pred.shape == (0, 3)
 
-    def test_self_conditioning(self, simple_hetero_data, device, gvp_encoder):
-        model = FlowWaterGVP(
-            encoder=gvp_encoder,
-            hidden_dims=(64, 8),
-            layers=1,
-        ).to(device)
-
-        n_water = simple_hetero_data["water"].num_nodes
-        sc = {"x1_pred": torch.randn(n_water, 3, device=device)}
-        t = torch.tensor([0.5], device=device)
-
-        v_pred = model(simple_hetero_data, t, self_cond=sc)
-
-        assert v_pred.shape == (n_water, 3)
-
 
 # ============== Tests for FlowMatcher ==============
 
@@ -650,7 +635,7 @@ class TestFlowMatcher:
             layers=1,
         ).to(device)
 
-        return FlowMatcher(model, p_self_cond=0.5)
+        return FlowMatcher(model)
 
     def test_compute_sigma(self, simple_hetero_data):
         sigma = FlowMatcher.compute_sigma(simple_hetero_data)
@@ -672,30 +657,13 @@ class TestFlowMatcher:
         optimizer = torch.optim.Adam(flow_matcher.model.parameters(), lr=1e-4)
 
         optimizer.zero_grad()
-        result = flow_matcher.training_step(
-            simple_hetero_data, use_self_conditioning=False
-        )
+        result = flow_matcher.training_step(simple_hetero_data)
         optimizer.step()
 
         assert "loss" in result
         assert "rmsd" in result
         assert "sigma" in result
         assert result["loss"] >= 0
-
-    def test_training_step_with_self_cond(
-        self, flow_matcher, simple_hetero_data, device
-    ):
-        optimizer = torch.optim.Adam(flow_matcher.model.parameters(), lr=1e-4)
-
-        # Force self-conditioning
-        flow_matcher.p_self_cond = 1.0
-        optimizer.zero_grad()
-        result = flow_matcher.training_step(
-            simple_hetero_data, use_self_conditioning=True
-        )
-        optimizer.step()
-
-        assert "loss" in result
 
     def test_validation_step(self, flow_matcher, simple_hetero_data):
         result = flow_matcher.validation_step(simple_hetero_data)
@@ -726,7 +694,7 @@ class TestFlowMatcher:
     @pytest.mark.slow
     def test_euler_integrate(self, flow_matcher, simple_hetero_data, device):
         results = flow_matcher.euler_integrate(
-            simple_hetero_data, num_steps=5, use_sc=False, device=str(device)
+            simple_hetero_data, num_steps=5, device=str(device)
         )
         # euler_integrate returns List[Dict], one per input graph
         result = results[0]
@@ -745,7 +713,6 @@ class TestFlowMatcher:
         results = flow_matcher.rk4_integrate(
             simple_hetero_data,
             num_steps=5,
-            use_sc=False,
             device=str(device),
             return_trajectory=True,
         )
@@ -1298,38 +1265,6 @@ class TestWaterCountValidation:
 
         with pytest.raises(ValueError, match="water_count must be >= 0"):
             fm._setup_water_nodes_from_count(g, -1, device)
-
-
-# ============== Tests for distortion ==============
-
-
-@pytest.mark.unit
-class TestDistortion:
-    def test_distortion_enabled(self, device):
-        base_encoder = ProteinGVPEncoder(
-            node_scalar_in=16,
-            hidden_dims=(64, 8),
-            n_edge_scalar_in=16,
-            pool_residue=False,
-        ).to(device)
-        encoder = GVPEncoder(encoder=base_encoder, freeze=False)
-
-        model = FlowWaterGVP(
-            encoder=encoder,
-            hidden_dims=(64, 8),
-            layers=1,
-        ).to(device)
-
-        fm = FlowMatcher(
-            model,
-            use_distortion=True,
-            p_distort=1.0,  # Always apply
-            t_distort=0.0,  # Apply at all times
-            sigma_distort=0.5,
-        )
-
-        assert fm.use_distortion is True
-        assert fm.p_distort == 1.0
 
 
 # ============== Edge case tests ==============
