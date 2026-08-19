@@ -51,9 +51,6 @@ profiles:
         - key: num_workers
           type: number
           default: 4
-        - key: use_self_cond
-          type: boolean
-          default: true
         - key: run_name
           type: text
         - key: train_list
@@ -92,8 +89,7 @@ profiles:
           save_dir: --save_dir
           run_name: --run_name
           num_workers: --num_workers
-        boolean_args:
-          use_self_cond: --use_self_cond
+        boolean_args: {}
         static_args: [--base_pdb_dir, /data/pdb]
 
   - slug: waterflow-train-esm
@@ -132,9 +128,6 @@ profiles:
         - key: num_workers
           type: number
           default: 4
-        - key: use_self_cond
-          type: boolean
-          default: true
         - key: run_name
           type: text
         - key: train_list
@@ -173,8 +166,7 @@ profiles:
           save_dir: --save_dir
           run_name: --run_name
           num_workers: --num_workers
-        boolean_args:
-          use_self_cond: --use_self_cond
+        boolean_args: {}
         static_args: [--base_pdb_dir, /data/pdb]
 
   - slug: waterflow-train-slae
@@ -213,9 +205,6 @@ profiles:
         - key: num_workers
           type: number
           default: 4
-        - key: use_self_cond
-          type: boolean
-          default: true
         - key: run_name
           type: text
         - key: train_list
@@ -254,8 +243,7 @@ profiles:
           save_dir: --save_dir
           run_name: --run_name
           num_workers: --num_workers
-        boolean_args:
-          use_self_cond: --use_self_cond
+        boolean_args: {}
         static_args: [--base_pdb_dir, /data/pdb]
 
   - slug: waterflow-inference
@@ -280,9 +268,6 @@ profiles:
         - key: method
           type: text
           default: rk4
-        - key: use_sc
-          type: boolean
-          default: true
     run_config_defaults:
       shared_memory_size: "16Gi"
       runtime_class: nvidia
@@ -306,8 +291,7 @@ profiles:
           pdb_list: --pdb_list
           method: --method
           num_steps: --num_steps
-        boolean_args:
-          use_sc: --use_sc
+        boolean_args: {}
         static_args: [--output_dir, /data/outputs, --base_pdb_dir, /data/pdb]
 
   - slug: waterflow-generate-esm
