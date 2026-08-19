@@ -126,8 +126,13 @@ class TestEquivalenceWithDataset:
         assert torch.equal(inf["protein"].is_mate, ds["protein"].is_mate)
         assert inf.num_asu_protein_atoms == ds.num_asu_protein_atoms
         assert inf["protein"].num_protein_residues == ds["protein"].num_protein_residues
-        # PP topology matches (same deterministic radius graph)
+        assert inf["protein"].num_residues == ds["protein"].num_residues
+        # PP topology and edge features match (same deterministic radius graph)
         assert torch.equal(inf[EDGE_PP].edge_index, ds[EDGE_PP].edge_index)
+        assert torch.allclose(
+            inf[EDGE_PP].edge_unit_vectors, ds[EDGE_PP].edge_unit_vectors, atol=1e-4
+        )
+        assert torch.allclose(inf[EDGE_PP].edge_rbf, ds[EDGE_PP].edge_rbf, atol=1e-4)
 
 
 @pytest.mark.unit

@@ -70,10 +70,29 @@ class TestMergeWaters:
         merged = merge_waters(prot, np.zeros((3, 3), dtype=np.float32))
         assert merged[merged.res_name == "HOH"].res_id.tolist() == [1, 2, 3]
 
-    def test_b_factor_defaults_to_protein_mean(self):
+    def test_b_factor_defaults_to_local_mean_plus_offset(self):
+        # Two atoms within 5 A of the water (B = 10, 30) and one far away (B = 80);
+        # the water should take mean(10, 30) + 10.0.
+        prot = bts.AtomArray(3)
+        prot.coord = np.array([[0, 0, 0], [2, 0, 0], [100, 0, 0]], dtype=np.float32)
+        prot.chain_id[:] = "A"
+        prot.res_id[:] = [1, 2, 3]
+        prot.ins_code[:] = ""
+        prot.res_name[:] = "ALA"
+        prot.atom_name[:] = "CA"
+        prot.element[:] = "C"
+        prot.hetero[:] = False
+        prot.add_annotation("b_factor", dtype=float)
+        prot.b_factor[:] = [10.0, 30.0, 80.0]
+
+        merged = merge_waters(prot, np.array([[1.0, 0, 0]], dtype=np.float32))
+        assert np.allclose(merged[merged.res_name == "HOH"].b_factor, 20.0 + 10.0)
+
+    def test_b_factor_falls_back_to_global_mean_when_isolated(self):
+        # A water with no atom within 5 A uses the overall mean + offset.
         prot = _make_protein(b_factor=42.0)
-        merged = merge_waters(prot, np.zeros((2, 3), dtype=np.float32))
-        assert np.allclose(merged[merged.res_name == "HOH"].b_factor, 42.0)
+        merged = merge_waters(prot, np.array([[1000.0, 0, 0]], dtype=np.float32))
+        assert np.allclose(merged[merged.res_name == "HOH"].b_factor, 42.0 + 10.0)
 
     def test_explicit_b_factor_overrides_default(self):
         prot = _make_protein(b_factor=42.0)

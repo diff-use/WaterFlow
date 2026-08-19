@@ -1,13 +1,6 @@
 # structure_io.py
 
-"""Write predicted waters alongside kept (non-water) atoms to a PDB or CIF file.
-
-Pure structure IO. Callers pass the non-water atoms to keep (protein + hets) and
-the predicted water positions **in the same reference frame as those atoms**, and
-get back a merged ``AtomArray`` or a written file. Undoing the model's
-mean-centering and choosing which atoms to keep are the caller's job, so this
-module stays free of dataset- and model-specific conventions.
-"""
+"""Merge predicted waters with the protein+het atoms and write the result to PDB or CIF."""
 
 from __future__ import annotations
 
@@ -17,8 +10,8 @@ from biotite.structure.io.pdb import PDBFile
 from biotite.structure.io.pdbx import CIFFile, set_structure as _set_structure_cif
 
 
-# Annotations every AtomArray carries; anything else on the kept atoms (e.g.
-# b_factor, occupancy) is an "extra" the waters must mirror so concatenation works.
+# Columns every AtomArray has. Any other column on the kept atoms (e.g. b_factor,
+# occupancy) must be mirrored onto the waters so the two arrays concatenate.
 _MANDATORY = (
     "chain_id",
     "res_id",
@@ -29,6 +22,11 @@ _MANDATORY = (
     "element",
 )
 
+# Default water B-factor: mean B of kept atoms within this radius (A), plus an
+# offset since ordered waters move more than the atoms they touch.
+_B_FACTOR_CONTACT_RADIUS = 5.0
+_B_FACTOR_WATER_OFFSET = 10.0
+
 
 def merge_waters(
     atoms: bts.AtomArray,
@@ -38,32 +36,32 @@ def merge_waters(
     b_factor: float | None = None,
     occupancy: float = 1.0,
 ) -> bts.AtomArray:
-    """Return ``atoms`` with predicted waters appended as ``HOH`` oxygens.
+    """Return the kept atoms with predicted waters appended as HOH oxygens.
 
-    Each row of ``positions`` becomes one ``O`` atom in its own ``HOH`` residue,
-    in whatever frame ``positions`` are already given (no re-centering here).
+    Each row of positions becomes one O atom in its own HOH residue, in whatever
+    frame positions are given (no re-centering here).
 
     Args:
         atoms: Non-water atoms to keep (protein + hets), in the output frame.
-        positions: (N, 3) predicted water coordinates; numpy array or tensor.
-        chain_id: Chain for the waters. Defaults to a single character not already
-            used by ``atoms``.
-        b_factor: B-factor for every water. Defaults to the mean B-factor of any
-            HOH already in ``atoms``, else the mean over ``atoms``, else 0.0.
-            Only written when ``atoms`` carries a ``b_factor`` annotation.
-        occupancy: Occupancy for every water, written only when ``atoms`` carries
-            an ``occupancy`` annotation (biotite defaults it to 1.0 otherwise).
+        positions: (N, 3) water coordinates; numpy array or tensor.
+        chain_id: Chain for the waters. Defaults to an unused single character.
+        b_factor: One B-factor for every water. Defaults to a per-water estimate
+            from the nearby atoms (see _default_b_factors). Written only if atoms
+            has a b_factor column.
+        occupancy: Occupancy for every water. Written only if atoms has an
+            occupancy column.
 
     Returns:
-        ``atoms`` followed by the water atoms, as one AtomArray.
+        The kept atoms followed by the waters, as one AtomArray.
     """
+    coords = _to_coords(positions)
     if chain_id is None:
         chain_id = _pick_unused_chain_id(atoms)
     if b_factor is None:
-        b_factor = _default_b_factor(atoms)
+        b_factor = _default_b_factors(atoms, coords)
 
     waters = _water_array(
-        positions,
+        coords,
         chain_id=chain_id,
         b_factor=b_factor,
         occupancy=occupancy,
@@ -73,9 +71,9 @@ def merge_waters(
 
 
 def write_structure(atoms: bts.AtomArray, output_path: str) -> None:
-    """Write an AtomArray to a PDB or CIF file, dispatching on the extension.
+    """Write an AtomArray to PDB or CIF, chosen by the file extension.
 
-    ``.cif`` writes mmCIF; anything else writes PDB.
+    A .cif extension writes mmCIF; anything else writes PDB.
     """
     if str(output_path).endswith(".cif"):
         cif_file = CIFFile()
@@ -88,15 +86,17 @@ def write_structure(atoms: bts.AtomArray, output_path: str) -> None:
 
 
 def _water_array(
-    positions,
+    coords: np.ndarray,
     *,
     chain_id: str,
-    b_factor: float,
+    b_factor,
     occupancy: float,
     template: bts.AtomArray,
 ) -> bts.AtomArray:
-    """Build oxygen-only HOH waters carrying exactly ``template``'s annotations."""
-    coords = np.asarray(_to_numpy(positions), dtype=np.float32).reshape(-1, 3)
+    """Build oxygen-only HOH waters with the same columns as template.
+
+    b_factor may be a scalar or a per-water array.
+    """
     n = len(coords)
 
     waters = bts.AtomArray(n)
@@ -109,24 +109,23 @@ def _water_array(
     waters.element[:] = "O"
     waters.hetero[:] = True
 
-    # Mirror the kept atoms' extra fields so `template + waters` concatenates.
+    # template + waters only concatenates if both have the same columns. Give the
+    # waters every extra column the kept atoms carry so they line up. A new column
+    # starts empty (0 / '' / False), which is fine except for b_factor and
+    # occupancy, which get a real value.
     for cat in template.get_annotation_categories():
         if cat in _MANDATORY:
             continue
-        ref = template.get_annotation(cat)
-        waters.add_annotation(cat, dtype=ref.dtype)
+        waters.add_annotation(cat, dtype=template.get_annotation(cat).dtype)
         if cat == "b_factor":
-            fill = b_factor
+            waters.get_annotation(cat)[:] = b_factor
         elif cat == "occupancy":
-            fill = occupancy
-        else:
-            fill = _default_for(ref.dtype)
-        waters.get_annotation(cat)[:] = fill
+            waters.get_annotation(cat)[:] = occupancy
     return waters
 
 
 def _pick_unused_chain_id(atoms: bts.AtomArray) -> str:
-    """A single-character chain id not already used by ``atoms`` (falls back to 'W')."""
+    """A single-character chain id not used by atoms (falls back to 'W')."""
     used = set(atoms.chain_id.tolist()) if atoms.array_length() else set()
     for c in "WXYZUVTSRQ0123456789":
         if c not in used:
@@ -134,27 +133,30 @@ def _pick_unused_chain_id(atoms: bts.AtomArray) -> str:
     return "W"
 
 
-def _default_b_factor(atoms: bts.AtomArray) -> float:
-    """Mean B-factor of any HOH in ``atoms``, else the overall mean, else 0.0."""
+def _default_b_factors(atoms: bts.AtomArray, coords: np.ndarray) -> np.ndarray:
+    """Per-water default B-factor from the local environment.
+
+    Each water takes the mean B-factor of the kept atoms near it, plus an offset.
+    A water with no atom in range uses the overall mean. Returns zeros when atoms
+    has no b_factor.
+    """
+
+    if len(coords) == 0:
+        return np.zeros(0, dtype=np.float32)
     if "b_factor" not in atoms.get_annotation_categories() or atoms.array_length() == 0:
-        return 0.0
-    hoh = atoms.b_factor[atoms.res_name == "HOH"]
-    source = hoh if len(hoh) else atoms.b_factor
-    return float(source.mean()) if len(source) else 0.0
+        return np.zeros(len(coords), dtype=np.float32)
+
+    b = atoms.b_factor
+    cell_list = bts.CellList(atoms, cell_size=_B_FACTOR_CONTACT_RADIUS)
+    within = cell_list.get_atoms(coords, radius=_B_FACTOR_CONTACT_RADIUS, as_mask=True)
+    counts = within.sum(axis=1)
+    local_mean = (within * b[None, :]).sum(axis=1) / np.maximum(counts, 1)
+    base = np.where(counts > 0, local_mean, b.mean())
+    return (base + _B_FACTOR_WATER_OFFSET).astype(np.float32)
 
 
-def _default_for(dtype: np.dtype):
-    """A neutral fill value for an annotation of the given dtype."""
-    kind = np.dtype(dtype).kind
-    if kind in ("U", "S"):
-        return ""
-    if kind == "b":
-        return False
-    return 0
-
-
-def _to_numpy(positions):
-    """Coerce a tensor or array-like of positions to a numpy array."""
+def _to_coords(positions) -> np.ndarray:
+    """Tensor or array positions to an (N, 3) float32 array."""
     if hasattr(positions, "detach"):  # torch.Tensor
-        return positions.detach().cpu().numpy()
-    return np.asarray(positions)
+        positions = positions.detach().cpu().numpy()
+    return np.asarray(positions, dtype=np.float32).reshape(-1, 3)
