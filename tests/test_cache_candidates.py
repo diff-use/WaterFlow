@@ -108,9 +108,7 @@ class TestDefaultCandidateDir:
 
     def test_distinct_configs_never_collide(self, tmp_path):
         dirs = {
-            cc.default_candidate_dir(
-                tmp_path, run, ckpt, ratio, seed, method, steps
-            )
+            cc.default_candidate_dir(tmp_path, run, ckpt, ratio, seed, method, steps)
             for run in ("/runs/a", "/runs/b")
             for ckpt in ("best.pt", "epoch_50.pt")
             for ratio in (2.0, 3.0)
