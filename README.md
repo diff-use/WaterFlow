@@ -434,7 +434,6 @@ uv run python -m scripts.inference \
 | `--save_gifs` | `false` | Save trajectory GIFs (slower) |
 | `--threshold` | `1.0` | Distance threshold for precision/recall (A) |
 | `--water_ratio` | `None` | Sample `num_residues * ratio` waters (if not set, uses ground truth count) |
-| `--use_sc` | `false` | Use self-conditioning during integration |
 
 > **`--water_ratio` counts mate residues too.** `num_residues` covers ASU *and* mate
 > residues, so `--include_mates` emits ~1.7x more waters at the same ratio (~440 vs

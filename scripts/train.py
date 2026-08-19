@@ -385,7 +385,6 @@ def parse_args():
     )
     p.add_argument("--step_gamma", type=float, default=0.5, help="StepLR gamma")
 
-
     # checkpointing
     p.add_argument("--save_dir", type=str, default="/home/srivasv/flow_checkpoints")
     p.add_argument(
