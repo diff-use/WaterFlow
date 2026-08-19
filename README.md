@@ -20,6 +20,7 @@ WaterFlow/
 │   ├── train.py            # Training pipeline
 │   ├── train_confidence.py # Train the confidence scorer on cached candidates
 │   ├── inference.py        # Run inference on trained models
+│   ├── cache_candidates.py # Sample candidate waters for confidence training
 │   ├── generate_esm_embeddings.py   # Precompute ESM embeddings
 │   └── generate_slae_embeddings.py  # Precompute SLAE embeddings
 ├── tests/                  # Test suite
@@ -174,7 +175,7 @@ The base name comes from `--geometry_cache_name` (default `geometry`).
 
 Filtering happens *before* the cache is written, so the thresholds are a property of the
 directory, not of the run reading it — and the `.pt` files record none of them. Each geometry
-directory therefore carries a `_filter_meta.json` sidecar holding the per-water filters and
+directory therefore carries a `_filter_meta.json` file holding the per-water filters and
 their toggles, the structure-level checks that decide which entries exist at all
 (`min_water_residue_ratio`, `max_com_dist`, `max_clash_fraction`, `clash_dist`,
 `interface_dist_threshold`), and the graph parameters behind the cached PP edges (`cutoff`,
@@ -183,7 +184,7 @@ their toggles, the structure-level checks that decide which entries exist at all
 The first run with `preprocess=True` writes it; every later run compares against it and
 **refuses to start** on a mismatch rather than appending differently filtered entries to the
 same directory. A disabled filter records `null` for its threshold, which cannot have changed
-the cached waters. Directories built before this existed have no sidecar: they load, and warn
+the cached waters. Directories built before this existed have no such file: they load, and warn
 that their provenance is unverifiable, until a preprocessing run stamps them — so check your
 thresholds match the cache before that first run.
 
