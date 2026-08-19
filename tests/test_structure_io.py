@@ -71,7 +71,7 @@ class TestMergeWaters:
         assert merged[merged.res_name == "HOH"].res_id.tolist() == [1, 2, 3]
 
     def test_b_factor_defaults_to_local_mean_plus_offset(self):
-        # Two atoms within 4 A of the water (B = 10, 30) and one far away (B = 80);
+        # Two atoms within 5 A of the water (B = 10, 30) and one far away (B = 80);
         # the water should take mean(10, 30) + 10.0.
         prot = bts.AtomArray(3)
         prot.coord = np.array([[0, 0, 0], [2, 0, 0], [100, 0, 0]], dtype=np.float32)
