@@ -18,6 +18,7 @@ WaterFlow/
 │   └── utils.py            # Metrics, plotting, logging utilities
 ├── scripts/                # Executable scripts
 │   ├── train.py            # Training pipeline
+│   ├── train_confidence.py # Train the confidence scorer on cached candidates
 │   ├── inference.py        # Run inference on trained models
 │   ├── cache_candidates.py # Sample candidate waters for confidence training
 │   ├── generate_esm_embeddings.py   # Precompute ESM embeddings
@@ -26,6 +27,7 @@ WaterFlow/
 │   ├── test_dataset.py     # Dataset and preprocessing tests
 │   ├── test_distributed.py # DDP helper and cache prebuild tests
 │   ├── test_confidence.py  # Confidence scorer, target and clustering tests
+│   ├── test_train_confidence.py # Confidence trainer: loss, freezing, epoch
 │   ├── test_flow.py        # Flow matching tests
 │   ├── test_encoder.py     # Encoder tests
 │   ├── test_forward.py     # End-to-end forward pass tests
@@ -319,6 +321,32 @@ uv run torchrun --nproc_per_node=4 -m scripts.train \
     --encoder_type gvp \
     --batch_size 4  # per rank -> effective 16
 ```
+
+### Confidence Model Training
+
+Trains `ConfidenceGVP` to score flow-sampled candidate waters, reusing the flow
+run's cache layout and config plus a per-PDB candidate directory:
+
+```bash
+uv run python -m scripts.train_confidence \
+    --flow_run_dir <flow_run> \
+    --train_list splits/conf_train.txt \
+    --val_list splits/conf_valid.txt \
+    --candidate_dir <candidate_dir> \
+    --processed_dir <cache_root> \
+    --base_pdb_dir <pdb_dir> \
+    --save_dir <out> \
+    --run_name <run_name> \
+    --init_from <flow_run>/checkpoints/best.pt --freeze_backbone
+```
+
+`--init_from` warm-starts the shared backbone from a flow checkpoint;
+`--freeze_backbone` then trains only the score head. Validation reports AUC-PR
+(for checkpoint selection) and best F1. Multi-GPU works exactly like flow
+training — prefix with `torchrun --nproc_per_node=N`, no flag needed: each rank
+trains a disjoint shard, the loss is all-reduced, and the (score, label) pairs
+are pooled across ranks so AUC-PR/F1 rank the full candidate set. Rank 0 alone
+writes checkpoints.
 
 ### Resuming from Checkpoints
 
