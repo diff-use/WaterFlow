@@ -14,12 +14,14 @@ from unittest import mock
 
 import pytest
 import torch
+import torch.distributed as dist
 from torch.utils.data import SequentialSampler
 
 import scripts.train as train
 from src.dataset import get_dataloader, ProteinWaterDataset
 from src.distributed import (
     _ddp_world_size,
+    all_gather_concat,
     all_reduce_means,
     ddp_barrier,
     ddp_is_active,
@@ -183,6 +185,31 @@ def test_all_reduce_means_preserves_key_order():
     means, _ = all_reduce_means(sums, 3, CPU)
     assert list(means) == ["z", "a", "m"]
     assert means == {"z": 1.0, "a": 2.0, "m": 3.0}
+
+
+# ============== all_gather_concat ==============
+
+
+def test_all_gather_concat_is_identity_without_launcher(monkeypatch):
+    monkeypatch.delenv("WORLD_SIZE", raising=False)
+    t = torch.tensor([3.0, 1.0, 2.0])
+    assert torch.equal(all_gather_concat(t), t)
+
+
+def test_all_gather_concat_pools_uneven_shards_in_rank_order(launcher_env, monkeypatch):
+    """Ranks score different numbers of candidates, so lengths differ by rank."""
+    launcher_env(3)
+    shards = [torch.tensor([0.0]), torch.tensor([1.0, 2.0]), torch.tensor([3.0])]
+
+    def fake_all_gather_object(out, _obj):
+        out[:] = shards
+
+    monkeypatch.setattr(dist, "get_world_size", lambda: 3)
+    monkeypatch.setattr(dist, "all_gather_object", fake_all_gather_object)
+
+    pooled = all_gather_concat(shards[1])
+
+    assert torch.equal(pooled, torch.tensor([0.0, 1.0, 2.0, 3.0]))
 
 
 # ============== Reading model config through the DDP wrapper ==============

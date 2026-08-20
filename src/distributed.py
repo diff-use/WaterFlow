@@ -128,6 +128,28 @@ def run_once_on_main(work: Callable[[], None], key: str) -> dist.Store | None:
     return store
 
 
+def all_gather_concat(t: torch.Tensor) -> torch.Tensor:
+    """
+    Pool a variable-length 1D tensor from every rank into one tensor.
+
+    Ranking metrics need a single global ordering, so unlike a loss they cannot
+    be recovered from per-rank means. Every rank receives the same pooled result
+    and computes the same number. Shipped via CPU, so ranks may differ in length.
+
+    Args:
+        t: This rank's 1D contribution.
+
+    Returns:
+        The concatenation over ranks, in rank order; `t` when not distributed.
+    """
+    if not ddp_is_active():
+        return t
+    # all_gather_object overwrites every slot, so the placeholder is only a shape.
+    gathered: list[torch.Tensor] = [torch.empty(0)] * dist.get_world_size()
+    dist.all_gather_object(gathered, t.cpu())
+    return torch.cat(gathered, dim=0)
+
+
 def all_reduce_means(
     sums: dict[str, float], count: int, device: torch.device
 ) -> tuple[dict[str, float], int]:

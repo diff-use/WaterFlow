@@ -63,6 +63,39 @@ def get_encoder_class(name: str) -> type[BaseProteinEncoder]:
     return _ENCODER_REGISTRY[name]
 
 
+def resolve_encoder_config(config: dict) -> dict:
+    """
+    Derive the build_encoder config from a training run's recorded config.
+
+    Prefers the run's resolved_encoder_config, else rebuilds it from the
+    top-level hyperparameters. Shared by the flow and confidence model builders
+    so both stages resolve the encoder identically.
+
+    Args:
+        config: A training run's recorded config.
+
+    Returns:
+        A config dict accepted by build_encoder.
+    """
+    resolved = config.get("resolved_encoder_config")
+    if resolved:
+        return resolved.copy()
+
+    encoder_type = config.get("encoder_type", "gvp")
+    encoder_config = {
+        "encoder_type": encoder_type,
+        "hidden_s": config.get("hidden_s") or 256,
+        "hidden_v": config.get("hidden_v") or 64,
+        "node_scalar_in": config.get("node_scalar_in") or 16,
+        "freeze_encoder": config.get("freeze_encoder", False),
+        "encoder_ckpt": config.get("encoder_ckpt"),
+    }
+    if encoder_type in {"slae", "esm"}:
+        encoder_config["embedding_key"] = "embedding"
+        encoder_config["embedding_dim"] = config.get("embedding_dim")
+    return encoder_config
+
+
 def build_encoder(config: dict, device: torch.device) -> BaseProteinEncoder:
     """
     Build encoder from configuration dict.

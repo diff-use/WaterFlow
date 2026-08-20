@@ -387,7 +387,20 @@ class ConfidenceGVP(nn.Module):
         device = data["protein"].pos.device
 
         if "water" not in data.node_types or data["water"].num_nodes == 0:
-            return torch.zeros(0, device=device)
+            # No candidates. Return an empty (0,) result that keeps a grad path to
+            # the score head: under DDP the backward must reach the reducer, or
+            # this rank skips the all-reduce and hangs ranks that had candidates.
+            # Route through the water head only -- 0 nodes cannot build edges.
+            in_features = self.water_scalar_encoder[0].in_features
+            water_x = (
+                data["water"].x
+                if "water" in data.node_types
+                else torch.zeros(0, in_features, device=device)
+            )
+            s_w = self.water_scalar_encoder(water_x)  # (0, s_h)
+            v_w = torch.zeros(0, self.hidden_dims[1], 3, device=device)
+            logits = self.score_head((s_w, v_w)).squeeze(-1)  # (0,)
+            return logits if return_logits else torch.sigmoid(logits)
 
         s_all, v_all, pp_edge_attr = self.encoder(data)
         encoder_input = (s_all, v_all) if self.encoder.output_dims[1] > 0 else s_all
