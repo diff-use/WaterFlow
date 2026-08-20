@@ -940,11 +940,16 @@ class FlowMatcher:
         self.sampling_strategy = sampling_strategy
 
     def _autocast_context(self, device: torch.device):
-        """bf16 autocast on CUDA when --use_amp is set; a no-op otherwise."""
+        """bf16 autocast when use_amp is set and the device is a bf16-capable CUDA
+        GPU; a no-op otherwise. Guards every caller, including direct construction.
+        """
+        enabled = (
+            self.use_amp
+            and device.type == "cuda"
+            and torch.cuda.is_bf16_supported()
+        )
         return torch.autocast(
-            device_type="cuda",
-            dtype=torch.bfloat16,
-            enabled=self.use_amp and device.type == "cuda",
+            device_type="cuda", dtype=torch.bfloat16, enabled=enabled
         )
 
     @staticmethod
