@@ -75,14 +75,24 @@ class TestInputsAndFrame:
         paths = _collect_struc_paths(SimpleNamespace(struc=pdb_6eey, pdb_list=None))
         assert paths == [pdb_6eey]
 
-    def test_pdb_list_resolves_files(self, pdb_6eey, tmp_path):
-        base = Path(pdb_6eey).parent.parent
+    def test_pdb_list_resolves_names_with_and_without_ext(self, pdb_6eey, tmp_path):
+        base = Path(pdb_6eey).parent
         lst = tmp_path / "list.txt"
-        lst.write_text("6eey_final\n")
+        # one entry carries an extension, one omits it; both resolve to a file
+        lst.write_text(f"{Path(pdb_6eey).name}\n6eey_final\n")
         paths = _collect_struc_paths(
             SimpleNamespace(struc=None, pdb_list=str(lst), base_pdb_dir=str(base))
         )
-        assert len(paths) == 1 and Path(paths[0]).stem == "6eey_final"
+        assert len(paths) == 2
+        assert all(Path(p).stem == "6eey_final" for p in paths)
+
+    def test_pdb_list_warns_on_missing(self, tmp_path):
+        lst = tmp_path / "list.txt"
+        lst.write_text("does_not_exist\n")
+        paths = _collect_struc_paths(
+            SimpleNamespace(struc=None, pdb_list=str(lst), base_pdb_dir=str(tmp_path))
+        )
+        assert paths == []
 
     def test_kept_atoms_drop_waters_and_center_is_protein_centroid(self, pdb_4h0b):
         from src.dataset import parse_asu_with_biotite
@@ -139,4 +149,7 @@ class TestEndToEnd:
         written = PDBFile.read(str(pdb_out)).get_structure(model=1)
         n_waters = int((written.res_name == "HOH").sum())
         assert n_waters > 0
-        assert np.loadtxt(coords_out).reshape(-1, 3).shape[0] == n_waters
+        # txt is (N, 4): x, y, z, confidence in [0, 1]
+        rows = np.loadtxt(coords_out).reshape(-1, 4)
+        assert rows.shape[0] == n_waters
+        assert ((rows[:, 3] >= 0) & (rows[:, 3] <= 1)).all()

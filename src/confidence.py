@@ -250,10 +250,10 @@ class ConfidenceGVP(nn.Module):
     """
     DiffDock-style confidence model scoring candidate waters.
 
-    Mirrors `FlowWaterGVP`'s structure but drops time and self conditioning
-    (inputs are clean samples), emits one scalar per candidate water, and runs
-    on PW and PP edges only -- candidates come from inference and are not
-    refined here, so WW and WP carry nothing.
+    Mirrors the flow model's structure but drops time (inputs are clean
+    samples), emits one scalar per candidate water, and runs on PW and PP edges
+    only -- candidates come from inference and are not refined here, so WW and
+    WP carry nothing.
 
     PW edges come from the dataset when it supplies them, otherwise from a
     radius query plus a nearest-neighbour pass for candidates it left with no

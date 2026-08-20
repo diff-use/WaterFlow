@@ -5,10 +5,14 @@
 Takes structures (with or without waters), strips them to protein + hets, samples
 candidate waters from a trained flow checkpoint, scores them with a confidence
 checkpoint, clusters and selects the final set, and writes out predicted-water
-structures (PDB/CIF) plus their coordinates.
+structures (PDB/CIF) plus a text file of their coordinates and confidence.
 
 This is the *prediction* entry point; inference.py remains the cache-based
 evaluation/benchmark tool. Shared flow machinery is imported, not duplicated.
+
+The ESM protein embeddings must already exist: this script loads them from --processed_dir 
+but does not generate them. Run generate_esm_embeddings.py or generate_slae_embeddings.py 
+first.
 
 Usage:
     python -m scripts.predict_waters \\
@@ -86,9 +90,10 @@ def load_state_dict_lenient(
 ) -> None:
     """Load weights with strict=False, warning on any missing/unexpected keys.
 
-    Older flow checkpoints predate the self-conditioning layers, so a strict load
-    would raise; the trained weights still transfer, and the extra layers stay at
-    init (harmless when self-conditioning is off at inference).
+    A checkpoint and the current model can differ by a few layers across
+    versions; a strict load would raise. The matched weights still transfer,
+    unmatched checkpoint keys are dropped, and any unmatched model layer stays
+    at init. Missing or unexpected keys are warned, not fatal.
     """
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
@@ -142,9 +147,8 @@ def select_waters(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Cluster candidates and cull to the final set.
 
-    confidence: threshold is applied *before* clustering (sub-threshold
+    confidence: threshold is applied before clustering (sub-threshold
     candidates cannot pull a centroid), then all resulting centroids are kept.
-    density (added in PR4) will instead keep the top N by confidence.
     """
     if mode == "confidence":
         return cluster_waters_vdw(
@@ -221,11 +225,17 @@ def predict_structures(
             mode=args.selection,
             threshold=args.threshold,
         )
-        # Back to the input frame, then write structure + coordinates.
+        # Back to the input frame, then write structure + scored coordinates.
         water_xyz = sel_pos.numpy() + center
         structure = merge_waters(kept, water_xyz)
         write_structure(structure, str(out_dir / f"{name}_pred{args.out_format}"))
-        np.savetxt(out_dir / f"{name}_waters.txt", water_xyz, fmt="%.3f")
+        xyz_conf = np.column_stack([water_xyz, sel_conf.numpy()])
+        np.savetxt(
+            out_dir / f"{name}_waters.txt",
+            xyz_conf,
+            fmt=["%.3f", "%.3f", "%.3f", "%.4f"],
+            header="x y z confidence",
+        )
         logger.info(f"{name}: {len(water_xyz)} waters -> {out_dir}")
 
 
@@ -235,22 +245,28 @@ def predict_structures(
 
 
 def _collect_struc_paths(args: argparse.Namespace) -> list[str]:
+    """Resolve the structures to run: a single --struc, or names from --pdb_list.
+
+    Each list entry is a path under --base_pdb_dir. It may carry a .pdb/.cif
+    extension or omit it (both are tried), and may include a subdirectory.
+    """
     if args.struc:
         return [args.struc]
-    keys = [
+    base = Path(args.base_pdb_dir)
+    names = [
         ln.strip() for ln in Path(args.pdb_list).read_text().splitlines() if ln.strip()
     ]
-    base = Path(args.base_pdb_dir)
     paths = []
-    for key in keys:
-        pdb_id = key.removesuffix("_final")
-        for ext in (".cif", ".pdb"):
-            cand = base / pdb_id / f"{key}{ext}"
-            if cand.exists():
-                paths.append(str(cand))
-                break
+    for name in names:
+        if (base / name).suffix.lower() in (".cif", ".pdb"):
+            candidates = [base / name]
         else:
-            logger.warning(f"No structure file found for {key} under {base}")
+            candidates = [base / f"{name}{ext}" for ext in (".cif", ".pdb")]
+        match = next((c for c in candidates if c.exists()), None)
+        if match is not None:
+            paths.append(str(match))
+        else:
+            logger.warning(f"No structure file found for {name!r} under {base}")
     return paths
 
 
@@ -267,10 +283,19 @@ def parse_args() -> argparse.Namespace:
 
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--struc", help="A single PDB/CIF file.")
-    src.add_argument("--pdb_list", help="Text file of <pdb_id>_final keys.")
-    p.add_argument("--base_pdb_dir", help="Base dir for --pdb_list entries.")
+    src.add_argument(
+        "--pdb_list",
+        help="Text file of structure names under --base_pdb_dir, one per line; "
+        "each may include or omit a .pdb/.cif extension.",
+    )
+    p.add_argument("--base_pdb_dir", help="Directory --pdb_list names resolve against.")
     p.add_argument(
-        "--processed_dir", default=None, help="Embedding cache root (esm/slae only)."
+        "--processed_dir",
+        default=None,
+        help="Embedding cache root for esm/slae encoders (unused for gvp). "
+        "Embeddings are loaded, not generated: run generate_esm_embeddings.py or "
+        "generate_slae_embeddings.py first. Looked up by file stem under "
+        "processed_dir/<encoder_type>.",
     )
     p.add_argument("--out_dir", required=True)
     p.add_argument("--out_format", default=".pdb", choices=[".pdb", ".cif"])
