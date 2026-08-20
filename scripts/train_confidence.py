@@ -649,9 +649,7 @@ def main() -> None:
     )
     # Resolve AMP once: it needs a CUDA device with bf16 support. Write the
     # verdict back to args so the recorded config.json reflects what actually ran.
-    if args.use_amp and (
-        device.type != "cuda" or not torch.cuda.is_bf16_supported()
-    ):
+    if args.use_amp and (device.type != "cuda" or not torch.cuda.is_bf16_supported()):
         reason = (
             "device is not CUDA"
             if device.type != "cuda"
