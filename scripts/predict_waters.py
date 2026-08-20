@@ -223,7 +223,6 @@ def predict_structures(
         graphs,
         method=args.method,
         num_steps=args.num_steps,
-        use_sc=bool(flow_config.get("use_self_cond", False)),
         device=str(device),
         water_ratio=args.water_ratio,
     )
