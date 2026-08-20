@@ -1142,7 +1142,7 @@ class ProteinWaterDataset(Dataset):
         if write:
             self.geometry_dir.mkdir(parents=True, exist_ok=True)
             # Written through a temp file: cache builds fan out over processes,
-            # and a reader must never catch a half-written sidecar.
+            # and a reader must never catch a half-written file.
             tmp_path = meta_path.with_suffix(f".{os.getpid()}.tmp")
             with open(tmp_path, "w") as f:
                 json.dump(current, f, indent=2)

@@ -267,8 +267,6 @@ def test_training_step_no_nan_tripwire(device):
 
     fm = FlowMatcher(
         model=model,
-        p_self_cond=0.0,  # simpler/cleaner for tripwire
-        use_distortion=False,
         loss_eps=1e-3,
     )
 
@@ -282,7 +280,7 @@ def test_training_step_no_nan_tripwire(device):
 
         for step in range(5):
             opt.zero_grad()
-            out = fm.training_step(data, use_self_conditioning=False)
+            out = fm.training_step(data)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
 
@@ -543,13 +541,12 @@ class TestFlowIntegrationCorrectness:
             k_ww=8,
         ).to(device)
 
-        fm = FlowMatcher(model, p_self_cond=0.0)
+        fm = FlowMatcher(model)
 
         num_steps = 20
         results = fm.rk4_integrate(
             data,
             num_steps=num_steps,
-            use_sc=False,
             device=str(device),
             return_trajectory=True,
         )
@@ -610,7 +607,7 @@ class TestVelocityFieldProperties:
         # Test at multiple t values
         for t_val in [0.0, 0.25, 0.5, 0.75, 1.0]:
             t = torch.tensor([t_val], device=device)
-            v_pred = model(data, t, self_cond=None)
+            v_pred = model(data, t)
 
             assert torch.isfinite(v_pred).all(), f"Velocity has NaN/Inf at t={t_val}"
 
@@ -637,8 +634,8 @@ class TestVelocityFieldProperties:
         t0 = torch.tensor([0.1], device=device)
         t1 = torch.tensor([0.9], device=device)
 
-        v0 = model(data, t0, self_cond=None)
-        v1 = model(data, t1, self_cond=None)
+        v0 = model(data, t0)
+        v1 = model(data, t1)
 
         # Velocities should be different - check that MOST individual waters show change
         per_water_diff = torch.norm(v0 - v1, dim=-1)  # per-water norm

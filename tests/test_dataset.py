@@ -3168,7 +3168,7 @@ class TestMatesWithLigands:
             include_mates=True,
             include_ligands=True,
             preprocess=True,
-            # 4h0b ships no EDIA sidecar; this class is about the node layout
+            # 4h0b ships no EDIA file; this class is about the node layout
             filter_by_distance=False,
             filter_by_edia=False,
             filter_by_bfactor=False,
@@ -3281,7 +3281,7 @@ class TestMatesWithLigands:
 
 
 @pytest.mark.unit
-class TestFilterMetaSidecar:
+class TestFilterMetaFile:
     """A geometry directory records the settings its entries were built with."""
 
     def _dataset(self, tmp_path, *, preprocess=True, **kwargs):
@@ -3352,7 +3352,7 @@ class TestFilterMetaSidecar:
 
     @pytest.mark.parametrize("preprocess", [False, True])
     def test_unlabelled_cache_warns(self, tmp_path, warning_log, preprocess):
-        """An existing directory with no sidecar is unverifiable whether or not this
+        """An existing directory with no such file is unverifiable whether or not this
         run also claims it."""
         geometry_dir = tmp_path / "processed" / "geometry_mates"
         geometry_dir.mkdir(parents=True)
