@@ -42,6 +42,7 @@ def _train_args(**overrides):
         warmup_steps=0,
         freeze_backbone=True,
         grad_accum_steps=1,
+        use_amp=False,
     )
     return argparse.Namespace(**{**vars(args), **overrides})
 
