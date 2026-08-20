@@ -482,7 +482,7 @@ def train_one_epoch(
     total_loss, total_n = 0.0, 0
     params = [p for group in optimizer.param_groups for p in group["params"]]
     accum = max(1, args.grad_accum_steps)
-    use_amp = getattr(args, "use_amp", True) and device.type == "cuda"
+    use_amp = args.use_amp
     # Bound to the wrapper, since only DDP defers the gradient all-reduce.
     no_sync = model.no_sync if isinstance(model, DDP) else None
     n_batches = len(loader)  # Equal across ranks: DistributedSampler + drop_last.
@@ -571,7 +571,7 @@ def validate(
         _unwrap(model), training=False, freeze_backbone_enabled=args.freeze_backbone
     )
     total_loss, total_n, abs_err = 0.0, 0, 0.0
-    use_amp = getattr(args, "use_amp", True) and device.type == "cuda"
+    use_amp = args.use_amp
     score_chunks: list[torch.Tensor] = []
     label_chunks: list[torch.Tensor] = []
 
@@ -586,7 +586,9 @@ def validate(
             preds = model(batch, return_logits=True)
             loss = F.binary_cross_entropy_with_logits(preds, target)
         # MAE is reported in probability space, for interpretability.
-        probs = torch.sigmoid(preds)
+        # Cast logits to fp32 before sigmoid: under bf16 autocast preds is bf16,
+        # and these probs drive MAE, AUC-PR, and best-F1 (which selects the ckpt).
+        probs = torch.sigmoid(preds.float())
         abs_err += (probs - target).abs().sum().item()
         total_loss += loss.item() * target.size(0)
         total_n += target.size(0)
@@ -645,8 +647,18 @@ def main() -> None:
         if distributed
         else torch.device(args.device if torch.cuda.is_available() else "cpu")
     )
-    if args.use_amp and device.type != "cuda":
-        logger.warning("--use_amp set but device is not CUDA; training without AMP.")
+    # Resolve AMP once: it needs a CUDA device with bf16 support. Write the
+    # verdict back to args so the recorded config.json reflects what actually ran.
+    if args.use_amp and (
+        device.type != "cuda" or not torch.cuda.is_bf16_supported()
+    ):
+        reason = (
+            "device is not CUDA"
+            if device.type != "cuda"
+            else "the GPU lacks bfloat16 support"
+        )
+        logger.warning(f"--use_amp set but {reason}; training without AMP.")
+        args.use_amp = False
 
     run_dir = Path(args.save_dir) / args.run_name
     # Rank 0 owns the run dir; the others wait so it exists before they touch it.

@@ -1144,8 +1144,18 @@ def main():
     else:
         device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
-    if args.use_amp and device.type != "cuda":
-        logger.warning("--use_amp set but device is not CUDA; training without AMP.")
+    # Resolve AMP once: it needs a CUDA device with bf16 support. Write the
+    # verdict back to args so the recorded config.json reflects what actually ran.
+    if args.use_amp and (
+        device.type != "cuda" or not torch.cuda.is_bf16_supported()
+    ):
+        reason = (
+            "device is not CUDA"
+            if device.type != "cuda"
+            else "the GPU lacks bfloat16 support"
+        )
+        logger.warning(f"--use_amp set but {reason}; training without AMP.")
+        args.use_amp = False
 
     if args.run_name is None:
         args.run_name = generate_run_name(args)

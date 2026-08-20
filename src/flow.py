@@ -1134,17 +1134,19 @@ class FlowMatcher:
 
         x_t = (1.0 - t_per_atom) * x0_star + t_per_atom * x1_star
 
-        # forward pass under bf16 autocast (CUDA only); loss is reduced in fp32
+        # forward pass under bf16 autocast (CUDA only); cast back to fp32 so the
+        # loss and RMSD below run in full precision
         batch["water"].pos = x_t
         with self._autocast_context(device):
             v_pred = self.model(batch, t)
+        v_pred = v_pred.float()
 
         # target velocity
         v_target = x1_star - x0_star
 
         # weighted MSE loss (upweight near t=1), reduced in fp32
         w = 1.0 / (self.loss_eps + (1.0 - t_per_atom))
-        per_atom_mse = (v_pred.float() - v_target).pow(2).mean(dim=-1, keepdim=True)
+        per_atom_mse = (v_pred - v_target).pow(2).mean(dim=-1, keepdim=True)
         loss = (w * per_atom_mse).sum() / w.sum()
 
         # training RMSD
@@ -1213,11 +1215,12 @@ class FlowMatcher:
         batch["water"].pos = x_t
         with self._autocast_context(device):
             v_pred = self.model(batch, t)
+        v_pred = v_pred.float()
 
         v_target = x1_star - x0_star
 
         w = 1.0 / (self.loss_eps + (1.0 - t_per_atom))
-        per_atom_mse = (v_pred.float() - v_target).pow(2).mean(dim=-1, keepdim=True)
+        per_atom_mse = (v_pred - v_target).pow(2).mean(dim=-1, keepdim=True)
         loss = (w * per_atom_mse).sum() / w.sum()
 
         # GPU RMSD
