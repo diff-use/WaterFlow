@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from torch_geometric.data import Batch, HeteroData
 
 from scripts.train_confidence import (
+    _warm_start_from,
     BACKBONE_MODULE_NAMES,
     freeze_backbone,
     train_one_epoch,
@@ -124,3 +125,77 @@ class TestTrainConfidenceFreezing:
             not torch.equal(before, param)
             for before, param in zip(backbone_before, model.updater.parameters())
         )
+
+
+@pytest.mark.unit
+class TestTrainConfidenceEmptyBatch:
+    """An empty candidate set must not crash or desync DDP -- the model returns a
+    grad-connected (0,) tensor so every rank runs a real forward+backward."""
+
+    def test_forward_on_empty_is_grad_connected(self, device, gvp_encoder):
+        model = ConfidenceGVP(encoder=gvp_encoder, hidden_dims=(64, 8), layers=1).to(
+            device
+        )
+        batch = Batch.from_data_list([_confidence_graph(n_cand=0)]).to(device)
+
+        preds = model(batch, return_logits=True)
+
+        assert preds.shape == (0,)
+        assert preds.requires_grad and preds.grad_fn is not None
+        preds.sum().backward()
+        assert any(p.grad is not None for p in model.score_head.parameters())
+
+    def test_epoch_steps_through_empty_and_nonempty_batches(self, device, gvp_encoder):
+        model = ConfidenceGVP(encoder=gvp_encoder, hidden_dims=(64, 8), layers=1).to(
+            device
+        )
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+        head_before = [p.detach().clone() for p in model.score_head.parameters()]
+        loader = [
+            Batch.from_data_list([_confidence_graph(n_cand=0)]).to(device),
+            Batch.from_data_list([_confidence_graph()]).to(device),
+        ]
+
+        _, step_counter = train_one_epoch(
+            model=model,
+            loader=loader,
+            optimizer=optimizer,
+            warmup_scheduler=None,
+            device=device,
+            args=_train_args(freeze_backbone=False),
+            step_counter=0,
+        )
+
+        assert step_counter == 2  # both batches stepped
+        assert any(
+            not torch.equal(before, param)
+            for before, param in zip(head_before, model.score_head.parameters())
+        )
+
+
+@pytest.mark.unit
+class TestWarmStart:
+    def test_raises_when_no_tensors_match(self, tmp_path, device, gvp_encoder):
+        model = ConfidenceGVP(encoder=gvp_encoder, hidden_dims=(64, 8), layers=1).to(
+            device
+        )
+        ckpt = tmp_path / "bogus.pt"
+        torch.save({"unrelated.weight": torch.zeros(3)}, ckpt)
+
+        with pytest.raises(ValueError, match="shares no tensors"):
+            _warm_start_from(model, ckpt, device)
+
+    def test_loads_matching_backbone(self, tmp_path, device, gvp_encoder):
+        model = ConfidenceGVP(encoder=gvp_encoder, hidden_dims=(64, 8), layers=1).to(
+            device
+        )
+        ckpt = tmp_path / "self.pt"
+        torch.save({"model_state_dict": model.state_dict()}, ckpt)
+
+        # A fresh model warm-started from the first must match it tensor-for-tensor.
+        other = ConfidenceGVP(encoder=gvp_encoder, hidden_dims=(64, 8), layers=1).to(
+            device
+        )
+        _warm_start_from(other, ckpt, device)
+        for (k, a), b in zip(model.state_dict().items(), other.state_dict().values()):
+            assert torch.equal(a, b), k

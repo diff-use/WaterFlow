@@ -732,3 +732,29 @@ class TestAucPrAndBestF1:
 
         assert best == pytest.approx(1.0)
         assert worst < best
+
+    def test_matches_sklearn(self):
+        """Pin the torch implementation to sklearn: average_precision_score and
+        the best F1 over its PR curve. The in-loop metric stays torch-native;
+        this guards it against drift."""
+        from sklearn.metrics import average_precision_score, precision_recall_curve
+
+        torch.manual_seed(0)
+        for _ in range(20):
+            n = int(torch.randint(5, 50, (1,)).item())
+            scores = torch.rand(n)
+            labels = (torch.rand(n) < 0.4).float()
+            if labels.sum() == 0:  # our contract returns nan; sklearn is undefined
+                continue
+
+            ap, best_f1 = auc_pr_and_best_f1(scores, labels)
+
+            s = scores.numpy()
+            y = labels.numpy()
+            sk_ap = average_precision_score(y, s)
+            prec, rec, _ = precision_recall_curve(y, s)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                sk_f1 = np.nan_to_num(2 * prec * rec / (prec + rec)).max()
+
+            assert ap == pytest.approx(sk_ap, abs=1e-6)
+            assert best_f1 == pytest.approx(sk_f1, abs=1e-6)

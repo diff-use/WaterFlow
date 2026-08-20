@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -47,7 +48,7 @@ from src.distributed import (
     setup_distributed,
     teardown_distributed,
 )
-from src.encoder_base import build_encoder
+from src.encoder_base import build_encoder, resolve_encoder_config
 from src.utils import auc_pr_and_best_f1, setup_logging_for_tqdm
 
 
@@ -151,7 +152,14 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Parent directory for confidence training runs.",
     )
-    p.add_argument("--run_name", type=str, required=True)
+    p.add_argument(
+        "--run_name",
+        type=str,
+        required=True,
+        help="Run identifier. Outputs go to <save_dir>/<run_name>/ "
+        "(checkpoints, config.json, train.log) and it names the wandb run "
+        "unless --wandb_run_name overrides.",
+    )
     p.add_argument(
         "--init_from",
         type=str,
@@ -174,8 +182,10 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help="Micro-batches per optimizer step. Effective batch = n_gpus * "
-        "batch_size * grad_accum_steps. Lets an uncapped candidate set "
-        "run on a tiny micro-batch while holding the effective batch.",
+        "batch_size * grad_accum_steps. Each micro-batch's mean loss is scaled "
+        "by 1/grad_accum_steps, so unequal candidate counts weight smaller "
+        "micro-batches up slightly -- the standard DDP accumulation scheme, as "
+        "in the flow trainer.",
     )
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--lr", type=float, default=1e-4)
@@ -291,24 +301,7 @@ def build_confidence_model(config: dict, device: torch.device) -> ConfidenceGVP:
     Returns:
         The model, on `device`.
     """
-    resolved = config.get("resolved_encoder_config")
-    if resolved:
-        encoder_config = resolved.copy()
-    else:
-        encoder_type = config.get("encoder_type", "gvp")
-        encoder_config = {
-            "encoder_type": encoder_type,
-            "hidden_s": config.get("hidden_s") or 256,
-            "hidden_v": config.get("hidden_v") or 64,
-            "node_scalar_in": config.get("node_scalar_in") or 16,
-            "freeze_encoder": config.get("freeze_encoder", False),
-            "encoder_ckpt": config.get("encoder_ckpt"),
-        }
-        if encoder_type in {"slae", "esm"}:
-            encoder_config["embedding_key"] = "embedding"
-            encoder_config["embedding_dim"] = config.get("embedding_dim")
-
-    encoder = build_encoder(encoder_config, device)
+    encoder = build_encoder(resolve_encoder_config(config), device)
     return ConfidenceGVP(
         encoder=encoder,
         hidden_dims=(config.get("hidden_s") or 256, config.get("hidden_v") or 64),
@@ -319,6 +312,10 @@ def build_confidence_model(config: dict, device: torch.device) -> ConfidenceGVP:
         n_update_gvps=config.get("n_update_gvps", 2),
         cutoff=config.get("cutoff", 8.0),
         max_neighbors=config.get("max_neighbors", 256),
+        knn_fallback_k=config.get("knn_fallback_k", 8),
+        # Fixed, not from flow config: candidates are scored with no cached PW
+        # edges and can land where the radius query leaves them isolated, so the
+        # knn fallback is always needed (see ConfidenceGVP docstring).
         dynamic_edge_policy="knn_if_isolated",
     ).to(device)
 
@@ -347,6 +344,15 @@ def _warm_start_from(
     compatible = {
         k: v for k, v in state.items() if k in target and target[k].shape == v.shape
     }
+    # No overlap means a wrong or corrupt --init_from; warm-starting would
+    # silently train from scratch, so fail loud.
+    if not compatible:
+        raise ValueError(
+            f"Warm-start checkpoint {ckpt_path} shares no tensors with "
+            f"ConfidenceGVP ({len(state)} checkpoint tensors, "
+            f"{len(target)} model tensors, none matched by name and shape). "
+            "Check that --init_from points at a matching flow or confidence run."
+        )
     missing = model.load_state_dict(compatible, strict=False).missing_keys
     logger.info(
         f"Warm-started from {ckpt_path}: loaded {len(compatible)} tensors, "
@@ -473,9 +479,6 @@ def train_one_epoch(
     for micro, batch in enumerate(pbar, start=1):
         batch = batch.to(device)
         target = batch["water"].target_confidence
-        # Under DDP every rank must run one backward per micro-batch or the
-        # gradient all-reduce hangs, so an empty candidate set backprops a zero
-        # loss touching all params rather than skipping.
         is_empty = target.numel() == 0
         # Step every `accum` micro-batches and on the last one, so a trailing
         # partial window still steps; the stepping backward runs outside no_sync
@@ -486,11 +489,16 @@ def train_one_epoch(
         )
 
         with sync_ctx:
-            if is_empty:
-                loss = sum(p.sum() for p in params) * 0.0
-            else:
-                preds = model(batch, return_logits=True)
-                loss = F.binary_cross_entropy_with_logits(preds, target)
+            # Always forward through the DDP model, even when empty: the gradient
+            # reducer is armed inside DDP.forward, so a rank that skipped it would
+            # never all-reduce and would hang the others. On empty batches the
+            # model returns a connected (0,) tensor, so this backward is a no-op.
+            preds = model(batch, return_logits=True)
+            loss = (
+                preds.sum()
+                if is_empty
+                else F.binary_cross_entropy_with_logits(preds, target)
+            )
             (loss / accum).backward()
 
         if is_boundary:
@@ -790,7 +798,8 @@ def main() -> None:
             )
 
         aucpr = val_metrics["auc_pr"]
-        is_best = aucpr == aucpr and aucpr > best_aucpr  # `== aucpr` rejects nan
+        # auc_pr is nan when an epoch has no positives to rank; skip those.
+        is_best = not math.isnan(aucpr) and aucpr > best_aucpr
         if main_proc:
             ckpt_dir = run_dir / "checkpoints"
             save_ckpt(

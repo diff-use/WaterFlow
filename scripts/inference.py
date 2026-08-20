@@ -29,7 +29,7 @@ from tqdm import tqdm
 
 from src.constants import DEFAULT_EDGE_CUTOFF, NUM_RBF
 from src.dataset import ProteinWaterDataset
-from src.encoder_base import build_encoder
+from src.encoder_base import build_encoder, resolve_encoder_config
 from src.flow import FlowMatcher, FlowWaterGVP
 from src.utils import (
     compute_placement_metrics,
@@ -241,25 +241,7 @@ def build_model_from_config(config: dict, device: torch.device) -> nn.Module:
     Returns:
         FlowWaterGVP model instance
     """
-    # Use resolved_encoder_config if available (from training), otherwise build from config
-    resolved = config.get("resolved_encoder_config")
-    if resolved:
-        encoder_config = resolved.copy()
-    else:
-        encoder_type = config.get("encoder_type", "gvp")
-        encoder_config = {
-            "encoder_type": encoder_type,
-            "hidden_s": config.get("hidden_s") or 256,
-            "hidden_v": config.get("hidden_v") or 64,
-            "node_scalar_in": config.get("node_scalar_in") or 16,
-            "freeze_encoder": config.get("freeze_encoder", False),
-            "encoder_ckpt": config.get("encoder_ckpt"),
-        }
-
-        if encoder_type in {"slae", "esm"}:
-            encoder_config["embedding_key"] = "embedding"
-            encoder_config["embedding_dim"] = config.get("embedding_dim")
-
+    encoder_config = resolve_encoder_config(config)
     encoder = build_encoder(encoder_config, device)
 
     model = FlowWaterGVP(

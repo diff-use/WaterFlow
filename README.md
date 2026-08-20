@@ -336,6 +336,7 @@ uv run python -m scripts.train_confidence \
     --processed_dir <cache_root> \
     --base_pdb_dir <pdb_dir> \
     --save_dir <out> \
+    --run_name <run_name> \
     --init_from <flow_run>/checkpoints/best.pt --freeze_backbone
 ```
 
