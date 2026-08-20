@@ -191,6 +191,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--weight_decay", type=float, default=1e-5)
     p.add_argument("--grad_clip", type=float, default=1.0)
+    p.add_argument(
+        "--use_amp",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run the training forward pass under bfloat16 autocast (CUDA only). "
+        "On by default; pass --no-use_amp to disable.",
+    )
+    p.add_argument(
+        "--fused_adamw",
+        action="store_true",
+        help="Use the fused AdamW implementation (CUDA only).",
+    )
     p.add_argument("--warmup_steps", type=int, default=500)
     p.add_argument(
         "--eta_min_factor",
@@ -470,6 +482,7 @@ def train_one_epoch(
     total_loss, total_n = 0.0, 0
     params = [p for group in optimizer.param_groups for p in group["params"]]
     accum = max(1, args.grad_accum_steps)
+    use_amp = getattr(args, "use_amp", True) and device.type == "cuda"
     # Bound to the wrapper, since only DDP defers the gradient all-reduce.
     no_sync = model.no_sync if isinstance(model, DDP) else None
     n_batches = len(loader)  # Equal across ranks: DistributedSampler + drop_last.
@@ -493,12 +506,15 @@ def train_one_epoch(
             # reducer is armed inside DDP.forward, so a rank that skipped it would
             # never all-reduce and would hang the others. On empty batches the
             # model returns a connected (0,) tensor, so this backward is a no-op.
-            preds = model(batch, return_logits=True)
-            loss = (
-                preds.sum()
-                if is_empty
-                else F.binary_cross_entropy_with_logits(preds, target)
-            )
+            with torch.autocast(
+                device_type="cuda", dtype=torch.bfloat16, enabled=use_amp
+            ):
+                preds = model(batch, return_logits=True)
+                loss = (
+                    preds.sum()
+                    if is_empty
+                    else F.binary_cross_entropy_with_logits(preds, target)
+                )
             (loss / accum).backward()
 
         if is_boundary:
@@ -555,6 +571,7 @@ def validate(
         _unwrap(model), training=False, freeze_backbone_enabled=args.freeze_backbone
     )
     total_loss, total_n, abs_err = 0.0, 0, 0.0
+    use_amp = getattr(args, "use_amp", True) and device.type == "cuda"
     score_chunks: list[torch.Tensor] = []
     label_chunks: list[torch.Tensor] = []
 
@@ -565,8 +582,9 @@ def validate(
         target = batch["water"].target_confidence
         if target.numel() == 0:
             continue
-        preds = model(batch, return_logits=True)
-        loss = F.binary_cross_entropy_with_logits(preds, target)
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
+            preds = model(batch, return_logits=True)
+            loss = F.binary_cross_entropy_with_logits(preds, target)
         # MAE is reported in probability space, for interpretability.
         probs = torch.sigmoid(preds)
         abs_err += (probs - target).abs().sum().item()
@@ -627,6 +645,8 @@ def main() -> None:
         if distributed
         else torch.device(args.device if torch.cuda.is_available() else "cpu")
     )
+    if args.use_amp and device.type != "cuda":
+        logger.warning("--use_amp set but device is not CUDA; training without AMP.")
 
     run_dir = Path(args.save_dir) / args.run_name
     # Rank 0 owns the run dir; the others wait so it exists before they touch it.
@@ -700,7 +720,13 @@ def main() -> None:
             find_unused_parameters=True,
         )
 
-    optimizer = AdamW(trainable_params, lr=args.lr, weight_decay=args.weight_decay)
+    # fused AdamW is a CUDA-only kernel; it silently requires all params on GPU.
+    optimizer = AdamW(
+        trainable_params,
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+        fused=args.fused_adamw and device.type == "cuda",
+    )
     warmup_scheduler = (
         LinearLR(
             optimizer, start_factor=1e-8, end_factor=1.0, total_iters=args.warmup_steps

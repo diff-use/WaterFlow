@@ -385,6 +385,20 @@ def parse_args():
     )
     p.add_argument("--step_gamma", type=float, default=0.5, help="StepLR gamma")
 
+    # mixed precision / optimizer
+    p.add_argument(
+        "--use_amp",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run the training forward pass under bfloat16 autocast (CUDA only). "
+        "On by default; pass --no-use_amp to disable.",
+    )
+    p.add_argument(
+        "--fused_adamw",
+        action="store_true",
+        help="Use the fused AdamW implementation (CUDA only).",
+    )
+
     # checkpointing
     p.add_argument("--save_dir", type=str, default="/home/srivasv/flow_checkpoints")
     p.add_argument(
@@ -1130,6 +1144,9 @@ def main():
     else:
         device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
+    if args.use_amp and device.type != "cuda":
+        logger.warning("--use_amp set but device is not CUDA; training without AMP.")
+
     if args.run_name is None:
         args.run_name = generate_run_name(args)
 
@@ -1285,12 +1302,15 @@ def main():
     flow_matcher = FlowMatcher(
         model=model,
         sampling_strategy=args.sampling_strategy,
+        use_amp=args.use_amp,
     )
 
+    # fused AdamW is a CUDA-only kernel; it silently requires all params on GPU.
     optimizer = AdamW(
         [p for p in raw_model.parameters() if p.requires_grad],
         lr=args.lr,
         weight_decay=args.weight_decay,
+        fused=args.fused_adamw and device.type == "cuda",
     )
     warmup_scheduler, main_scheduler = build_scheduler(optimizer, args)
 
