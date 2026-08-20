@@ -83,6 +83,10 @@ def build_inference_graph(
     struc_path = str(struc_path)
     if cache_key is None:
         cache_key = Path(struc_path).stem
+    if encoder_type not in ("gvp", "slae", "esm"):
+        raise ValueError(
+            f"encoder_type={encoder_type!r} must be one of gvp, slae, esm"
+        )
     if encoder_type in ("slae", "esm") and processed_dir is None:
         raise ValueError(
             f"encoder_type={encoder_type!r} needs precomputed embeddings; pass "
