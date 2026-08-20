@@ -944,13 +944,9 @@ class FlowMatcher:
         GPU; a no-op otherwise. Guards every caller, including direct construction.
         """
         enabled = (
-            self.use_amp
-            and device.type == "cuda"
-            and torch.cuda.is_bf16_supported()
+            self.use_amp and device.type == "cuda" and torch.cuda.is_bf16_supported()
         )
-        return torch.autocast(
-            device_type="cuda", dtype=torch.bfloat16, enabled=enabled
-        )
+        return torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=enabled)
 
     @staticmethod
     def _num_graphs(data: HeteroData | Batch) -> int:
