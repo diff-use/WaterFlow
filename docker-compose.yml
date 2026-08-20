@@ -1,0 +1,71 @@
+# =============================================================================
+# WaterFlow Docker Compose Configuration
+# Local development with GPU passthrough
+# =============================================================================
+
+services:
+  waterflow:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: waterflow:latest
+    runtime: nvidia
+
+    # GPU configuration - expose all GPUs
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    # Shared memory size for PyTorch DataLoader
+    shm_size: 16gb
+
+    # Environment variables
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - WANDB_API_KEY=${WANDB_API_KEY:-}
+      - WANDB_PROJECT=${WANDB_PROJECT:-waterflow}
+      - WATERFLOW_PDB_DIR=/data/pdb
+      - WATERFLOW_CACHE_DIR=/data/cache
+      - WATERFLOW_CHECKPOINT_DIR=/data/checkpoints
+      - WATERFLOW_OUTPUT_DIR=/data/outputs
+      - WATERFLOW_LOG_DIR=/data/logs
+      - WATERFLOW_SPLITS_DIR=/data/splits
+
+    # Volume mounts
+    volumes:
+      # Input PDB files (read-only)
+      - ${PDB_DIR:-./data/pdb}:/data/pdb:ro
+      # Cache for embeddings and preprocessed data
+      - ${CACHE_DIR:-./data/cache}:/data/cache
+      # Model checkpoints
+      - ${CHECKPOINT_DIR:-./data/checkpoints}:/data/checkpoints
+      # Inference outputs
+      - ${OUTPUT_DIR:-./data/outputs}:/data/outputs
+      # W&B and training logs
+      - ${LOG_DIR:-./data/logs}:/data/logs
+      # Train/val/test split files
+      - ${SPLITS_DIR:-./splits}:/data/splits:ro
+
+    # Interactive mode for development
+    stdin_open: true
+    tty: true
+
+  # Development profile with source code mounted
+  waterflow-dev:
+    extends:
+      service: waterflow
+    volumes:
+      # Mount source for live development
+      - ./src:/app/src:ro
+      - ./scripts:/app/scripts:ro
+      # Data volumes
+      - ${PDB_DIR:-./data/pdb}:/data/pdb:ro
+      - ${CACHE_DIR:-./data/cache}:/data/cache
+      - ${CHECKPOINT_DIR:-./data/checkpoints}:/data/checkpoints
+      - ${OUTPUT_DIR:-./data/outputs}:/data/outputs
+      - ${LOG_DIR:-./data/logs}:/data/logs
+      - ${SPLITS_DIR:-./splits}:/data/splits:ro

@@ -19,7 +19,12 @@ Usage:
 """
 
 import argparse
+import contextlib
 import json
+import multiprocessing as mp
+import os
+import shutil
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import cast
@@ -29,15 +34,26 @@ import numpy as np
 import torch
 import wandb
 from loguru import logger
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, StepLR
 from torch.utils.data import DataLoader
 from torch_geometric.data import HeteroData
 from tqdm import tqdm
 
-from src.dataset import get_dataloader
+from src.dataset import get_dataloader, ProteinWaterDataset
+from src.distributed import (
+    all_reduce_means,
+    ddp_barrier,
+    ddp_is_active,
+    ddp_rank_and_world,
+    is_main_process,
+    run_once_on_main,
+    setup_distributed,
+    teardown_distributed,
+)
 from src.encoder_base import build_encoder
-from src.flow import FlowMatcher, FlowWaterGVP
+from src.flow import DYNAMIC_EDGE_POLICIES, FlowMatcher, FlowWaterGVP
 from src.utils import (
     compute_placement_metrics,
     compute_rmsd,
@@ -73,7 +89,6 @@ def parse_args():
     # Current hardcoded paths:
     #   - processed_dir: /home/srivasv/flow_cache/
     #   - base_pdb_dir: /sb/wankowicz_lab/data/srivasv/pdb_redo_data
-    #   - edia_dir: /sb/wankowicz_lab/data/srivasv/edia_results
     #   - save_dir: /home/srivasv/flow_checkpoints
     #   - wandb_dir: /home/srivasv/wandb_logs
     p = argparse.ArgumentParser()
@@ -107,19 +122,20 @@ def parse_args():
         help="Include symmetry mate atoms as protein nodes",
     )
     p.add_argument(
+        "--include_ligands",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Include ligand, ion, cofactor and nucleic acid heavy atoms as protein "
+            "nodes. Disabling appends '_noligands' to the geometry cache directory, "
+            "so the two configs cache separately."
+        ),
+    )
+    p.add_argument(
         "--duplicate_single_sample",
         type=int,
         default=1,
         help="If training on single sample, duplicate it N times for more gradient updates per epoch",
-    )
-    p.add_argument(
-        "--edia_dir",
-        type=str,
-        default="/sb/wankowicz_lab/data/srivasv/edia_results",
-        help=(
-            "Water filter: EDIA root directory "
-            "({edia_dir}/{pdb_id}/{pdb_id}_residue_stats.csv)."
-        ),
     )
 
     # dataset quality checks (always on)
@@ -150,8 +166,11 @@ def parse_args():
     p.add_argument(
         "--min_water_residue_ratio",
         type=float,
-        default=0.6,
-        help="Quality: minimum waters/residue ratio required per structure.",
+        default=0.1,
+        help=(
+            "Quality: minimum waters/residue ratio required per structure. Applied "
+            "at cache-write time, so it decides which structures the cache holds."
+        ),
     )
 
     # per-water filtering (toggleable)
@@ -170,8 +189,12 @@ def parse_args():
     p.add_argument(
         "--max_bfactor_zscore",
         type=float,
-        default=1.5,
-        help="Water filter: remove waters with normalized B-factor above this threshold.",
+        default=2.0,
+        help=(
+            "Water filter: remove waters with normalized B-factor above this "
+            "threshold. Baked in at cache-write time, so a warm cache built at a "
+            "different value is refused rather than extended."
+        ),
     )
     p.add_argument(
         "--no_filter_by_distance",
@@ -220,8 +243,82 @@ def parse_args():
         default=0.1,
         help="Dropout rate for GVP layers (default: 0.1)",
     )
-    p.add_argument("--k_pw", type=int, default=16)
-    p.add_argument("--k_ww", type=int, default=16)
+    # flow-matching prior
+    p.add_argument(
+        "--sampling_strategy",
+        type=str,
+        default="uniform_ball",
+        choices=["uniform_ball", "scaled_gaussian"],
+        help=(
+            "Source distribution for the flow prior. Also resolves "
+            "--dynamic_edge_policy auto (default: uniform_ball)"
+        ),
+    )
+
+    # edge construction
+    p.add_argument(
+        "--dynamic_edge_policy",
+        type=str,
+        default="auto",
+        choices=["auto", *DYNAMIC_EDGE_POLICIES],
+        help=(
+            "How water-touching edges are built: 'radius' connects everything "
+            "within --cutoff, 'knn' takes a fixed neighbour count, "
+            "'knn_if_isolated' is radius plus a rescue for stranded waters. "
+            "'auto' picks radius under uniform_ball and knn_if_isolated under "
+            "scaled_gaussian (default: auto)"
+        ),
+    )
+    p.add_argument(
+        "--cutoff",
+        type=float,
+        default=8.0,
+        help="Distance cutoff in Angstroms for radius edges (default: 8.0)",
+    )
+    p.add_argument(
+        "--max_neighbors",
+        type=int,
+        default=256,
+        help="Per-source cap on radius query results (default: 256)",
+    )
+    p.add_argument(
+        "--knn_fallback_k",
+        type=int,
+        default=8,
+        help=(
+            "Nearest neighbours attached to waters the radius query stranded; "
+            "0 disables the rescue. Ignored under --dynamic_edge_policy knn "
+            "(default: 8)"
+        ),
+    )
+    p.add_argument(
+        "--disable_ww",
+        action="store_true",
+        help="Ablate water->water edges",
+    )
+    p.add_argument(
+        "--disable_wp",
+        action="store_true",
+        help="Ablate water->protein edges",
+    )
+    p.add_argument(
+        "--k_pw",
+        type=int,
+        default=12,
+        help="Nearest neighbours for protein->water edges under 'knn' (default: 12)",
+    )
+    p.add_argument(
+        "--k_ww",
+        type=int,
+        default=8,
+        help="Nearest neighbours for water->water edges under 'knn' (default: 8)",
+    )
+    p.add_argument(
+        "--k_wp",
+        type=int,
+        default=8,
+        help="Nearest neighbours for water->protein edges under 'knn' (default: 8)",
+    )
 
     # optional cached-embedding override
     p.add_argument(
@@ -260,6 +357,18 @@ def parse_args():
         action="store_true",
         help="Keep workers alive between epochs",
     )
+    p.add_argument(
+        "--sample_cache_size",
+        type=int,
+        default=0,
+        help="Per-worker in-process dataset sample LRU cache size (0 disables caching)",
+    )
+    p.add_argument(
+        "--cache_load_mmap",
+        action="store_true",
+        default=False,
+        help="Use mmap-backed torch.load for dataset cache files when supported",
+    )
 
     # scheduler
     p.add_argument(
@@ -277,13 +386,19 @@ def parse_args():
     )
     p.add_argument("--step_gamma", type=float, default=0.5, help="StepLR gamma")
 
-    # flow matching
-    p.add_argument("--use_self_cond", action="store_true")
-    p.add_argument("--p_self_cond", type=float, default=0.5)
-    p.add_argument("--use_distortion", action="store_true")
-    p.add_argument("--p_distort", type=float, default=0.2)
-    p.add_argument("--t_distort", type=float, default=0.5)
-    p.add_argument("--sigma_distort", type=float, default=0.5)
+    # mixed precision / optimizer
+    p.add_argument(
+        "--use_amp",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run the training forward pass under bfloat16 autocast (CUDA only). "
+        "On by default; pass --no-use_amp to disable.",
+    )
+    p.add_argument(
+        "--fused_adamw",
+        action="store_true",
+        help="Use the fused AdamW implementation (CUDA only).",
+    )
 
     # checkpointing
     p.add_argument("--save_dir", type=str, default="/home/srivasv/flow_checkpoints")
@@ -316,6 +431,8 @@ def parse_args():
     args = p.parse_args()
     if args.encoder_type == "gvp" and args.embedding_dim is not None:
         p.error("--embedding_dim is only valid for cached encoders: slae or esm")
+    if args.sample_cache_size < 0:
+        p.error("--sample_cache_size must be >= 0")
     return args
 
 
@@ -333,7 +450,6 @@ def _extract_quality_config(args: argparse.Namespace) -> dict:
 def _extract_water_filter_config(args: argparse.Namespace) -> dict:
     """Extract per-water filtering parameters (toggleable)."""
     return {
-        "edia_dir": args.edia_dir,
         "max_protein_dist": args.max_protein_dist,
         "min_edia": args.min_edia,
         "max_bfactor_zscore": args.max_bfactor_zscore,
@@ -363,6 +479,9 @@ def _build_dataset_config(args: argparse.Namespace) -> tuple[dict, dict, dict]:
         "base_pdb_dir": args.base_pdb_dir,
         "geometry_cache_name": args.geometry_cache_name,
         "include_mates": args.include_mates,
+        "include_ligands": args.include_ligands,
+        "sample_cache_size": args.sample_cache_size,
+        "cache_load_mmap": args.cache_load_mmap,
         **quality_kwargs,
         **water_filter_kwargs,
     }
@@ -408,11 +527,6 @@ def _log_dataset_filter_config(args, quality_kwargs: dict):
     ignored = _ignored_water_filter_thresholds(args)
     if ignored:
         logger.info(f"Ignored water-filter thresholds (disabled): {ignored}")
-
-    if args.filter_by_edia and args.edia_dir is None:
-        logger.info(
-            "EDIA filter enabled but --edia_dir is not set; EDIA filtering will be skipped."
-        )
 
 
 def _required_embedding_field(encoder_type: str) -> str | None:
@@ -553,8 +667,17 @@ def build_model(
         n_message_gvps=args.n_message_gvps,
         n_update_gvps=args.n_update_gvps,
         drop_rate=args.drop_rate,
+        cutoff=args.cutoff,
+        max_neighbors=args.max_neighbors,
+        dynamic_edge_policy=args.dynamic_edge_policy,
+        # "auto" depends on which prior the run uses, so pass that through.
+        sampling_strategy=args.sampling_strategy,
+        knn_fallback_k=args.knn_fallback_k,
+        disable_ww=args.disable_ww,
+        disable_wp=args.disable_wp,
         k_pw=args.k_pw,
         k_ww=args.k_ww,
+        k_wp=args.k_wp,
     ).to(device)
 
     return model
@@ -570,9 +693,16 @@ def run_eval_sampling(
         run_dir: Path to run directory for saving outputs
     """
     flow_matcher.model.eval()
+
+    # Each rank integrates a disjoint stride of eval_indices; the metric sums are
+    # all-reduced below so every rank ends with identical averages.
+    rank, world_size = ddp_rank_and_world()
     results = []
 
     for i, idx in enumerate(eval_indices):
+        # Shard by global position i, so plot/GIF filenames never collide.
+        if i % world_size != rank:
+            continue
         graph = val_loader.dataset[idx]
         if graph["water"].num_nodes == 0:
             continue
@@ -580,7 +710,6 @@ def run_eval_sampling(
         out = flow_matcher.rk4_integrate(
             graph,
             num_steps=args.num_steps,
-            use_sc=args.use_self_cond,
             device=device,
             return_trajectory=True,
         )[0]  # rk4_integrate returns a list, get the single result
@@ -633,17 +762,32 @@ def run_eval_sampling(
                 pdb_id=graph.pdb_id,
             )
 
-    if results:
-        avg_metrics = {
-            "eval/avg_rmsd": np.mean([r["rmsd"] for r in results]),
-            "eval/avg_precision": np.mean([r["precision"] for r in results]),
-            "eval/avg_recall": np.mean([r["recall"] for r in results]),
-            "eval/avg_f1": np.mean([r["f1"] for r in results]),
-            "eval/avg_auc_pr": np.mean([r["auc_pr"] for r in results]),
-        }
-        wandb.log(avg_metrics, step=global_step)
-        return avg_metrics
-    return {}
+    # Every rank must reach this, even one whose stride was all zero-water graphs.
+    avg_metrics, _ = all_reduce_means(
+        {
+            f"eval/avg_{key}": sum(r[key] for r in results)
+            for key in ("rmsd", "precision", "recall", "f1", "auc_pr")
+        },
+        len(results),
+        device,
+    )
+    if not avg_metrics:
+        return {}
+    wandb.log(avg_metrics, step=global_step)
+    return avg_metrics
+
+
+def _needs_grad_sync(step: int, n_batches: int, accum_steps: int) -> bool:
+    """
+    Whether this micro-step's backward must all-reduce gradients under DDP.
+
+    True on every accumulation boundary, and throughout the epoch's trailing
+    partial window: that window ends in an optimizer.step() too, and stepping on
+    gradients that were never all-reduced leaves the ranks permanently diverged.
+    """
+    if (step + 1) % accum_steps == 0:
+        return True
+    return step >= n_batches - (n_batches % accum_steps)
 
 
 def train_epoch(
@@ -652,6 +796,7 @@ def train_epoch(
     optimizer: AdamW,
     warmup_scheduler,
     args: argparse.Namespace,
+    device: torch.device,
     epoch: int,
     optimizer_step_count: int,
 ) -> tuple[dict[str, float], int, int]:
@@ -665,16 +810,21 @@ def train_epoch(
 
     pbar = tqdm(train_loader, desc=f"Epoch {epoch} [Train]")
     for step, batch in enumerate(pbar):
-        batch = batch.to(args.device)
+        batch = batch.to(device)
         if batch["water"].num_nodes == 0:
             skipped_batches += 1
             continue
 
-        metrics = flow_matcher.training_step(
-            batch,
-            use_self_conditioning=args.use_self_cond,
-            accumulation_steps=args.grad_accum_steps,
+        # Suppress the gradient all-reduce on micro-steps that are not followed by
+        # an optimizer.step(), keeping comms at one all-reduce per optimizer step.
+        no_sync = ddp_is_active() and not _needs_grad_sync(
+            step, len(train_loader), args.grad_accum_steps
         )
+        with flow_matcher.model.no_sync() if no_sync else contextlib.nullcontext():
+            metrics = flow_matcher.training_step(
+                batch,
+                accumulation_steps=args.grad_accum_steps,
+            )
 
         per_sample_info = metrics["per_sample_info"]
         if per_sample_info is not None and isinstance(per_sample_info, dict):
@@ -748,6 +898,16 @@ def train_epoch(
 
     final_global_step = (epoch - 1) * len(train_loader) + len(train_loader) - 1
 
+    # All-reduce the metric sums once per epoch, so the logged numbers cover every
+    # rank's shard. Must run before the zero-batch check below: a rank that skipped
+    # all its batches would return early and never join the all-reduce, hanging the
+    # rest.
+    train_metrics, processed_batches = all_reduce_means(
+        {"train/epoch_loss": total_loss, "train/epoch_rmsd": total_rmsd},
+        processed_batches,
+        device,
+    )
+
     if processed_batches == 0:
         logger.warning(
             f"Epoch {epoch}: skipped all {skipped_batches} train batches (no waters)."
@@ -761,21 +921,14 @@ def train_epoch(
     logger.info(
         f"Epoch {epoch} [Train] processed_batches={processed_batches}, skipped_batches={skipped_batches}"
     )
-    return (
-        {
-            "train/epoch_loss": total_loss / processed_batches,
-            "train/epoch_rmsd": total_rmsd / processed_batches,
-        },
-        final_global_step,
-        optimizer_step_count,
-    )
+    return train_metrics, final_global_step, optimizer_step_count
 
 
 @torch.no_grad()
 def val_epoch(
     flow_matcher: FlowMatcher,
     val_loader: DataLoader,
-    args: argparse.Namespace,
+    device: torch.device,
     epoch: int,
 ) -> dict[str, float]:
     """Single validation epoch."""
@@ -785,7 +938,7 @@ def val_epoch(
     processed_batches = 0
 
     for batch in tqdm(val_loader, desc=f"Epoch {epoch} [Val]"):
-        batch = batch.to(args.device)
+        batch = batch.to(device)
         if batch["water"].num_nodes == 0:
             skipped_batches += 1
             continue
@@ -793,6 +946,13 @@ def val_epoch(
         processed_batches += 1
         total_loss += metrics["loss"]
         total_rmsd += metrics["rmsd"]
+
+    # Best-checkpoint selection keys off val/loss, so ranks must agree on it.
+    val_metrics, processed_batches = all_reduce_means(
+        {"val/loss": total_loss, "val/rmsd": total_rmsd},
+        processed_batches,
+        device,
+    )
 
     if processed_batches == 0:
         logger.warning(
@@ -803,10 +963,7 @@ def val_epoch(
     logger.info(
         f"Epoch {epoch} [Val] processed_batches={processed_batches}, skipped_batches={skipped_batches}"
     )
-    return {
-        "val/loss": total_loss / processed_batches,
-        "val/rmsd": total_rmsd / processed_batches,
-    }
+    return val_metrics
 
 
 def count_parameters(model):
@@ -893,27 +1050,139 @@ def build_scheduler(optimizer, args):
     return warmup_scheduler, main_scheduler
 
 
+def _build_cache_shard(
+    list_file: str, processed_dir: str, dataset_kwargs: dict
+) -> None:
+    """
+    Pool worker: build the geometry cache for one shard's list.
+
+    Already-cached entries are skipped, and shards hold disjoint keys, so workers
+    never write the same file.
+    """
+    ProteinWaterDataset(
+        pdb_list_file=list_file,
+        processed_dir=processed_dir,
+        preprocess=True,
+        **dataset_kwargs,
+    )
+
+
+def build_cache(args: argparse.Namespace) -> None:
+    """
+    Build the geometry cache for the train+val lists as the sole writer.
+
+    Preprocessing is CPU/PyMOL only, so this runs before the DDP group exists --
+    hence race-free. A warm cache is a fast no-op; a cold build is parallelized
+    across CPU cores over disjoint key shards.
+    """
+    dataset_kwargs, _, _ = _build_dataset_config(args)
+    ids = set()
+    for lst in (args.train_list, args.val_list):
+        with open(lst) as f:
+            ids.update(line.strip() for line in f if line.strip())
+    if not ids:
+        return
+    sorted_ids = sorted(ids)
+
+    tmpdir = Path(tempfile.mkdtemp(prefix="wf_build_"))
+    try:
+        union = tmpdir / "union.txt"
+        union.write_text("\n".join(sorted_ids) + "\n")
+        # Parse-only probe to find which entries still need building.
+        probe = ProteinWaterDataset(
+            pdb_list_file=str(union),
+            processed_dir=args.processed_dir,
+            preprocess=False,
+            **dataset_kwargs,
+        )
+        # Entries can repeat a cache_key; dedup so each file is stat-ed once.
+        keys = list(dict.fromkeys(entry["cache_key"] for entry in probe.entries))
+        missing = [k for k in keys if not (probe.geometry_dir / f"{k}.pt").is_file()]
+        if not missing:
+            return  # warm cache: nothing to build
+
+        logger.info(f"build_cache: preprocessing {len(missing)} missing entries")
+        # One worker per CPU over disjoint key shards. A single shard still goes
+        # through the pool, so PyMOL never runs in this (parent) process.
+        n_shards = max(1, min(len(missing), os.cpu_count() or 1))
+        shard_files = []
+        for i in range(n_shards):
+            shard = tmpdir / f"shard_{i}.txt"
+            shard.write_text("\n".join(missing[i::n_shards]) + "\n")
+            shard_files.append(str(shard))
+        # spawn (not fork): safe alongside PyMOL's C extension and any threads.
+        ctx = mp.get_context("spawn")
+        with ctx.Pool(n_shards) as pool:
+            pool.starmap(
+                _build_cache_shard,
+                [(shard, args.processed_dir, dataset_kwargs) for shard in shard_files],
+            )
+    except Exception:
+        logger.exception("build_cache failed; other ranks will block until timeout")
+        raise
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def main():
     """Run the full training pipeline."""
     args = parse_args()
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+
+    # Build the cache on rank 0 before the NCCL group exists. A warm cache is a
+    # no-op probe; only a first cold build is slow, and coordinating that on the
+    # NCCL group would trip its collective watchdog (minutes). A CPU store has no
+    # such watchdog, so rank 0 can take as long as it needs; it is then reused as
+    # NCCL's rendezvous.
+    store = run_once_on_main(lambda: build_cache(args), key="wf_cache_ready")
+
+    # Under torchrun each rank binds its own GPU; a plain launch yields (0, 0, 1).
+    rank, local_rank, world_size = setup_distributed(store=store)
+    main_proc = is_main_process(rank)
+    # Under torchrun each rank owns the GPU that setup_distributed pinned with
+    # set_device(local_rank); a plain launch uses --device (CPU if no CUDA). We do
+    # not write this back to args, so the recorded config stays rank-independent.
+    if ddp_is_active():
+        device = torch.device("cuda", local_rank)
+    else:
+        device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+
+    # Resolve AMP once: it needs a CUDA device with bf16 support. Write the
+    # verdict back to args so the recorded config.json reflects what actually ran.
+    if args.use_amp and (device.type != "cuda" or not torch.cuda.is_bf16_supported()):
+        reason = (
+            "device is not CUDA"
+            if device.type != "cuda"
+            else "the GPU lacks bfloat16 support"
+        )
+        logger.warning(f"--use_amp set but {reason}; training without AMP.")
+        args.use_amp = False
 
     if args.run_name is None:
         args.run_name = generate_run_name(args)
 
     run_dir = Path(args.save_dir) / args.run_name
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "checkpoints").mkdir(exist_ok=True)
-    (run_dir / "plots").mkdir(exist_ok=True)
-    (run_dir / "gifs").mkdir(exist_ok=True)
+    if main_proc:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "checkpoints").mkdir(exist_ok=True)
+        (run_dir / "plots").mkdir(exist_ok=True)
+        (run_dir / "gifs").mkdir(exist_ok=True)
+    ddp_barrier()  # other ranks wait until run_dir exists
 
+    # Rank 0 owns the log file; other ranks log to console only, so N processes
+    # never interleave writes into it.
     log_file = Path(args.log_file) if args.log_file else run_dir / "train.log"
-    setup_logging_for_tqdm(level=args.log_level, log_file=str(log_file))
+    setup_logging_for_tqdm(
+        level=args.log_level, log_file=str(log_file) if main_proc else None
+    )
 
     logger.info("=" * 60)
     logger.info(f"Run name: {args.run_name}")
     logger.info(f"Run directory: {run_dir}")
     logger.info(f"Log file: {log_file}")
+    if ddp_is_active():
+        logger.info(
+            f"DDP active: rank={rank} local_rank={local_rank} world_size={world_size}"
+        )
     logger.info("=" * 60)
 
     # data loaders
@@ -930,6 +1199,7 @@ def main():
         prefetch_factor=args.prefetch_factor,
         persistent_workers=args.persistent_workers,
         duplicate_single_sample=args.duplicate_single_sample,
+        distributed=ddp_is_active(),
         **dataset_kwargs,
     )
 
@@ -943,6 +1213,7 @@ def main():
         prefetch_factor=args.prefetch_factor,
         persistent_workers=args.persistent_workers,
         duplicate_single_sample=args.duplicate_single_sample,
+        distributed=ddp_is_active(),
         **dataset_kwargs,
     )
 
@@ -955,13 +1226,14 @@ def main():
     ).tolist()
 
     eval_indices_file = run_dir / "eval_indices.txt"
-    with open(eval_indices_file, "w") as f:
-        f.write("# Fixed evaluation sample indices\n")
-        for idx in eval_indices:
-            graph = val_loader.dataset[idx]
-            pdb_id = getattr(graph, "pdb_id", "unknown")
-            f.write(f"{idx}\t{pdb_id}\n")
-    logger.info(f"Fixed eval indices saved to: {eval_indices_file}")
+    if main_proc:
+        with open(eval_indices_file, "w") as f:
+            f.write("# Fixed evaluation sample indices\n")
+            for idx in eval_indices:
+                graph = val_loader.dataset[idx]
+                pdb_id = getattr(graph, "pdb_id", "unknown")
+                f.write(f"{idx}\t{pdb_id}\n")
+        logger.info(f"Fixed eval indices saved to: {eval_indices_file}")
     logger.info(f"Evaluating on {len(eval_indices)} proteins at each eval epoch")
 
     # detect input dimension and resolve encoder configuration from sample data
@@ -986,19 +1258,38 @@ def main():
     config_dict["node_scalar_in"] = node_scalar_in
     config_dict["resolved_encoder_config"] = encoder_config
     config_file = run_dir / "config.json"
-    with open(config_file, "w") as f:
-        json.dump(config_dict, f, indent=2)
-    logger.info(f"Configuration saved to: {config_file}")
+    if main_proc:
+        with open(config_file, "w") as f:
+            json.dump(config_dict, f, indent=2)
+        logger.info(f"Configuration saved to: {config_file}")
 
+    # Non-main ranks run a disabled client, so every wandb.log call site stays a
+    # no-op without a per-call guard. None on the main rank defers to WANDB_MODE
+    # (default: online); an explicit mode here would override that env var.
     wandb.init(
         project=args.wandb_project,
         dir=args.wandb_dir,
         name=args.run_name,
         config=config_dict,
+        mode=None if main_proc else "disabled",
     )
 
     model = build_model(args, device, encoder_config=encoder_config)
-    trainable_params, total_params = count_parameters(model)
+    if ddp_is_active():
+        # broadcast_buffers=False is safe (no BatchNorm; LayerNorm has no synced
+        # buffers). find_unused_parameters=True because ablated edge types can
+        # leave the used-parameter set varying across backwards.
+        model = DDP(
+            model,
+            device_ids=[local_rank],
+            broadcast_buffers=False,
+            find_unused_parameters=True,
+        )
+    # Unwrapped module: parameter access, sanity forward, sampling, and
+    # state_dicts. Saving the wrapper would prefix every key with "module.".
+    raw_model = getattr(model, "module", model)
+
+    trainable_params, total_params = count_parameters(raw_model)
     logger.info("Model statistics:")
     logger.info(f"Trainable parameters: {trainable_params:,}")
     logger.info(f"Total parameters: {total_params:,}")
@@ -1006,31 +1297,30 @@ def main():
     # quick forward pass sanity check for cached embedding encoders
     if _uses_cached_embeddings(args.encoder_type):
         logger.info(f"Testing forward pass with {args.encoder_type.upper()}...")
-        model.eval()
+        raw_model.eval()
         batch = next(iter(train_loader)).to(device)
         with torch.no_grad():
             num_graphs = int(batch["protein"].batch.max().item()) + 1
             t = torch.zeros(num_graphs, device=device)
-            v_out = model(batch, t)
+            v_out = raw_model(batch, t)
             logger.info(f"Forward pass successful! Output shape: {v_out.shape}")
             logger.info(f"Output stats: mean={v_out.mean():.4f}, std={v_out.std():.4f}")
             if v_out.std() < 1e-6:
                 logger.warning("Model output is constant! This indicates a problem.")
-        model.train()
+        raw_model.train()
 
     flow_matcher = FlowMatcher(
         model=model,
-        p_self_cond=args.p_self_cond,
-        use_distortion=args.use_distortion,
-        p_distort=args.p_distort,
-        t_distort=args.t_distort,
-        sigma_distort=args.sigma_distort,
+        sampling_strategy=args.sampling_strategy,
+        use_amp=args.use_amp,
     )
 
+    # fused AdamW is a CUDA-only kernel; it silently requires all params on GPU.
     optimizer = AdamW(
-        [p for p in model.parameters() if p.requires_grad],
+        [p for p in raw_model.parameters() if p.requires_grad],
         lr=args.lr,
         weight_decay=args.weight_decay,
+        fused=args.fused_adamw and device.type == "cuda",
     )
     warmup_scheduler, main_scheduler = build_scheduler(optimizer, args)
 
@@ -1038,12 +1328,18 @@ def main():
     optimizer_step_count = 0
 
     for epoch in range(1, args.epochs + 1):
+        # Without this every epoch replays the same shard order on every rank.
+        if ddp_is_active():
+            train_loader.sampler.set_epoch(epoch)
+            val_loader.sampler.set_epoch(epoch)
+
         train_metrics, global_step, optimizer_step_count = train_epoch(
             flow_matcher,
             train_loader,
             optimizer,
             warmup_scheduler,
             args,
+            device,
             epoch,
             optimizer_step_count,
         )
@@ -1051,7 +1347,7 @@ def main():
         train_metrics["epoch"] = epoch
         wandb.log(train_metrics, step=global_step)
 
-        val_metrics = val_epoch(flow_matcher, val_loader, args, epoch)
+        val_metrics = val_epoch(flow_matcher, val_loader, device, epoch)
         val_metrics["epoch"] = epoch
         wandb.log(val_metrics, step=global_step)
 
@@ -1064,22 +1360,25 @@ def main():
             f"val_loss={val_metrics['val/loss']:.4f}, val_rmsd={val_metrics['val/rmsd']:.2f}"
         )
 
+        # val/loss is all-reduced, so every rank agrees on the best epoch and
+        # updates best_val_loss identically; only rank 0 writes it out.
         if val_metrics["val/loss"] < best_val_loss:
             best_val_loss = val_metrics["val/loss"]
-            save_checkpoint(
-                model,
-                optimizer,
-                warmup_scheduler,
-                main_scheduler,
-                epoch,
-                optimizer_step_count,
-                run_dir / "checkpoints" / "best.pt",
-                best=True,
-            )
+            if main_proc:
+                save_checkpoint(
+                    raw_model,
+                    optimizer,
+                    warmup_scheduler,
+                    main_scheduler,
+                    epoch,
+                    optimizer_step_count,
+                    run_dir / "checkpoints" / "best.pt",
+                    best=True,
+                )
 
-        if epoch % args.save_every == 0:
+        if epoch % args.save_every == 0 and main_proc:
             save_checkpoint(
-                model,
+                raw_model,
                 optimizer,
                 warmup_scheduler,
                 main_scheduler,
@@ -1088,17 +1387,24 @@ def main():
                 run_dir / "checkpoints" / f"epoch_{epoch}.pt",
             )
 
+        # All ranks enter: run_eval_sampling ends in a collective. Swap in the
+        # unwrapped module so no DDP forward machinery fires during integration.
         if epoch % args.eval_every == 0:
-            eval_metrics = run_eval_sampling(
-                flow_matcher,
-                val_loader,
-                args,
-                epoch,
-                device,
-                global_step,
-                eval_indices,
-                run_dir,
-            )
+            wrapped = flow_matcher.model
+            flow_matcher.model = raw_model
+            try:
+                eval_metrics = run_eval_sampling(
+                    flow_matcher,
+                    val_loader,
+                    args,
+                    epoch,
+                    device,
+                    global_step,
+                    eval_indices,
+                    run_dir,
+                )
+            finally:
+                flow_matcher.model = wrapped
             if eval_metrics:
                 logger.info(
                     f"Eval: RMSD={eval_metrics['eval/avg_rmsd']:.2f}A, "
@@ -1108,7 +1414,11 @@ def main():
                     f"AUC-PR={eval_metrics['eval/avg_auc_pr']:.3f}"
                 )
 
+        # Realign ranks: rank 0 may have spent extra time writing checkpoints.
+        ddp_barrier()
+
     wandb.finish()
+    teardown_distributed()
     logger.info("Training complete.")
 
 

@@ -12,28 +12,44 @@ This module provides:
 from __future__ import annotations
 
 import itertools
+import json
+import os
+import re
+from collections import OrderedDict
 from pathlib import Path
 
 import biotite.structure as bts
 import numpy as np
-import pandas as pd
 import pymol2
 import torch
 import torch.nn.functional as F
 from biotite.structure.io.pdb import get_structure, PDBFile
+from biotite.structure.io.pdbx import CIFFile, get_structure as get_structure_cif
 from loguru import logger
+from scipy.spatial import cKDTree
 from scipy.spatial.distance import cdist
 from torch import Tensor
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Sampler
+from torch.utils.data.distributed import DistributedSampler
 from torch_cluster import radius_graph
 from torch_geometric.data import Batch, HeteroData
 from tqdm import tqdm
 
-from src.constants import EDGE_PP, ELEM_IDX, ELEMENT_VOCAB, NUM_RBF
+from src.constants import (
+    EDGE_PP,
+    ELEM_IDX,
+    ELEMENT_VOCAB,
+    NUM_RBF,
+)
 from src.utils import (
     compute_edge_features,
     normalize_ins_code,
+    sanitize_res_names_for_esm,
 )
+
+
+# Per-directory record of the settings a geometry cache was built with.
+FILTER_META_FILENAME = "_filter_meta.json"
 
 
 def element_onehot(symbols: list[str]) -> Tensor:
@@ -45,84 +61,142 @@ def element_onehot(symbols: list[str]) -> Tensor:
     return F.one_hot(indices, num_classes=other_idx + 1).float()
 
 
+def _read_structure(path: str | Path, extra_fields=None) -> bts.AtomArray:
+    """Read structure from PDB or CIF file, dispatching on extension."""
+    path = Path(path)
+    kw = dict(model=1, altloc="occupancy")
+    if extra_fields:
+        kw["extra_fields"] = extra_fields
+    if path.suffix == ".cif":
+        cif_file = CIFFile.read(path)
+        return get_structure_cif(cif_file, **kw)
+    else:
+        pdb_file = PDBFile.read(path)
+        return get_structure(pdb_file, **kw)
+
+
 def parse_asu_with_biotite(
-    path: str,
-) -> tuple[bts.AtomArray, bts.AtomArray]:
+    path: str | Path,
+) -> tuple[bts.AtomArray, bts.AtomArray, bts.AtomArray]:
     """
-    Parse PDB file and extract protein and water atoms.
+    Parse PDB or CIF file and extract protein, water, and ligand atoms.
 
     Args:
-        path: Path to PDB file
+        path: Path to PDB or CIF file
 
     Returns:
-        Tuple of (protein_atoms, water_atoms) as biotite AtomArrays.
-        Hydrogen atoms are excluded.
+        Tuple of (protein_atoms, water_atoms, ligand_atoms) as biotite AtomArrays.
+        Hydrogen atoms are excluded. ligand_atoms contains every non-protein,
+        non-water heavy atom: small-molecule ligands, ions, cofactors, AND
+        non-amino-acid polymers such as nucleic acids (DNA/RNA). It is deliberately
+        NOT restricted to HETATM records -- nucleic acids are written as ATOM
+        records but are kept here as context (their surfaces, especially the
+        phosphate backbone, order nearby water).
 
     Notes:
         - model=1: Uses first model in PDB (standard for X-ray structures)
         - altloc="occupancy": Selects highest-occupancy alternate conformation
         - Uses filter_amino_acids (not filter_canonical_amino_acids) to include
           modified residues like MSE, SEC that external encoders may handle
+        - b_factor is always read so the caller can compute normalized B-factors
+          without a second file read.
     """
-    pdb_file = PDBFile.read(path)
-    atoms = get_structure(pdb_file, model=1, altloc="occupancy")
+    atoms = _read_structure(path, extra_fields=["b_factor"])
 
     atoms = atoms[atoms.element != "H"]
 
     protein_mask = bts.filter_amino_acids(atoms)
     water_mask = (atoms.res_name == "HOH") | (atoms.res_name == "WAT")
 
+    # "ligand" here is broad: every non-protein, non-water heavy atom.
+    # includes small-molecule ligands, ions, cofactors and even nucleic acids
+    ligand_mask = ~protein_mask & ~water_mask
+
     protein_atoms = atoms[protein_mask]
     water_atoms = atoms[water_mask]
+    ligand_atoms = atoms[ligand_mask]
 
-    return protein_atoms, water_atoms
+    return protein_atoms, water_atoms, ligand_atoms
 
 
 def get_crystal_contacts_pymol(
-    pdb_path: str, cutoff: float = 5.0
+    struc_path: str,
+    cutoff: float = 5.0,
+    include_ligands: bool = False,
 ) -> dict[str, np.ndarray | list]:
     """
-    Extract ASU and symmetry mate atoms within crystal contact distance.
+    Extract ASU and symmetry-mate atoms within crystal contact distance.
 
-    Uses PyMOL's symexp command to generate symmetry mates and selects
-    interface atoms within the specified cutoff distance.
+    PyMOL's symexp generates the mates; `byres` then keeps whole residues and
+    whole ligand entities with any atom within `cutoff` of the ASU. Protein and
+    ligand mates come back under separate keys, classified by PyMOL itself
+    (`polymer.protein` vs the non-protein, non-solvent remainder), so nothing
+    downstream needs residue-name heuristics.
+
+    Mate waters are never selected: a mate water is a symmetry image of an ASU
+    water, which is a prediction target, so keeping it as context is a label
+    leak. Protein and ligand contact surfaces are genuine context.
 
     Args:
-        pdb_path: Path to PDB file with crystal symmetry information
-        cutoff: Distance cutoff in Angstroms for interface detection
+        struc_path: Structure file (PDB/CIF) carrying crystal symmetry.
+        cutoff: Interface distance cutoff in Angstroms.
+        include_ligands: Also collect whole ligand/ion/cofactor/nucleic-acid mate
+            entities (still never waters). Off by default: protein mates alone.
 
     Returns:
         Dict with keys:
             - 'asu_coords': (N_asu, 3) ASU atom coordinates
-            - 'mate_coords': (N_mate, 3) symmetry mate atom coordinates
-            - 'asu_atoms': List of PyMOL atom objects for ASU
-            - 'mate_atoms': List of PyMOL atom objects for mates
+            - 'asu_atoms': List of PyMOL atom objects for the ASU
+            - 'mate_coords': (N_mate, 3) whole protein-mate residues
+            - 'mate_atoms': List of PyMOL atom objects for protein mates
+            - 'mate_ligand_coords': (M, 3) whole ligand-mate entities, empty
+              unless include_ligands
+            - 'mate_ligand_atoms': List of PyMOL atom objects for ligand mates
     """
     with pymol2.PyMOL() as pm:
         cmd = pm.cmd
         cmd.reinitialize()
         cmd.feedback("disable", "all", "everything")
         obj = "struct"
-        cmd.load(pdb_path, obj)
+        cmd.load(struc_path, obj)
         cmd.symexp("sym", obj, obj, cutoff)
-        cmd.select("interface", f"byres (sym* within {cutoff} of {obj})")
 
-        asu_coords = cmd.get_coords(obj, state=1)
-        mate_coords = cmd.get_coords("sym* and interface", state=1)
-        asu_atoms = cmd.get_model(obj, state=1).atom
-        mate_atoms = cmd.get_model("sym* and interface", state=1).atom
+        def _coords(selection: str) -> np.ndarray:
+            coords = cmd.get_coords(selection, state=1)
+            return coords if coords is not None else np.zeros((0, 3), dtype=float)
 
-        asu_coords = (
-            asu_coords if asu_coords is not None else np.zeros((0, 3), dtype=float)
+        # Whole protein-mate residues with any atom within cutoff of the ASU.
+        # `not hydro` last: byres would otherwise re-add the residue's hydrogens,
+        # and mates must stay heavy-atom-only like the ASU.
+        cmd.select(
+            "iface_prot",
+            f"(byres ((sym* and polymer.protein) within {cutoff} of {obj})) "
+            f"and not hydro",
         )
-        mate_coords = (
-            mate_coords if mate_coords is not None else np.zeros((0, 3), dtype=float)
-        )
+        mate_coords = _coords("iface_prot")
+        mate_atoms = cmd.get_model("iface_prot", state=1).atom
+
+        # Whole ligand-mate entities (non-protein, non-water het atoms: ligands,
+        # ions, cofactors, nucleic acids).
+        if include_ligands:
+            cmd.select(
+                "iface_lig",
+                f"(byres ((sym* and (not polymer.protein) and (not solvent)) "
+                f"within {cutoff} of {obj})) and not hydro",
+            )
+            mate_ligand_coords = _coords("iface_lig")
+            mate_ligand_atoms = cmd.get_model("iface_lig", state=1).atom
+        else:
+            mate_ligand_coords = np.zeros((0, 3), dtype=float)
+            mate_ligand_atoms = []
+
         return {
-            "asu_coords": asu_coords,
+            "asu_coords": _coords(obj),
+            "asu_atoms": cmd.get_model(obj, state=1).atom,
             "mate_coords": mate_coords,
-            "asu_atoms": asu_atoms,
             "mate_atoms": mate_atoms,
+            "mate_ligand_coords": mate_ligand_coords,
+            "mate_ligand_atoms": mate_ligand_atoms,
         }
 
 
@@ -130,26 +204,158 @@ def match_atoms_to_coords(
     atoms: bts.AtomArray, target_coords: np.ndarray, tolerance: float = 0.01
 ) -> list[int]:
     """
-    Match biotite atoms to target coordinates by nearest neighbor. (needed for mates when parsing with PyMOL)
+    Match biotite atoms to coordinates from a second parse of the same structure.
+
+    Reconciles biotite against PyMOL. The two disagree on count by design: PyMOL
+    keeps every altloc conformer while biotite takes the highest-occupancy one,
+    so PyMOL's atom set is a superset. Every biotite atom should still be found
+    in it; the caller drops any that are not.
 
     Args:
         atoms: Biotite AtomArray with coord attribute
-        target_coords: (N, 3) array of target coordinates to match
+        target_coords: (N, 3) coordinates to match against
         tolerance: Maximum distance in Angstroms for a valid match
 
     Returns:
-        List of indices into atoms array for matched atoms
+        Index into atoms for each target coordinate whose nearest atom lies
+        within tolerance. May repeat an index if two targets share an atom.
     """
-    if target_coords.shape[0] == 0:
+    if target_coords.shape[0] == 0 or len(atoms) == 0:
         return []
 
-    matched = []
-    for i, coord in enumerate(target_coords):
-        dists = np.linalg.norm(atoms.coord - coord, axis=1)
-        min_idx = np.argmin(dists)
-        if dists[min_idx] < tolerance:
-            matched.append(min_idx)
+    tree = cKDTree(atoms.coord)
+    dists, nearest = tree.query(target_coords, k=1, distance_upper_bound=tolerance)
+    within = np.isfinite(dists) & (nearest < len(atoms))
+    matched = nearest[within].tolist()
+
+    # A wholesale miss means the parses disagree (frame, cell), not that the
+    # atoms are bad. Warn, or the caller's drop looks like clean data.
+    if len(set(matched)) < len(atoms) / 2:
+        logger.warning(
+            f"Only {len(set(matched))}/{len(atoms)} atoms matched within "
+            f"{tolerance}A; parses may disagree. Unmatched atoms are dropped."
+        )
     return matched
+
+
+def dedup_mate_atoms(
+    mate_coords: np.ndarray,
+    mate_atoms: list,
+    reference_coords: np.ndarray,
+    tol: float = 0.3,
+) -> tuple[np.ndarray, list]:
+    """
+    Drop mate atoms coincident with a reference atom or an already-kept mate atom.
+
+    Crystal symmetry creates coincidences: an atom on a rotation or screw axis
+    maps onto itself, and one residue can be reached through two operators. Left
+    alone each becomes an independent node, giving duplicates joined by ~0 A
+    edges -- and, for a target water on a special position, a label leak.
+
+    Per atom, unlike `dedup_mate_ligands_by_residue`: a special position is an
+    atom-level accident, so only the coincident atom is dropped. The self sweep
+    also catches mates coincident with each other, which the reference tree cannot.
+
+    Args:
+        mate_coords: (N, 3) mate atom coordinates, uncentered.
+        mate_atoms: Parallel list of mate atom objects, kept in lockstep.
+        reference_coords: (M, 3) uncentered ASU coordinates.
+        tol: Coincidence radius in Angstroms.
+
+    Returns:
+        (kept_coords, kept_atoms). The first atom of a coincident group is the
+        one kept, so the result depends on input order.
+    """
+    n = mate_coords.shape[0]
+    if n == 0:
+        return mate_coords, mate_atoms
+
+    # An empty reference tree answers inf, so no guard is needed here.
+    drop = cKDTree(reference_coords).query(mate_coords, k=1)[0] < tol
+
+    # Self-dedup is a first-win sweep. One tree answers every lookup, so the
+    # sweep only walks each atom's coincident neighbors.
+    neighbors = cKDTree(mate_coords).query_ball_point(mate_coords, r=tol)
+    kept = np.zeros(n, dtype=bool)
+    for i in range(n):
+        if drop[i]:
+            continue
+        earlier = [j for j in neighbors[i] if j < i and kept[j]]
+        # query_ball_point includes r, this sweep is strict.
+        dists = np.linalg.norm(mate_coords[earlier] - mate_coords[i], axis=1)
+        kept[i] = not (dists < tol).any()
+
+    keep_idx = np.flatnonzero(kept)
+    return mate_coords[keep_idx], [mate_atoms[i] for i in keep_idx]
+
+
+def dedup_mate_ligands_by_residue(
+    lig_coords: np.ndarray,
+    lig_atoms: list,
+    reference_coords: np.ndarray,
+    tol: float = 0.3,
+    image_frac: float = 0.5,
+) -> tuple[np.ndarray, list]:
+    """
+    Drop whole mate-ligand entities that are symmetry images of ASU atoms.
+
+    Unlike `dedup_mate_atoms`, which works per atom, this works per entity so a
+    ligand is never fragmented: it goes only when the whole ligand is a redundant
+    copy. Genuine neighbor-cell ligands are kept whole.
+
+    Args:
+        lig_coords: (M, 3) mate-ligand atom coordinates, uncentered.
+        lig_atoms: Parallel list of mate-ligand atom objects.
+        reference_coords: Uncentered ASU coordinates.
+        tol: Coincidence radius in Angstroms.
+        image_frac: Drop a ligand when more than this fraction of its atoms are
+            coincident with the reference.
+
+    Returns:
+        (kept_coords, kept_atoms) with whole symmetry-image ligands removed.
+    """
+    if len(lig_atoms) == 0:
+        return lig_coords, lig_atoms
+
+    ref_tree = cKDTree(reference_coords)
+    # Group atom indices by ligand entity. atom.model is the symmetry-object id, so
+    # two neighbour-cell images of one ligand stay separate entities: without it
+    # they collide into one group and a single image_frac is averaged over both,
+    # which can dilute a genuine ASU-image copy below the drop threshold.
+    groups = {}
+    for i, atom in enumerate(lig_atoms):
+        key = (
+            getattr(atom, "model", ""),
+            atom.chain,
+            atom.resi,
+            getattr(atom, "segi", ""),
+        )
+        groups.setdefault(key, []).append(i)
+
+    keep_idx: list[int] = []
+    for idxs in groups.values():
+        if np.mean(ref_tree.query(lig_coords[idxs], k=1)[0] < tol) <= image_frac:
+            keep_idx.extend(idxs)  # genuine neighbor ligand: keep whole
+    keep_idx.sort()
+
+    return lig_coords[keep_idx], [lig_atoms[i] for i in keep_idx]
+
+
+def _parse_pdb_resi(resi) -> tuple[int, str] | None:
+    """
+    Parse a PyMOL residue identifier, which may carry an insertion code.
+
+    Args:
+        resi: Residue id as PyMOL exposes it, e.g. "52", "-3", "52A".
+
+    Returns:
+        (res_id, ins_code), or None when there is no integer part, which the
+        caller scores with a zero embedding rather than crashing on.
+    """
+    match = re.match(r"^\s*(-?\d+)\s*([A-Za-z]?)\s*$", str(resi))
+    if match is None:
+        return None
+    return int(match.group(1)), match.group(2).strip()
 
 
 def _make_undirected(edge_index: torch.Tensor) -> torch.Tensor:
@@ -191,11 +397,24 @@ def _pad_atom_embeddings_for_mates(
     return torch.cat([asu_embedding, pad], dim=0)
 
 
+def _load_torch_cache(path: Path, cache_load_mmap: bool = True) -> dict:
+    """Load a torch cache file, using mmap when supported by the file/runtime."""
+    if not cache_load_mmap:
+        return torch.load(path, weights_only=False)
+
+    try:
+        return torch.load(path, weights_only=False, mmap=True)
+    except (TypeError, ValueError, RuntimeError, OSError) as exc:
+        logger.debug(f"mmap torch.load failed for {path}; falling back: {exc}")
+        return torch.load(path, weights_only=False)
+
+
 def load_slae_embedding(
     embedding_dir: Path,
     cache_key: str,
     num_asu_protein: int,
     total_num_atoms: int,
+    cache_load_mmap: bool = True,
 ) -> torch.Tensor:
     """
     Load SLAE atom-level embeddings from cache.
@@ -207,6 +426,7 @@ def load_slae_embedding(
         cache_key: Identifier for the cached embedding file
         num_asu_protein: Expected number of ASU protein atoms
         total_num_atoms: Total protein atoms including symmetry mates
+        cache_load_mmap: Use mmap-backed torch.load when supported
 
     Returns:
         (total_num_atoms, slae_dim) tensor with zeros padded for mate atoms
@@ -221,7 +441,7 @@ def load_slae_embedding(
             f"SLAE cache file not found: {slae_cache_path}. "
             "Generate embeddings with scripts/generate_slae_embeddings.py."
         )
-    slae_cached = torch.load(slae_cache_path, weights_only=False)
+    slae_cached = _load_torch_cache(slae_cache_path, cache_load_mmap=cache_load_mmap)
     if "node_embeddings" not in slae_cached:
         raise KeyError(f"Missing 'node_embeddings' in SLAE cache: {slae_cache_path}")
     slae_emb = slae_cached["node_embeddings"]
@@ -237,6 +457,7 @@ def load_esm_embedding(
     embedding_dir: Path,
     cache_key: str,
     num_protein_residues: int,
+    cache_load_mmap: bool = True,
 ) -> torch.Tensor:
     """
     Load ESM residue-level embeddings from cache.
@@ -248,6 +469,7 @@ def load_esm_embedding(
         embedding_dir: Directory containing cached embedding files
         cache_key: Identifier for the cached embedding file
         num_protein_residues: Expected number of unique residues
+        cache_load_mmap: Use mmap-backed torch.load when supported
 
     Returns:
         (num_protein_residues, esm_dim) tensor of residue embeddings
@@ -262,7 +484,7 @@ def load_esm_embedding(
             f"ESM cache file not found: {esm_cache_path}. "
             "Generate embeddings with scripts/generate_esm_embeddings.py."
         )
-    esm_cached = torch.load(esm_cache_path, weights_only=False)
+    esm_cached = _load_torch_cache(esm_cache_path, cache_load_mmap=cache_load_mmap)
     if "residue_embeddings" not in esm_cached:
         raise KeyError(f"Missing 'residue_embeddings' in ESM cache: {esm_cache_path}")
     residue_embeddings = esm_cached["residue_embeddings"]
@@ -426,53 +648,56 @@ def check_water_residue_ratio(
 
 
 def load_edia_for_pdb(
-    edia_dir: Path,
-    pdb_id: str,
+    json_path: str | Path,
 ) -> dict[tuple[str, int, str], float] | None:
     """
-    Load EDIA scores for water molecules from CSV file.
+    Load EDIA scores for water molecules from a JSON file.
 
     Args:
-        edia_dir: Directory containing EDIA results
-        pdb_id: PDB ID to load
+        json_path: Path to JSON file containing EDIA scores for the structure
 
     Returns:
         Dictionary mapping (chain_id, res_id, ins_code) -> EDIA score for waters,
         or None if file not found or error
     """
-    csv_path = edia_dir / pdb_id / f"{pdb_id}_residue_stats.csv"
-
-    if not csv_path.exists():
+    json_path = Path(json_path)
+    if not json_path.exists():
         return None
 
     try:
-        df = pd.read_csv(csv_path)
+        with open(json_path, "r") as f:
+            data = json.load(f)
 
-        # filter for water molecules only
-        water_df = df[df["compID"].isin(["HOH", "WAT"])]
-
-        if water_df.empty:
-            return {}
-
-        # Optional insertion-code column in EDIA outputs.
-        ins_code_col = "pdb_insCode" if "pdb_insCode" in water_df.columns else None
-
-        # build lookup dictionary: (chain_id, res_id, ins_code) -> EDIAm
         edia_lookup = {}
-        for _, row in water_df.iterrows():
-            ins_code = normalize_ins_code(row[ins_code_col]) if ins_code_col else ""
-            key = (str(row["pdb_strandID"]), int(row["pdb_seqNum"]), ins_code)
-            edia_lookup[key] = float(row["EDIAm"])
+        for entry in data:
+            # Filter for water molecules only
+            if entry.get("compID") in ["HOH", "WAT"]:
+                # The identifying information is nested inside the "pdb" key in the JSON
+                pdb_info = entry.get("pdb", {})
+
+                chain_id = str(pdb_info.get("strandID", ""))
+                res_id = int(pdb_info.get("seqNum", 0))
+
+                # Extract and normalize insertion code, defaulting to an empty string
+                raw_ins_code = pdb_info.get("insCode", "")
+                ins_code = normalize_ins_code(raw_ins_code) if raw_ins_code else ""
+
+                # Build the lookup key and extract the EDIAm score
+                key = (chain_id, res_id, ins_code)
+                edia_lookup[key] = float(entry.get("EDIAm", 0.0))
+
+        if not edia_lookup:
+            return {}
 
         return edia_lookup
 
     except Exception as e:
-        logger.warning(f"Warning: Could not load EDIA data for {pdb_id}: {e}")
+        logger.warning(f"Warning: Could not load EDIA JSON data for {json_path}: {e}")
         return None
 
 
 def compute_normalized_bfactors(
-    pdb_path: str,
+    struc_path: str,
 ) -> tuple[dict[tuple[str, int, str], float] | None, np.ndarray | None]:
     """
     Extract and normalize B-factors for water molecules.
@@ -481,7 +706,7 @@ def compute_normalized_bfactors(
     in the selected structure.
 
     Args:
-        pdb_path: Path to PDB file
+        struc_path: Path to structure file (PDB/CIF)
 
     Returns:
         Tuple of:
@@ -490,34 +715,38 @@ def compute_normalized_bfactors(
         Returns (None, None) on error
     """
     try:
-        pdb_file = PDBFile.read(pdb_path)
-        atoms = pdb_file.get_structure(
-            model=1, altloc="occupancy", extra_fields=["b_factor"]
-        )
+        atoms = _read_structure(struc_path, extra_fields=["b_factor"])
 
         # filter for water molecules
         water_mask = (atoms.res_name == "HOH") | (atoms.res_name == "WAT")
         water_atoms = atoms[water_mask]
 
+        return _compute_normalized_bfactors_from_atoms(water_atoms)
+
+    except Exception as e:
+        logger.warning(f"Warning: Could not extract B-factors from {struc_path}: {e}")
+        return None, None
+
+
+def _compute_normalized_bfactors_from_atoms(
+    water_atoms: bts.AtomArray,
+) -> tuple[dict[tuple[str, int, str], float] | None, np.ndarray | None]:
+    """Compute normalized B-factors from an already-parsed water AtomArray."""
+    try:
         if not water_atoms:
             return None, None
 
-        # Normalize using water-only B-factor statistics.
         water_mean = np.mean(water_atoms.b_factor)
         water_std = np.std(water_atoms.b_factor)
 
-        # lookup dictionary with one entry per unique water residue
         bfactor_lookup = {}
-
         for i in range(len(water_atoms)):
             chain_id = str(water_atoms.chain_id[i])
             res_id = int(water_atoms.res_id[i])
             ins_code = normalize_ins_code(water_atoms.ins_code[i])
             key = (chain_id, res_id, ins_code)
-
             if key not in bfactor_lookup:
                 raw_bfactor = water_atoms.b_factor[i]
-                # If all water B-factors are identical, assign neutral z-score 0.0.
                 normalized = (
                     (raw_bfactor - water_mean) / max(water_std, 1e-3)
                     if water_std > 0
@@ -528,7 +757,7 @@ def compute_normalized_bfactors(
         return bfactor_lookup, water_atoms.b_factor
 
     except Exception as e:
-        logger.warning(f"Warning: Could not extract B-factors from {pdb_path}: {e}")
+        logger.warning(f"Warning: Could not compute B-factors from atoms: {e}")
         return None, None
 
 
@@ -646,7 +875,7 @@ def filter_waters_by_quality(
 
 class ProteinWaterDataset(Dataset):
     """
-    Dataset for protein crystal contact prediction.
+    Dataset for predicting water positions in protein crystal structures.
 
     Returns HeteroData with:
     - 'protein' node type: ASU protein atoms + optionally symmetry mates
@@ -658,10 +887,12 @@ class ProteinWaterDataset(Dataset):
         self,
         pdb_list_file: str,
         processed_dir: str,
+        base_pdb_dir: str,
         encoder_type: str = "gvp",
-        base_pdb_dir: str = "/sb/wankowicz_lab/data/srivasv/pdb_redo_data",
         cutoff: float = 8.0,
+        max_neighbors: int = 256,
         include_mates: bool = True,
+        include_ligands: bool = True,
         geometry_cache_name: str = "geometry",
         preprocess: bool = True,
         duplicate_single_sample: int = 1,
@@ -669,30 +900,39 @@ class ProteinWaterDataset(Dataset):
         max_clash_fraction: float = 0.05,
         clash_dist: float = 2.0,
         interface_dist_threshold: float = 4.0,
-        min_water_residue_ratio: float = 0.6,
-        edia_dir: str | None = None,
+        min_water_residue_ratio: float = 0.1,
         max_protein_dist: float = 5.0,
         min_edia: float = 0.4,
-        max_bfactor_zscore: float = 1.5,
+        max_bfactor_zscore: float = 2.0,
         filter_by_distance: bool = True,
         filter_by_edia: bool = True,
         filter_by_bfactor: bool = True,
+        sample_cache_size: int = 0,
+        cache_load_mmap: bool = False,
     ):
         """
         Args:
             pdb_list_file: Text file with lines like "<pdb_id>_final"
             processed_dir: Cache root directory. Geometry caches are stored in
-                           {processed_dir}/{geometry_cache_name}[_mates] and embedding
-                           caches in {processed_dir}/{encoder_name}.
+                           {processed_dir}/{geometry_cache_name}[_mates][_noligands]
+                           and embedding caches in {processed_dir}/{encoder_name}.
+            base_pdb_dir: Base directory containing PDB subdirectories
             encoder_type: Encoder used downstream ('gvp', 'slae', or 'esm').
                           Embeddings are loaded only for the selected type.
-            base_pdb_dir: Base directory containing PDB subdirectories
             cutoff: Distance cutoff for PP edges and crystal contacts (Angstroms)
+            max_neighbors: Maximum neighbors per node for radius graph construction.
             include_mates: If True, include symmetry mate atoms as protein nodes
-            geometry_cache_name: Base name for geometry cache directory. When
-                                 include_mates=True, "_mates" is appended automatically.
-                                 Default is "geometry", resulting in "geometry/" or
-                                 "geometry_mates/" subdirectories.
+            include_ligands: If True (default), include every non-protein,
+                             non-water heavy atom (small-molecule ligands, ions,
+                             cofactors, and nucleic acids) as protein-type nodes.
+                             They are appended after protein (and mate) atoms with a
+                             boolean is_ligand mask and residue_index = -1.
+            geometry_cache_name: Base name for geometry cache directory. Flags that
+                                 change the cached node set are appended to it:
+                                 "_mates" when include_mates=True, "_noligands" when
+                                 include_ligands=False. Default is "geometry", yielding
+                                 "geometry_mates/" for the default config or e.g.
+                                 "geometry_mates_noligands/" with ligands excluded.
             preprocess: If True, run preprocessing on missing cached files
             duplicate_single_sample: If dataset has 1 sample, duplicate it this many times
             Quality checks (always active):
@@ -708,7 +948,6 @@ class ProteinWaterDataset(Dataset):
                                      Structures below this are filtered (poor solvent modeling).
 
             Per-water filtering (toggleable):
-            edia_dir: Directory containing EDIA CSV files. Structure: {edia_dir}/{pdb_id}/{pdb_id}_residue_stats.csv
             max_protein_dist: Remove waters farther than this from nearest protein atom (Angstroms).
             min_edia: Remove waters with EDIA score below this threshold.
             max_bfactor_zscore: Remove waters with normalized B-factor (z-score) above this.
@@ -716,20 +955,34 @@ class ProteinWaterDataset(Dataset):
             filter_by_edia: Enable/disable EDIA score filtering.
             filter_by_bfactor: Enable/disable B-factor z-score filtering.
                               If a per-water filter is disabled, its threshold is ignored.
+            sample_cache_size: Number of fully built HeteroData samples to keep in a
+                               per-process LRU cache. 0 disables sample caching.
+            cache_load_mmap: Use mmap-backed torch.load for cache files when supported.
         """
 
+        if sample_cache_size < 0:
+            raise ValueError("sample_cache_size must be >= 0")
+        if max_neighbors < 1:
+            raise ValueError("max_neighbors must be >= 1")
+
         self.cache_dir = Path(processed_dir)
-        # Directory-based separation: geometry/ vs geometry_mates/
+        # Directory-based separation: geometry/ vs geometry_mates/. Both flags change
+        # the cached node set, so both are encoded in the directory name -- otherwise
+        # toggling one would silently reuse geometry built under the other setting.
         cache_suffix = "_mates" if include_mates else ""
+        if not include_ligands:
+            cache_suffix += "_noligands"
         self.geometry_dir = self.cache_dir / f"{geometry_cache_name}{cache_suffix}"
         self.base_pdb_dir = Path(base_pdb_dir)
         self.cutoff = cutoff
+        self.max_neighbors = max_neighbors
         self.encoder_type = encoder_type
         if self.encoder_type in ("slae", "esm"):
             self.embedding_dir = self.cache_dir / self.encoder_type
         else:
             self.embedding_dir = None
         self.include_mates = include_mates
+        self.include_ligands = include_ligands
         self.duplicate_single_sample = duplicate_single_sample
 
         self.max_com_dist = max_com_dist
@@ -738,13 +991,15 @@ class ProteinWaterDataset(Dataset):
         self.interface_dist_threshold = interface_dist_threshold
         self.min_water_residue_ratio = min_water_residue_ratio
 
-        self.edia_dir = Path(edia_dir) if edia_dir is not None else None
         self.max_protein_dist = max_protein_dist
         self.min_edia = min_edia
         self.max_bfactor_zscore = max_bfactor_zscore
         self.filter_by_distance = filter_by_distance
         self.filter_by_edia = filter_by_edia
         self.filter_by_bfactor = filter_by_bfactor
+        self.sample_cache_size = int(sample_cache_size)
+        self.cache_load_mmap = bool(cache_load_mmap)
+        self._sample_cache: OrderedDict[tuple[int, str], HeteroData] = OrderedDict()
 
         if self.encoder_type not in {"gvp", "slae", "esm"}:
             raise ValueError(
@@ -753,6 +1008,8 @@ class ProteinWaterDataset(Dataset):
             )
 
         self.entries = self._parse_pdb_list(pdb_list_file)
+
+        self._sync_filter_meta(write=preprocess)
 
         if preprocess:
             self._preprocess_all()
@@ -773,15 +1030,18 @@ class ProteinWaterDataset(Dataset):
         Expected format:
         <pdb_id>_final  (e.g., "6eey_final")
 
-        Constructs path: {base_pdb_dir}/{pdb_id}/{pdb_id}_final.pdb
+        Resolves path in {base_pdb_dir}/{pdb_id}/, preferring
+        {pdb_id}_final.cif when present, otherwise falling back to
+        {pdb_id}_final.pdb.
         """
         entries = []
+        logger.info(f"Parsing PDB list: {pdb_list_file}")
+        pdb_ids = []
         with open(pdb_list_file, "r") as f:
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
-
                 if not line.endswith("_final"):
                     logger.warning(f"Warning: Unexpected format: {line}")
                     continue
@@ -789,21 +1049,104 @@ class ProteinWaterDataset(Dataset):
                 if not pdb_id:
                     logger.warning(f"Warning: Unexpected format: {line}")
                     continue
+                pdb_ids.append((pdb_id, line))
 
-                pdb_path = self.base_pdb_dir / pdb_id / f"{pdb_id}_final.pdb"
+        logger.info(
+            f"Read {len(pdb_ids)} IDs, resolving file paths for requested entries..."
+        )
 
-                # Cache key is just the base key - directory separation handles mates
-                entries.append(
-                    {
-                        "pdb_id": pdb_id,
-                        "pdb_path": pdb_path,
-                        "cache_key": line,
-                        "embedding_key": line,  # Same as cache_key for embedding lookup
-                    }
-                )
+        for pdb_id, cache_key in pdb_ids:
+            subdir = self.base_pdb_dir / pdb_id
+            cif_path = subdir / f"{pdb_id}_final.cif"
+            struc_path = (
+                cif_path if cif_path.is_file() else subdir / f"{pdb_id}_final.pdb"
+            )
+
+            # Cache key is just the base key - directory separation handles mates
+            entries.append(
+                {
+                    "pdb_id": pdb_id,
+                    "struc_path": struc_path,
+                    "cache_key": cache_key,
+                    "embedding_key": cache_key,  # Same as cache_key for embedding lookup
+                }
+            )
 
         logger.info(f"Loaded {len(entries)} entries from {pdb_list_file}")
         return entries
+
+    def _sync_filter_meta(self, write: bool) -> None:
+        """
+        Refuse to read or extend a cache built under different settings.
+
+        Filtering happens before the cache is written, so these are properties of
+        the directory rather than of the run reading it -- and the .pt files
+        record none of them. Writing entries under different settings would leave
+        one directory holding two populations no later reader can tell apart.
+
+        Args:
+            write: Create when it is absent. Only runs that may add
+                entries (preprocess=True) claim a directory this way.
+
+        Raises:
+            ValueError: If the recorded settings differ from this run's.
+        """
+        meta_path = self.geometry_dir / FILTER_META_FILENAME
+        # A disabled filter's threshold is None: it never touched the cached
+        # waters, so it must not make two identical caches look incompatible.
+        current = {
+            "filter_by_distance": self.filter_by_distance,
+            "filter_by_edia": self.filter_by_edia,
+            "filter_by_bfactor": self.filter_by_bfactor,
+            "max_protein_dist": self.max_protein_dist
+            if self.filter_by_distance
+            else None,
+            "min_edia": self.min_edia if self.filter_by_edia else None,
+            "max_bfactor_zscore": self.max_bfactor_zscore
+            if self.filter_by_bfactor
+            else None,
+            "min_water_residue_ratio": self.min_water_residue_ratio,
+            "max_com_dist": self.max_com_dist,
+            "max_clash_fraction": self.max_clash_fraction,
+            "clash_dist": self.clash_dist,
+            "interface_dist_threshold": self.interface_dist_threshold,
+            "cutoff": self.cutoff,
+            "max_neighbors": self.max_neighbors,
+        }
+
+        if meta_path.is_file():
+            with open(meta_path) as f:
+                recorded = json.load(f)
+            differing = [
+                f"{name}: cache={recorded.get(name)!r} run={value!r}"
+                for name, value in current.items()
+                if recorded.get(name) != value
+            ]
+            if differing:
+                raise ValueError(
+                    f"Settings disagree with {meta_path}: {', '.join(differing)}. "
+                    "The cache was filtered at write time, so one directory cannot "
+                    "hold both. Match the recorded values or point "
+                    "geometry_cache_name at a different directory."
+                )
+            return
+
+        # Warn before writing too: stamping pre-existing entries labels them with
+        # settings they were never checked against, and later runs trust the label.
+        if any(self.geometry_dir.glob("*.pt")):
+            logger.warning(
+                f"{self.geometry_dir} has no {FILTER_META_FILENAME}; the settings "
+                "its entries were built with cannot be verified."
+            )
+
+        if write:
+            self.geometry_dir.mkdir(parents=True, exist_ok=True)
+            # Written through a temp file: cache builds fan out over processes,
+            # and a reader must never catch a half-written file.
+            tmp_path = meta_path.with_suffix(f".{os.getpid()}.tmp")
+            with open(tmp_path, "w") as f:
+                json.dump(current, f, indent=2)
+            tmp_path.replace(meta_path)
 
     def _preprocess_all(self):
         """
@@ -865,9 +1208,9 @@ class ProteinWaterDataset(Dataset):
 
         Raises ValueError if structure fails quality filters.
         """
-        pdb_path = str(entry["pdb_path"])
+        struc_path = str(entry["struc_path"])
 
-        protein_atoms, water_atoms = parse_asu_with_biotite(pdb_path)
+        protein_atoms, water_atoms, ligand_atoms = parse_asu_with_biotite(struc_path)
 
         # check inter-chain interactions for multi-chain proteins
         chain_valid, chain_reason, _ = check_chain_interactions(
@@ -877,24 +1220,35 @@ class ProteinWaterDataset(Dataset):
         if not chain_valid:
             raise ValueError(f"Quality filter failed: {chain_reason}")
 
-        crystal_data = get_crystal_contacts_pymol(pdb_path, self.cutoff)
+        # PyMOL is only needed for symmetry expansion, so a no-mates cache skips
+        # it (and with it the water cross-check below) entirely.
+        if self.include_mates:
+            crystal_data = get_crystal_contacts_pymol(
+                struc_path, self.cutoff, include_ligands=self.include_ligands
+            )
 
-        # Ensure consistency between biotite and PyMOL parsing.
-        # Both parse the same ASU, but may differ in altloc selection, hydrogen
-        # handling, or edge cases. Keep only waters present in both representations.
-        asu_water_indices = match_atoms_to_coords(
-            water_atoms, crystal_data["asu_coords"]
-        )
-        if asu_water_indices:
-            asu_water_mask = np.zeros(len(water_atoms), dtype=bool)
-            asu_water_mask[asu_water_indices] = True
-            water_atoms = water_atoms[asu_water_mask]
-        else:
-            water_atoms = water_atoms[:0]
+            # Keep only the waters PyMOL also saw. PyMOL's ASU is a superset of
+            # biotite's (it keeps every altloc conformer), so a water missing from
+            # it means the two parses disagree rather than that the water is
+            # unwanted.
+            asu_water_indices = match_atoms_to_coords(
+                water_atoms, crystal_data["asu_coords"]
+            )
+            if asu_water_indices:
+                asu_water_mask = np.zeros(len(water_atoms), dtype=bool)
+                asu_water_mask[asu_water_indices] = True
+                water_atoms = water_atoms[asu_water_mask]
+            else:
+                if len(water_atoms) > 0:
+                    logger.warning(
+                        f"{entry['pdb_id']}: no waters survived the biotite/PyMOL "
+                        f"cross-check (had {len(water_atoms)})"
+                    )
+                water_atoms = water_atoms[:0]
 
         # Per-water filtering is optional; structure-level quality checks below always run.
         use_distance_filter = self.filter_by_distance
-        use_edia_filter = self.filter_by_edia and self.edia_dir is not None
+        use_edia_filter = self.filter_by_edia
         use_bfactor_filter = self.filter_by_bfactor
         any_filter_enabled = (
             use_distance_filter or use_edia_filter or use_bfactor_filter
@@ -904,16 +1258,19 @@ class ProteinWaterDataset(Dataset):
             # load EDIA data only when the EDIA filter is active
             edia_lookup = None
             if use_edia_filter:
-                edia_lookup = load_edia_for_pdb(self.edia_dir, entry["pdb_id"])
+                edia_json_path = Path(struc_path).with_suffix(".json")
+                edia_lookup = load_edia_for_pdb(edia_json_path)
                 if edia_lookup is None:
-                    logger.warning(
-                        f"Warning: EDIA file not found for {entry['pdb_id']}, skipping EDIA filtering"
+                    raise ValueError(
+                        f"EDIA filtering enabled but JSON file missing for {entry['pdb_id']}. "
+                        f"Expected file: {edia_json_path.name} in the same directory as the PDB."
                     )
 
             # compute normalized B-factors only when the B-factor filter is active
+            # water_atoms already has b_factor from parse_asu_with_biotite — no second read needed
             bfactor_lookup = None
             if use_bfactor_filter:
-                bfactor_lookup, _ = compute_normalized_bfactors(pdb_path)
+                bfactor_lookup, _ = _compute_normalized_bfactors_from_atoms(water_atoms)
 
             # build water keys for filtering
             water_keys = list(
@@ -927,11 +1284,19 @@ class ProteinWaterDataset(Dataset):
                 )
             )
 
-            # apply quality filters
+            # Apply quality filters. Mate protein atoms join the distance
+            # reference so a genuine crystal-contact water is not dropped as solvent-far.
+            if self.include_mates and crystal_data["mate_coords"].shape[0] > 0:
+                filter_protein_coords = np.concatenate(
+                    [protein_atoms.coord, crystal_data["mate_coords"]], axis=0
+                )
+            else:
+                filter_protein_coords = protein_atoms.coord
+
             keep_mask = filter_waters_by_quality(
                 water_atoms.coord,
                 water_keys,
-                protein_atoms.coord if use_distance_filter else None,
+                filter_protein_coords if use_distance_filter else None,
                 edia_lookup,
                 bfactor_lookup,
                 max_protein_dist=self.max_protein_dist,
@@ -975,20 +1340,34 @@ class ProteinWaterDataset(Dataset):
         protein_elements = [str(e).upper() for e in protein_atoms.element]
         protein_x = element_onehot(protein_elements)
 
-        # compute residue indices (including ins_code to match ESM/SLAE residue counting)
-        res_id = protein_atoms.res_id
-        chain_id_arr = protein_atoms.chain_id
-        ins_code_arr = np.array(
-            [normalize_ins_code(x) for x in protein_atoms.ins_code], dtype=object
-        )
-        residue_keys = list(zip(chain_id_arr, res_id, ins_code_arr))
-        unique_res = {k: i for i, k in enumerate(dict.fromkeys(residue_keys))}
-        protein_res_idx = torch.tensor(
-            [unique_res[k] for k in residue_keys], dtype=torch.long
-        )
+        # protein_res_idx indexes cached ESM embedding rows, so it uses biotite's
+        # residue segmentation, not res_id (not 0-based, not contiguous, repeats
+        # across chains). Sanitize names and normalize ins_codes first so residues
+        # split exactly where the ESM script splits them.
+        sanitized_for_idx = sanitize_res_names_for_esm(protein_atoms)
+        for i in range(len(sanitized_for_idx)):
+            sanitized_for_idx.ins_code[i] = normalize_ins_code(
+                sanitized_for_idx.ins_code[i]
+            )
+        num_residues = bts.get_residue_count(sanitized_for_idx)
+        protein_res_idx = torch.from_numpy(
+            bts.spread_residue_wise(sanitized_for_idx, np.arange(num_residues))
+        ).long()
 
-        # check water/residue ratio
-        num_residues = len(unique_res)
+        # (chain, res_id, ins_code) -> residue index, so a symmetry mate can
+        # inherit the embedding row of the ASU residue it is an image of. Keyed
+        # off the same sanitized parse that defines protein_res_idx, so the index
+        # lines up with the stored ESM rows.
+        asu_reskey_to_residx: dict[tuple[str, int, str], int] = {}
+        for res_i, start in enumerate(bts.get_residue_starts(sanitized_for_idx)):
+            # ins_code already normalized in place above
+            key = (
+                str(sanitized_for_idx.chain_id[start]).strip(),
+                int(sanitized_for_idx.res_id[start]),
+                str(sanitized_for_idx.ins_code[start]),
+            )
+            asu_reskey_to_residx.setdefault(key, res_i)
+
         num_waters = len(water_atoms)
         ratio_valid, ratio_reason = check_water_residue_ratio(
             num_waters,
@@ -1007,24 +1386,75 @@ class ProteinWaterDataset(Dataset):
             water_pos = torch.zeros((0, 3), dtype=torch.float32)
             water_x = torch.zeros((0, len(ELEMENT_VOCAB) + 1), dtype=torch.float32)
 
-        # process symmetry mate atoms
-        mate_coords = crystal_data["mate_coords"]
-        if mate_coords.shape[0] > 0:
-            mate_pos = torch.tensor(mate_coords, dtype=torch.float32) - center
-            mate_elements = [a.symbol.upper() for a in crystal_data["mate_atoms"]]
-            mate_x = element_onehot(mate_elements)
+        # Mate blocks stay empty unless include_mates (and, for ligands,
+        # include_ligands) filled them in below.
+        mate_pos = torch.zeros((0, 3), dtype=torch.float32)
+        mate_x = torch.zeros((0, len(ELEMENT_VOCAB) + 1), dtype=torch.float32)
+        mate_res_idx = torch.empty(0, dtype=torch.long)
+        mate_emb_res_idx = torch.empty(0, dtype=torch.long)
+        mate_lig_coords = np.zeros((0, 3), dtype=float)
+        mate_lig_atoms: list = []
 
-            # compute mate residue indices (group atoms by actual residue)
-            mate_residue_keys = [(a.chain, a.resi) for a in crystal_data["mate_atoms"]]
-            unique_mate_res = list(dict.fromkeys(mate_residue_keys))  # preserves order
-            mate_res_map = {k: i for i, k in enumerate(unique_mate_res)}
-            mate_res_idx = torch.tensor(
-                [mate_res_map[k] for k in mate_residue_keys], dtype=torch.long
+        if self.include_mates:
+            # Drop mate atoms coincident with an ASU atom, a target water, or an
+            # already-kept mate atom: special positions and redundant symmetry
+            # images. Uncentered coords; mates are centered below.
+            ref_parts = [protein_atoms.coord]
+            if len(water_atoms):
+                ref_parts.append(water_atoms.coord)
+            # ASU ligands join the reference so a mate ligand that is only their
+            # symmetry image goes too; neighbor-cell ligands stay.
+            if self.include_ligands and len(ligand_atoms) > 0:
+                ref_parts.append(ligand_atoms.coord)
+            reference = np.concatenate(ref_parts, axis=0)
+            mate_coords, mate_atoms = dedup_mate_atoms(
+                crystal_data["mate_coords"], crystal_data["mate_atoms"], reference
             )
-        else:
-            mate_pos = torch.zeros((0, 3), dtype=torch.float32)
-            mate_x = torch.zeros((0, len(ELEMENT_VOCAB) + 1), dtype=torch.float32)
-            mate_res_idx = torch.empty(0, dtype=torch.long)
+            # Ligand mates dedup at entity granularity, so a ligand is never
+            # fragmented: whole symmetry images go, genuine neighbors stay.
+            if self.include_ligands:
+                mate_lig_coords, mate_lig_atoms = dedup_mate_ligands_by_residue(
+                    crystal_data["mate_ligand_coords"],
+                    crystal_data["mate_ligand_atoms"],
+                    reference,
+                )
+
+            if mate_coords.shape[0] > 0:
+                mate_pos = torch.tensor(mate_coords, dtype=torch.float32) - center
+                mate_x = element_onehot([a.symbol.upper() for a in mate_atoms])
+
+                # Group mate atoms by residue. The key omits the symmetry-object id
+                # (atom.model), so two images of one residue share a group. Harmless
+                # today; add atom.model before enabling GVPEncoder's pool_residue,
+                # which would otherwise merge the images into one residue.
+                mate_residue_keys = [(a.chain, a.resi) for a in mate_atoms]
+                unique_mate_res = list(dict.fromkeys(mate_residue_keys))  # keeps order
+                mate_res_map = {k: i for i, k in enumerate(unique_mate_res)}
+                mate_res_idx = torch.tensor(
+                    [mate_res_map[k] for k in mate_residue_keys], dtype=torch.long
+                )
+
+                # A mate inherits its ASU residue's ESM row via (chain, resi);
+                # embeddings are coordinate-free, so image and source share it. -1
+                # (no match) reads as a zero embedding: the atom keeps geometry and
+                # element, losing only its sequence signal, so a miss warns rather
+                # than raises. Misses come from PyMOL's polymer.protein admitting a
+                # residue biotite dropped, or an unparseable resi.
+                mate_emb_idx = []
+                for atom in mate_atoms:
+                    parsed = _parse_pdb_resi(atom.resi)
+                    mate_emb_idx.append(
+                        asu_reskey_to_residx.get((str(atom.chain).strip(), *parsed), -1)
+                        if parsed is not None
+                        else -1
+                    )
+                mate_emb_res_idx = torch.tensor(mate_emb_idx, dtype=torch.long)
+                unmatched = int((mate_emb_res_idx < 0).sum())
+                if unmatched:
+                    logger.warning(
+                        f"{entry['cache_key']}: {unmatched}/{len(mate_emb_idx)} mate "
+                        "atoms unmatched to an ASU residue (zero embedding for those)"
+                    )
 
         # Compute final protein data based on include_mates flag
         num_asu_protein = protein_pos.size(0)
@@ -1044,9 +1474,57 @@ class ProteinWaterDataset(Dataset):
             final_protein_x = protein_x
             final_protein_res_idx = protein_res_idx
 
+        # Append ligand atoms last, giving the node order ASU protein -> mate
+        # protein -> ASU ligand -> mate ligand: num_asu_protein and the mate count
+        # stay meaningful, which is what keeps ESM/SLAE aligned. Ligands get
+        # residue_index = emb_res_idx = -1 (no residue embedding); residue pooling
+        # masks out those negatives before any scatter (GVPEncoder._pool_by_residue).
+        ligand_blocks = []
+        if self.include_ligands and len(ligand_atoms) > 0:
+            ligand_blocks.append(
+                (
+                    ligand_atoms.coord,
+                    [str(e).upper() for e in ligand_atoms.element],
+                    False,
+                )
+            )
+        if len(mate_lig_atoms) > 0:
+            ligand_blocks.append(
+                (mate_lig_coords, [a.symbol.upper() for a in mate_lig_atoms], True)
+            )
+
+        # Mate proteins inherit their source ASU residue's embedding row; ligands
+        # get -1 whichever cell they came from.
+        n_protein = final_protein_pos.size(0)
+        emb_res_idx = torch.cat([protein_res_idx, mate_emb_res_idx], dim=0)
+        is_mate = torch.zeros(n_protein, dtype=torch.bool)
+        is_mate[num_asu_protein:] = True
+
+        for coords, elements, from_mate in ligand_blocks:
+            n_lig = len(elements)
+            pos = torch.tensor(coords, dtype=torch.float32) - center
+            final_protein_pos = torch.cat([final_protein_pos, pos], dim=0)
+            final_protein_x = torch.cat(
+                [final_protein_x, element_onehot(elements)], dim=0
+            )
+            sentinel = torch.full((n_lig,), -1, dtype=torch.long)
+            final_protein_res_idx = torch.cat([final_protein_res_idx, sentinel], dim=0)
+            emb_res_idx = torch.cat([emb_res_idx, sentinel], dim=0)
+            is_mate = torch.cat(
+                [is_mate, torch.full((n_lig,), from_mate, dtype=torch.bool)], dim=0
+            )
+
+        is_ligand = torch.zeros(final_protein_pos.size(0), dtype=torch.bool)
+        is_ligand[n_protein:] = True
+
         # Compute PP edges and features
         if final_protein_pos.size(0) > 0:
-            pp_edge_index = radius_graph(final_protein_pos, r=self.cutoff, loop=False)
+            pp_edge_index = radius_graph(
+                final_protein_pos,
+                r=self.cutoff,
+                loop=False,
+                max_num_neighbors=self.max_neighbors,
+            )
             pp_edge_index = _make_undirected(pp_edge_index)
             pp_edge_unit_vectors, pp_edge_rbf = compute_edge_features(
                 final_protein_pos,
@@ -1069,6 +1547,9 @@ class ProteinWaterDataset(Dataset):
                 "protein_pos": final_protein_pos,
                 "protein_x": final_protein_x,
                 "protein_res_idx": final_protein_res_idx,
+                "is_ligand": is_ligand,
+                "is_mate": is_mate,
+                "emb_res_idx": emb_res_idx,
                 "water_pos": water_pos,
                 "water_x": water_x,
                 # PP topology and features (precomputed)
@@ -1078,6 +1559,7 @@ class ProteinWaterDataset(Dataset):
                 # Metadata
                 "num_asu_protein": num_asu_protein,
                 "num_protein_residues": num_residues,
+                "max_neighbors": self.max_neighbors,
             },
             cache_path,
         )
@@ -1089,9 +1571,9 @@ class ProteinWaterDataset(Dataset):
         self,
         data: HeteroData,
         cache_key: str,
-        asu_protein_res_idx: torch.Tensor,
         num_asu_protein: int,
         num_protein_residues: int,
+        emb_res_idx: torch.Tensor,
     ) -> None:
         """
         Load encoder-specific embeddings and attach to data object.
@@ -1104,9 +1586,11 @@ class ProteinWaterDataset(Dataset):
         Args:
             data: HeteroData object to attach embeddings to (modified in-place)
             cache_key: Identifier for cached embedding files
-            asu_protein_res_idx: (N_asu,) residue index per ASU atom
             num_asu_protein: Number of ASU protein atoms
             num_protein_residues: Number of unique protein residues
+            emb_res_idx: (N_total,) embedding row per atom -- mates inherit their
+                source ASU residue's row; ligands and unmatched atoms are -1 and
+                get a zero row.
         """
         if self.encoder_type == "slae":
             data["protein"].embedding = load_slae_embedding(
@@ -1114,6 +1598,7 @@ class ProteinWaterDataset(Dataset):
                 cache_key=cache_key,
                 num_asu_protein=num_asu_protein,
                 total_num_atoms=data["protein"].num_nodes,
+                cache_load_mmap=self.cache_load_mmap,
             )
             data["protein"].embedding_type = "slae"
         elif self.encoder_type == "esm":
@@ -1122,11 +1607,17 @@ class ProteinWaterDataset(Dataset):
                 embedding_dir=self.embedding_dir,
                 cache_key=cache_key,
                 num_protein_residues=num_protein_residues,
+                cache_load_mmap=self.cache_load_mmap,
             )
-            esm_atom_emb = residue_embeddings[asu_protein_res_idx]
-            data["protein"].embedding = _pad_atom_embeddings_for_mates(
-                esm_atom_emb, data["protein"].num_nodes
+            # Per-atom inheritance: a mate atom takes the row of the ASU residue
+            # it images; ligands and unmatched atoms (-1) stay zero.
+            atom_emb = residue_embeddings.new_zeros(
+                data["protein"].num_nodes, residue_embeddings.size(1)
             )
+            valid = emb_res_idx >= 0
+            if valid.any():
+                atom_emb[valid] = residue_embeddings[emb_res_idx[valid]]
+            data["protein"].embedding = atom_emb
             data["protein"].embedding_type = "esm"
 
     def __getitem__(self, idx: int) -> HeteroData:
@@ -1148,6 +1639,13 @@ class ProteinWaterDataset(Dataset):
 
         actual_idx = idx % len(self.entries)
         entry = self.entries[actual_idx]
+        sample_cache_key = (actual_idx, entry["cache_key"])
+        if self.sample_cache_size > 0:
+            cached_sample = self._sample_cache.get(sample_cache_key)
+            if cached_sample is not None:
+                self._sample_cache.move_to_end(sample_cache_key)
+                return cached_sample.clone()
+
         cache_path = self.geometry_dir / f"{entry['cache_key']}.pt"
 
         if not cache_path.exists():
@@ -1156,12 +1654,15 @@ class ProteinWaterDataset(Dataset):
                 f"Run with preprocess=True to generate it."
             )
 
-        cached = torch.load(cache_path, weights_only=False)
+        cached = _load_torch_cache(cache_path, cache_load_mmap=self.cache_load_mmap)
 
         # load all data directly from cache (already includes mates if applicable)
         protein_pos = cached["protein_pos"]
         protein_x = cached["protein_x"]
         protein_res_idx = cached["protein_res_idx"]
+        is_ligand = cached["is_ligand"]
+        is_mate = cached["is_mate"]
+        emb_res_idx = cached["emb_res_idx"]
         pp_edge_index = cached["pp_edge_index"]
         pp_edge_unit_vectors = cached["pp_edge_unit_vectors"]
         pp_edge_rbf = cached["pp_edge_rbf"]
@@ -1169,9 +1670,6 @@ class ProteinWaterDataset(Dataset):
         num_protein_residues = cached["num_protein_residues"]
         water_pos = cached["water_pos"]
         water_x = cached["water_x"]
-
-        # extract ASU protein residue indices for embedding loading
-        asu_protein_res_idx = protein_res_idx[:num_asu_protein]
 
         data = HeteroData()
 
@@ -1183,6 +1681,8 @@ class ProteinWaterDataset(Dataset):
         data["protein"].x = protein_x
         data["protein"].pos = protein_pos
         data["protein"].residue_index = protein_res_idx
+        data["protein"].is_ligand = is_ligand
+        data["protein"].is_mate = is_mate
         data["protein"].num_nodes = protein_pos.size(0)
         data["protein"].num_residues = num_residues
         data["protein"].num_protein_residues = num_protein_residues
@@ -1190,9 +1690,9 @@ class ProteinWaterDataset(Dataset):
         self._annotate_data_with_embeddings(
             data=data,
             cache_key=entry["embedding_key"],  # use base key for embeddings
-            asu_protein_res_idx=asu_protein_res_idx,
             num_asu_protein=num_asu_protein,
             num_protein_residues=num_protein_residues,
+            emb_res_idx=emb_res_idx,
         )
 
         data["water"].x = water_x
@@ -1208,18 +1708,28 @@ class ProteinWaterDataset(Dataset):
         data.pdb_id = entry["embedding_key"]
         data.num_asu_protein_atoms = num_asu_protein
 
+        if self.sample_cache_size > 0:
+            self._sample_cache[sample_cache_key] = data
+            self._sample_cache.move_to_end(sample_cache_key)
+            while len(self._sample_cache) > self.sample_cache_size:
+                self._sample_cache.popitem(last=False)
+            return data.clone()
+
         return data
 
 
 def get_dataloader(
     pdb_list_file: str,
     processed_dir: str,
+    base_pdb_dir: str,
     batch_size: int = 8,
     shuffle: bool = True,
     num_workers: int = 8,
     pin_memory: bool = True,
     prefetch_factor: int = 4,
     persistent_workers: bool = True,
+    sampler: Sampler | None = None,
+    distributed: bool = False,
     **dataset_kwargs,
 ) -> DataLoader:
     """
@@ -1230,6 +1740,7 @@ def get_dataloader(
         processed_dir: Cache root directory. Uses:
                       - {processed_dir}/geometry for geometry caches
                       - {processed_dir}/{encoder_name} for embedding caches
+        base_pdb_dir: Base directory containing PDB subdirectories
         encoder_type: Encoder used downstream ('gvp', 'slae', or 'esm').
                       Embeddings are loaded only for this type.
         batch_size: Number of graphs per batch
@@ -1238,6 +1749,12 @@ def get_dataloader(
         pin_memory: Pin memory for faster CPU-GPU transfer (default True)
         prefetch_factor: Number of batches to prefetch per worker (default 4)
         persistent_workers: Keep workers alive between epochs (default True)
+        sampler: Optional sampler (e.g. DistributedSampler for DDP). When
+                 provided, `shuffle` is ignored (the sampler owns ordering).
+        distributed: If True (and no explicit sampler is given), build a
+                 DistributedSampler from the env-configured process group so each
+                 DDP rank sees a disjoint shard. Call
+                 `loader.sampler.set_epoch(epoch)` each epoch to reshuffle.
         **dataset_kwargs: Additional arguments passed to ProteinWaterDataset
                          (e.g., cutoff, include_mates, duplicate_single_sample)
 
@@ -1250,13 +1767,24 @@ def get_dataloader(
         - Then batch_size works normally
     """
     dataset = ProteinWaterDataset(
-        pdb_list_file=pdb_list_file, processed_dir=processed_dir, **dataset_kwargs
+        pdb_list_file=pdb_list_file,
+        processed_dir=processed_dir,
+        base_pdb_dir=base_pdb_dir,
+        **dataset_kwargs,
     )
+
+    if sampler is None and distributed:
+        # drop_last=False keeps every sample; the sampler pads the last shard by
+        # repeating a few, which double-counts them in epoch metrics. Accepted:
+        # dropping instead gives ranks uneven shards and stalls the all-reduce.
+        sampler = DistributedSampler(dataset, shuffle=shuffle, drop_last=False)
 
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=shuffle,
+        # A sampler is mutually exclusive with shuffle; let the sampler own ordering.
+        shuffle=shuffle if sampler is None else False,
+        sampler=sampler,
         num_workers=num_workers,
         pin_memory=pin_memory,
         prefetch_factor=prefetch_factor if num_workers > 0 else None,

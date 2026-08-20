@@ -27,9 +27,9 @@ import torch.nn as nn
 from loguru import logger
 from tqdm import tqdm
 
-from src.constants import NUM_RBF
+from src.constants import DEFAULT_EDGE_CUTOFF, NUM_RBF
 from src.dataset import ProteinWaterDataset
-from src.encoder_base import build_encoder
+from src.encoder_base import build_encoder, resolve_encoder_config
 from src.flow import FlowMatcher, FlowWaterGVP
 from src.utils import (
     compute_placement_metrics,
@@ -128,11 +128,6 @@ def parse_args():
         default=100,
         help="Number of integration steps (default: 100)",
     )
-    p.add_argument(
-        "--use_self_cond",
-        action="store_true",
-        help="Use self-conditioning during integration",
-    )
 
     p.add_argument(
         "--save_gifs",
@@ -167,8 +162,10 @@ def parse_args():
         "--water_ratio",
         type=float,
         default=None,
-        help="Sample num_residues * water_ratio waters instead of using ground truth count. "
-        "E.g., --water_ratio 0.5 samples 50 waters for a 100-residue protein.",
+        help="Sample num_residues * water_ratio waters instead of using ground truth "
+        "count. num_residues counts ASU and symmetry-mate residues, so with "
+        "--include_mates the same ratio yields ~1.7x more waters than without: two "
+        "runs share a sampling budget only if their mate settings match.",
     )
 
     p.add_argument(
@@ -214,11 +211,10 @@ def _extract_dataset_filter_config(config: dict) -> dict:
         "max_clash_fraction": config.get("max_clash_fraction", 0.05),
         "clash_dist": config.get("clash_dist", 2.0),
         "interface_dist_threshold": config.get("interface_dist_threshold", 4.0),
-        "min_water_residue_ratio": config.get("min_water_residue_ratio", 0.6),
-        "edia_dir": config.get("edia_dir"),
+        "min_water_residue_ratio": config.get("min_water_residue_ratio", 0.1),
         "max_protein_dist": config.get("max_protein_dist", 5.0),
         "min_edia": config.get("min_edia", 0.4),
-        "max_bfactor_zscore": config.get("max_bfactor_zscore", 1.5),
+        "max_bfactor_zscore": config.get("max_bfactor_zscore", 2.0),
         "filter_by_distance": config.get("filter_by_distance", True),
         "filter_by_edia": config.get("filter_by_edia", True),
         "filter_by_bfactor": config.get("filter_by_bfactor", True),
@@ -244,25 +240,7 @@ def build_model_from_config(config: dict, device: torch.device) -> nn.Module:
     Returns:
         FlowWaterGVP model instance
     """
-    # Use resolved_encoder_config if available (from training), otherwise build from config
-    resolved = config.get("resolved_encoder_config")
-    if resolved:
-        encoder_config = resolved.copy()
-    else:
-        encoder_type = config.get("encoder_type", "gvp")
-        encoder_config = {
-            "encoder_type": encoder_type,
-            "hidden_s": config.get("hidden_s") or 256,
-            "hidden_v": config.get("hidden_v") or 64,
-            "node_scalar_in": config.get("node_scalar_in") or 16,
-            "freeze_encoder": config.get("freeze_encoder", False),
-            "encoder_ckpt": config.get("encoder_ckpt"),
-        }
-
-        if encoder_type in {"slae", "esm"}:
-            encoder_config["embedding_key"] = "embedding"
-            encoder_config["embedding_dim"] = config.get("embedding_dim")
-
+    encoder_config = resolve_encoder_config(config)
     encoder = build_encoder(encoder_config, device)
 
     model = FlowWaterGVP(
@@ -273,8 +251,17 @@ def build_model_from_config(config: dict, device: torch.device) -> nn.Module:
         drop_rate=config.get("drop_rate", 0.1),
         n_message_gvps=config.get("n_message_gvps", 2),
         n_update_gvps=config.get("n_update_gvps", 2),
-        k_pw=config.get("k_pw") or 16,
-        k_ww=config.get("k_ww") or 16,
+        cutoff=config.get("cutoff", DEFAULT_EDGE_CUTOFF),
+        max_neighbors=config.get("max_neighbors", 256),
+        dynamic_edge_policy=config.get("dynamic_edge_policy", "radius"),
+        # "auto" depends on which prior the run uses, so pass that through.
+        sampling_strategy=config.get("sampling_strategy", "uniform_ball"),
+        knn_fallback_k=config.get("knn_fallback_k", 8),
+        disable_ww=config.get("disable_ww", False),
+        disable_wp=config.get("disable_wp", False),
+        k_pw=config.get("k_pw", 12),
+        k_ww=config.get("k_ww", 8),
+        k_wp=config.get("k_wp", 8),
     ).to(device)
 
     return model
@@ -310,7 +297,6 @@ def run_inference_batch(
     graphs: list,
     method: str,
     num_steps: int,
-    use_sc: bool,
     device: str,
     water_ratio: float | None = None,
 ) -> list:
@@ -322,7 +308,6 @@ def run_inference_batch(
         graphs: List of HeteroData graphs
         method: Integration method ('euler' or 'rk4')
         num_steps: Number of integration steps
-        use_sc: Whether to use self-conditioning
         device: Device to run on
         water_ratio: If provided, sample num_residues * water_ratio waters
 
@@ -336,7 +321,6 @@ def run_inference_batch(
         results = flow_matcher.rk4_integrate(
             graphs,
             num_steps=num_steps,
-            use_sc=use_sc,
             device=device,
             return_trajectory=True,
             water_ratio=water_ratio,
@@ -345,7 +329,6 @@ def run_inference_batch(
         results = flow_matcher.euler_integrate(
             graphs,
             num_steps=num_steps,
-            use_sc=use_sc,
             device=device,
             water_ratio=water_ratio,
         )
@@ -430,7 +413,7 @@ def main():
     # Create FlowMatcher
     flow_matcher = FlowMatcher(
         model=model,
-        p_self_cond=config.get("p_self_cond", 0.5),
+        sampling_strategy=config.get("sampling_strategy", "uniform_ball"),
     )
 
     # Load dataset
@@ -467,7 +450,6 @@ def main():
 
     # run inference
     logger.info(f"Running inference with method={args.method}, steps={args.num_steps}")
-    logger.info(f"Self-conditioning: {args.use_self_cond}")
     logger.info(f"Threshold for metrics: {args.threshold}Å")
     logger.info(f"Batch size: {args.batch_size}")
 
@@ -517,7 +499,6 @@ def main():
             batch_graphs,
             method=args.method,
             num_steps=args.num_steps,
-            use_sc=args.use_self_cond,
             device=args.device,
             water_ratio=args.water_ratio,
         )
@@ -618,7 +599,6 @@ def main():
                         "checkpoint": args.checkpoint,
                         "method": args.method,
                         "num_steps": args.num_steps,
-                        "use_self_cond": args.use_self_cond,
                         "threshold": args.threshold,
                         "include_mates": include_mates,
                         "water_ratio": args.water_ratio,

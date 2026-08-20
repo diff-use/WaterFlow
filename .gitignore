@@ -16,3 +16,6 @@ build/
 .venv/
 venv/
 notebooks/
+figures/
+
+STYLE_GUIDE.md

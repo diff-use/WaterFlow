@@ -4,7 +4,7 @@
 Tests for src/utils.py utility functions.
 
 Organized by category to match utils.py structure:
-1. Feature encoding (rbf, atom37_to_atoms)
+1. Feature encoding (rbf)
 2. Optimal transport (ot_coupling)
 3. Metrics (recall_precision, compute_rmsd, compute_placement_metrics)
 4. Visualization (plot_3d_frame, save_protein_plot, create_trajectory_gif)
@@ -12,30 +12,36 @@ Organized by category to match utils.py structure:
 All test cases created with assistance from Claude Code and refined.
 """
 
+import math
+from pathlib import Path
+
+import biotite.structure as bts
 import matplotlib
 import numpy as np
 import pytest
 import torch
+from biotite.structure import array, Atom
 
 
 matplotlib.use("Agg")
 
 
 from src.utils import (
-    ATOM37_FILL,
-    atom37_to_atoms,
+    auc_pr_and_best_f1,
     compute_edge_features,
     compute_edge_geometry,
     compute_placement_metrics,
     compute_rmsd,
     normalize_ins_code,
     ot_coupling,
+    parse_split_file,
     # Visualization
     plot_3d_frame,
     # Feature encoding
     rbf,
     # Metrics
     recall_precision,
+    sanitize_res_names_for_esm,
     save_protein_plot,
 )
 
@@ -132,80 +138,125 @@ class TestInsertionCodeNormalization:
 
 
 @pytest.mark.unit
-class TestAtom37ToAtoms:
-    """Tests for atom37 representation conversion."""
+class TestSanitizeResNamesForEsm:
+    """Tests for ESM residue-name sanitization and residue-count alignment.
 
-    def test_basic_conversion(self):
-        """Basic conversion from atom37 to flat atoms."""
-        # Create atom37 tensor with some present atoms
-        atom_tensor = torch.full((3, 37, 3), ATOM37_FILL)
-        # Place atoms at specific positions
-        atom_tensor[0, 0, :] = torch.tensor([1.0, 2.0, 3.0])  # CA of residue 0
-        atom_tensor[0, 1, :] = torch.tensor([1.5, 2.5, 3.5])  # C of residue 0
-        atom_tensor[1, 0, :] = torch.tensor([4.0, 5.0, 6.0])  # CA of residue 1
+    These guard the contract that src/dataset.py's residue counting (via
+    biotite.get_residue_starts on a sanitized array) stays in lockstep with
+    scripts/generate_esm_embeddings.py's residue keys, which are built with
+    THREE_TO_ONE/normalize_ins_code. A drift here desyncs protein_res_idx from
+    the cached ESM embeddings.
+    """
 
-        coords, residue_idx, atom_type = atom37_to_atoms(atom_tensor)
+    @staticmethod
+    def _make_atoms(residues):
+        """Build a single-atom-per-row AtomArray from (res_id, res_name, ins) tuples."""
+        return array(
+            [
+                Atom(
+                    [0.0, 0.0, 0.0],
+                    chain_id="A",
+                    res_id=res_id,
+                    res_name=res_name,
+                    ins_code=ins,
+                    atom_name="CA",
+                    element="C",
+                )
+                for (res_id, res_name, ins) in residues
+            ]
+        )
 
-        assert coords.shape == (3, 3)
-        assert residue_idx.shape == (3,)
-        assert atom_type.shape == (3,)
+    @staticmethod
+    def _esm_key_count(atoms):
+        """Replicate the ESM script's residue-key counting."""
+        keys = []
+        for i in range(len(atoms)):
+            key = (
+                atoms.chain_id[i],
+                atoms.res_id[i],
+                normalize_ins_code(atoms.ins_code[i]),
+            )
+            if key not in keys:
+                keys.append(key)
+        return len(keys)
 
-    def test_residue_indices_correct(self):
-        """Residue indices should match the original residue."""
-        atom_tensor = torch.full((2, 37, 3), ATOM37_FILL)
-        atom_tensor[0, 0, :] = torch.tensor([1.0, 0.0, 0.0])
-        atom_tensor[0, 1, :] = torch.tensor([2.0, 0.0, 0.0])
-        atom_tensor[1, 5, :] = torch.tensor([3.0, 0.0, 0.0])
+    def test_sanitize_canonicalizes_modified_and_unknown(self):
+        atoms = self._make_atoms([(1, "MSE", ""), (2, "ALA", ""), (3, "Q2K", "")])
+        sanitized = sanitize_res_names_for_esm(atoms)
+        # MSE -> MET (canonical parent), ALA unchanged, Q2K -> UNK (unknown)
+        assert list(sanitized.res_name) == ["MET", "ALA", "UNK"]
+        # original array must be untouched (helper returns a copy)
+        assert list(atoms.res_name) == ["MSE", "ALA", "Q2K"]
 
-        _, residue_idx, atom_type = atom37_to_atoms(atom_tensor)
+    def test_placeholder_ins_code_desync_is_fixed(self):
+        # Two atoms that share (chain, res_id, res_name) and differ only by a
+        # placeholder insertion code ('' vs '.'). ESM keys treat them as one
+        # residue; raw get_residue_starts would split them into two.
+        atoms = self._make_atoms([(5, "GLY", ""), (5, "GLY", ".")])
+        assert self._esm_key_count(atoms) == 1
 
-        assert residue_idx[0] == 0
-        assert residue_idx[1] == 0
-        assert residue_idx[2] == 1
+        sanitized = sanitize_res_names_for_esm(atoms)
+        for i in range(len(sanitized)):
+            sanitized.ins_code[i] = normalize_ins_code(sanitized.ins_code[i])
+        assert len(bts.get_residue_starts(sanitized)) == 1
 
-    def test_atom_types_correct(self):
-        """Atom types should match the slot index."""
-        atom_tensor = torch.full((1, 37, 3), ATOM37_FILL)
-        atom_tensor[0, 0, :] = torch.tensor([1.0, 0.0, 0.0])  # slot 0
-        atom_tensor[0, 5, :] = torch.tensor([2.0, 0.0, 0.0])  # slot 5
-        atom_tensor[0, 10, :] = torch.tensor([3.0, 0.0, 0.0])  # slot 10
+    def test_residue_count_matches_esm_keys(self):
+        # Mix of canonical, modified, unknown residues with placeholder and real
+        # insertion codes; the dataset count must equal the ESM key count.
+        atoms = self._make_atoms(
+            [
+                (1, "ALA", ""),
+                (1, "ALA", ""),
+                (2, "MSE", "."),
+                (3, "GLY", "?"),
+                (3, "GLY", "A"),  # real insertion code -> distinct residue
+                (4, "Q2K", ""),
+            ]
+        )
+        sanitized = sanitize_res_names_for_esm(atoms)
+        for i in range(len(sanitized)):
+            sanitized.ins_code[i] = normalize_ins_code(sanitized.ins_code[i])
+        assert len(bts.get_residue_starts(sanitized)) == self._esm_key_count(atoms)
 
-        _, _, atom_type = atom37_to_atoms(atom_tensor)
 
-        assert atom_type[0] == 0
-        assert atom_type[1] == 5
-        assert atom_type[2] == 10
+@pytest.mark.unit
+class TestSplitFileParsing:
+    """Tests for parse_split_file CIF/PDB structure-path resolution."""
 
-    def test_empty_residues(self):
-        """Empty residues should not contribute atoms."""
-        atom_tensor = torch.full((3, 37, 3), ATOM37_FILL)
-        # Only residue 0 has atoms
-        atom_tensor[0, 0, :] = torch.tensor([1.0, 0.0, 0.0])
+    @staticmethod
+    def _write_split(
+        tmp_path: Path, pdb_id: str, suffixes: list[str]
+    ) -> tuple[Path, Path]:
+        """Write a structure dir (with the given suffixes) and a one-line split file."""
+        base_dir = tmp_path / "pdbs"
+        structure_dir = base_dir / pdb_id
+        structure_dir.mkdir(parents=True, exist_ok=True)
+        for suffix in suffixes:
+            (structure_dir / f"{pdb_id}_final{suffix}").write_text("")
 
-        coords, residue_idx, _ = atom37_to_atoms(atom_tensor)
+        split_file = tmp_path / "split.txt"
+        split_file.write_text(f"{pdb_id}_final\n")
+        return split_file, base_dir
 
-        assert coords.shape == (1, 3)
-        assert residue_idx[0] == 0
+    def test_prefers_existing_cif(self, tmp_path):
+        split_file, base_dir = self._write_split(tmp_path, "abcd", [".cif", ".pdb"])
 
-    def test_all_empty(self):
-        """All-empty tensor should return empty outputs."""
-        atom_tensor = torch.full((5, 37, 3), ATOM37_FILL)
+        entries = parse_split_file(split_file, base_dir)
 
-        coords, residue_idx, atom_type = atom37_to_atoms(atom_tensor)
+        assert entries[0]["struc_path"] == base_dir / "abcd" / "abcd_final.cif"
 
-        assert coords.shape == (0, 3)
-        assert residue_idx.shape == (0,)
-        assert atom_type.shape == (0,)
+    def test_falls_back_to_pdb(self, tmp_path):
+        split_file, base_dir = self._write_split(tmp_path, "wxyz", [".pdb"])
 
-    def test_coordinates_preserved(self):
-        """Coordinates should be preserved exactly."""
-        atom_tensor = torch.full((1, 37, 3), ATOM37_FILL)
-        expected_coord = torch.tensor([1.234, 5.678, 9.012])
-        atom_tensor[0, 0, :] = expected_coord
+        entries = parse_split_file(split_file, base_dir)
 
-        coords, _, _ = atom37_to_atoms(atom_tensor)
+        assert entries[0]["struc_path"] == base_dir / "wxyz" / "wxyz_final.pdb"
 
-        assert torch.allclose(coords[0], expected_coord)
+    def test_raises_when_structure_missing(self, tmp_path):
+        split_file, base_dir = self._write_split(tmp_path, "missing", [])
+
+        with pytest.raises(FileNotFoundError):
+            parse_split_file(split_file, base_dir)
 
 
 @pytest.mark.unit
@@ -631,3 +682,79 @@ class TestSaveProteinPlot:
 #         )
 
 #         assert Path(gif_path).exists()
+
+
+@pytest.mark.unit
+class TestAucPrAndBestF1:
+    def test_perfect_ranking_scores_one(self):
+        ap, best_f1 = auc_pr_and_best_f1(
+            torch.tensor([0.9, 0.8, 0.2, 0.1]), torch.tensor([1.0, 1.0, 0.0, 0.0])
+        )
+
+        assert ap == pytest.approx(1.0)
+        assert best_f1 == pytest.approx(1.0)
+
+    def test_only_the_order_matters(self):
+        """A monotone rescale of the scores must not move the metrics."""
+        labels = torch.tensor([1.0, 0.0, 1.0, 0.0])
+        base = auc_pr_and_best_f1(torch.tensor([0.9, 0.7, 0.5, 0.3]), labels)
+        rescaled = auc_pr_and_best_f1(torch.tensor([90.0, 7.0, 0.05, 3e-3]), labels)
+
+        assert base == pytest.approx(rescaled)
+
+    def test_no_positives_is_nan(self):
+        ap, best_f1 = auc_pr_and_best_f1(
+            torch.tensor([0.9, 0.1]), torch.tensor([0.0, 0.0])
+        )
+
+        assert math.isnan(ap) and math.isnan(best_f1)
+
+    def test_empty_input_is_nan(self):
+        ap, best_f1 = auc_pr_and_best_f1(torch.empty(0), torch.empty(0))
+
+        assert math.isnan(ap) and math.isnan(best_f1)
+
+    def test_matches_hand_computed_curve(self):
+        # Ranked labels [1, 0, 1]: precision 1.0 at recall 0.5, 2/3 at recall 1.0;
+        # F1 over thresholds = 2/3, 1/2, 4/5 -> best 4/5.
+        ap, best_f1 = auc_pr_and_best_f1(
+            torch.tensor([0.9, 0.6, 0.3]), torch.tensor([1.0, 0.0, 1.0])
+        )
+
+        assert ap == pytest.approx(0.5 * 1.0 + 0.5 * (2 / 3))
+        assert best_f1 == pytest.approx(4 / 5)
+
+    def test_worse_ranking_scores_lower(self):
+        """The selection signal: best.pt is chosen on AUC-PR."""
+        scores = torch.tensor([0.9, 0.6, 0.3])
+        best, _ = auc_pr_and_best_f1(scores, torch.tensor([1.0, 1.0, 0.0]))
+        worst, _ = auc_pr_and_best_f1(scores, torch.tensor([0.0, 1.0, 1.0]))
+
+        assert best == pytest.approx(1.0)
+        assert worst < best
+
+    def test_matches_sklearn(self):
+        """Pin the torch implementation to sklearn: average_precision_score and
+        the best F1 over its PR curve. The in-loop metric stays torch-native;
+        this guards it against drift."""
+        from sklearn.metrics import average_precision_score, precision_recall_curve
+
+        torch.manual_seed(0)
+        for _ in range(20):
+            n = int(torch.randint(5, 50, (1,)).item())
+            scores = torch.rand(n)
+            labels = (torch.rand(n) < 0.4).float()
+            if labels.sum() == 0:  # our contract returns nan; sklearn is undefined
+                continue
+
+            ap, best_f1 = auc_pr_and_best_f1(scores, labels)
+
+            s = scores.numpy()
+            y = labels.numpy()
+            sk_ap = average_precision_score(y, s)
+            prec, rec, _ = precision_recall_curve(y, s)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                sk_f1 = np.nan_to_num(2 * prec * rec / (prec + rec)).max()
+
+            assert ap == pytest.approx(sk_ap, abs=1e-6)
+            assert best_f1 == pytest.approx(sk_f1, abs=1e-6)

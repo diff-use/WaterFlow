@@ -6,9 +6,18 @@ Constants for edge types and other shared values.
 # Node feature dimensions
 NODE_FEATURE_DIM = 16  # Default node scalar feature dimension
 
+# Native widths of the cached embeddings produced by scripts/generate_*_embeddings.py.
+ESM_EMBEDDING_DIM = 1536
+SLAE_EMBEDDING_DIM = 128
+
 # RBF (Radial Basis Function) parameters
 NUM_RBF = 16  # Number of RBF basis functions
 RBF_CUTOFF = 8.0  # Distance cutoff in Angstroms for RBF encoding
+
+# Default radius for dynamic edge construction. Kept equal to RBF_CUTOFF on
+# purpose: an edge longer than RBF_CUTOFF encodes to ~0 under the RBF, so
+# building edges beyond it would feed the message passing near-zero features.
+DEFAULT_EDGE_CUTOFF = RBF_CUTOFF
 
 # Edge type tuples: (src_node_type, edge_name, dst_node_type)
 EDGE_PP = ("protein", "pp", "protein")  # protein -> protein
@@ -18,6 +27,35 @@ EDGE_WP = ("water", "wp", "protein")  # water -> protein
 
 # all edge types used in the model (future support: het atoms)
 ALL_EDGE_TYPES = [EDGE_PW, EDGE_WW, EDGE_PP, EDGE_WP]
+
+
+def get_active_edge_types(
+    disable_ww: bool = False, disable_wp: bool = False
+) -> list[tuple[str, str, str]]:
+    """
+    Return the active edge types for a model configuration.
+
+    PW and PP are always active: PW carries protein context onto waters and PP
+    is read from the geometry cache. WW and WP are ablatable.
+
+    The returned order differs from ``ALL_EDGE_TYPES``. That is safe -- edge
+    types key ``HeteroConv``'s parameters by name (``convs.<protein___pw___water>``),
+    not by position, so ordering does not affect state-dict compatibility.
+
+    Args:
+        disable_ww: Drop water -> water edges.
+        disable_wp: Drop water -> protein edges.
+
+    Returns:
+        List of (src_type, relation, dst_type) tuples.
+    """
+    etypes = [EDGE_PW, EDGE_PP]
+    if not disable_ww:
+        etypes.append(EDGE_WW)
+    if not disable_wp:
+        etypes.append(EDGE_WP)
+    return etypes
+
 
 # Standard 3-letter to 1-letter amino acid mapping
 # Includes 20 canonical amino acids plus common non-standard residues

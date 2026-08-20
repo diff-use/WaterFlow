@@ -4,7 +4,7 @@ from __future__ import annotations
 
 """
 Utility functions organized by category:
-1. Feature encoding (rbf, atom37_to_atoms, normalize_ins_code)
+1. Feature encoding (rbf, normalize_ins_code)
 2. Optimal transport (ot_coupling)
 3. Metrics (recall_precision, compute_rmsd, compute_placement_metrics)
 4. Visualization (plot_3d_frame, create_trajectory_gif, save_protein_plot)
@@ -14,6 +14,7 @@ Utility functions organized by category:
 
 from collections.abc import Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -24,44 +25,13 @@ from e3nn.math import soft_one_hot_linspace
 from PIL import Image
 from scipy.optimize import linear_sum_assignment
 from torch import Tensor
-from torch_geometric.nn import knn
 from tqdm import tqdm
 
-from src.constants import NUM_RBF, RBF_CUTOFF
+from src.constants import NUM_RBF, ONE_TO_THREE, RBF_CUTOFF, THREE_TO_ONE
 
 
-def build_knn_edges(
-    src_pos: torch.Tensor,
-    dst_pos: torch.Tensor,
-    k: int,
-    batch_src: torch.Tensor | None = None,
-    batch_dst: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """
-    Build KNN edges from source to destination nodes.
-
-    Args:
-        src_pos: (N_src, 3) source node positions
-        dst_pos: (N_dst, 3) destination node positions
-        k: Number of nearest neighbors per source node
-        batch_src: (N_src,) batch indices for source nodes, or None if single graph
-        batch_dst: (N_dst,) batch indices for destination nodes, or None if single graph
-
-    Returns:
-        (2, E) edge index tensor with source indices in row 0, destination in row 1.
-        Self-edges are removed for homogeneous graphs (src_pos is dst_pos).
-    """
-    if src_pos.numel() == 0 or dst_pos.numel() == 0:
-        return torch.empty(2, 0, dtype=torch.long, device=src_pos.device)
-
-    idx = knn(x=dst_pos, y=src_pos, k=k, batch_x=batch_dst, batch_y=batch_src)
-
-    # remove self-edges if homogeneous
-    if src_pos.data_ptr() == dst_pos.data_ptr():
-        mask = idx[0] != idx[1]
-        idx = idx[:, mask]
-
-    return idx.unique(dim=1)
+if TYPE_CHECKING:
+    import biotite.structure as bts
 
 
 def setup_logging_for_tqdm(
@@ -117,9 +87,39 @@ def normalize_ins_code(value) -> str:
     return ins
 
 
+def sanitize_res_names_for_esm(atoms: bts.AtomArray) -> bts.AtomArray:
+    """
+    Return a copy of an AtomArray with residue names canonicalized to match the
+    ESM embedding pipeline.
+
+    Each residue name is mapped to its one-letter code and back
+    (``THREE_TO_ONE`` -> ``ONE_TO_THREE``), with anything unrecognized collapsed
+    to ``"UNK"``. This merges non-canonical names that share a residue position
+    (e.g. modified residues -> their canonical parent, unknowns -> ``UNK``) so
+    that biotite's ``get_residue_starts`` does not split them apart.
+
+    This is the single source of truth for residue-name sanitization shared by
+    ``scripts/generate_esm_embeddings.py`` (which feeds the sanitized structure
+    to ESM3) and ``src/dataset.py`` (which derives residue indices that must line
+    up with the stored ESM embeddings). Insertion codes are normalized
+    separately via :func:`normalize_ins_code`.
+
+    Args:
+        atoms: A biotite ``AtomArray`` with a ``res_name`` annotation.
+
+    Returns:
+        A copy of ``atoms`` with ``res_name`` canonicalized.
+    """
+    sanitized = atoms.copy()
+    for i in range(len(sanitized)):
+        aa1 = THREE_TO_ONE.get(sanitized.res_name[i], "X")
+        sanitized.res_name[i] = ONE_TO_THREE.get(aa1, "UNK")
+    return sanitized
+
+
 def parse_split_file(split_file: Path, base_pdb_dir: Path) -> list[dict]:
     """
-    Parse split file and construct entries with paths.
+    Parse split file and construct entries with resolved structure paths.
 
     Split file format: one entry per line, e.g., '6eey_final' or '6eey_final_A'.
     Lines must contain at least one underscore; the first part is the PDB ID.
@@ -129,42 +129,47 @@ def parse_split_file(split_file: Path, base_pdb_dir: Path) -> list[dict]:
         base_pdb_dir: Base directory containing PDB subdirectories
 
     Returns:
-        List of entry dicts with keys: pdb_id, pdb_path, cache_key
+        List of entry dicts with keys: pdb_id, struc_path, cache_key.
+        `struc_path` is the resolved structure file, preferring the `.cif`
+        and falling back to the `.pdb` sibling.
 
     Raises:
-        ValueError: If split_file contains only malformed lines
+        FileNotFoundError: If an entry has neither a `.cif` nor a `.pdb` file.
     """
     from loguru import logger
 
     entries = []
-    with open(split_file, "r") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-
-            parts = line.split("_")
-            if len(parts) < 2:
+    for line in open(split_file, "r"):
+        parts = line.strip().split("_")
+        if len(parts) < 2 or not parts[0]:
+            if line.strip():  # warn only on non-blank malformed lines
                 logger.warning(
-                    f"Skipping malformed line (expected format 'pdbid_*'): {line}"
+                    f"Skipping malformed line (expected 'pdbid_*'): {line.strip()}"
                 )
-                continue
+            continue
 
-            pdb_id = parts[0]
-            pdb_path = base_pdb_dir / pdb_id / f"{pdb_id}_final.pdb"
-
-            entries.append(
-                {
-                    "pdb_id": pdb_id,
-                    "pdb_path": pdb_path,
-                    "cache_key": line,
-                }
+        pdb_id = parts[0]
+        # Prefer the CIF, fall back to the PDB sibling, error if neither exists.
+        struc_dir = base_pdb_dir / pdb_id
+        for ext in (".cif", ".pdb"):
+            struc_path = struc_dir / f"{pdb_id}_final{ext}"
+            if struc_path.is_file():
+                break
+        else:
+            raise FileNotFoundError(
+                f"No structure file found for '{pdb_id}' in {struc_dir} "
+                f"(looked for {pdb_id}_final.cif and {pdb_id}_final.pdb)"
             )
 
+        entries.append(
+            {
+                "pdb_id": pdb_id,
+                "struc_path": struc_path,
+                "cache_key": "_".join(parts),
+            }
+        )
+
     return entries
-
-
-ATOM37_FILL = 1e-5
 
 
 def rbf(r: Tensor, num_gaussians: int = NUM_RBF, cutoff: float = RBF_CUTOFF) -> Tensor:
@@ -262,32 +267,6 @@ def compute_edge_features(
     distances, unit_vectors = compute_edge_geometry(pos, edge_index, pos_dst, clamp_min)
     rbf_features = rbf(distances, num_gaussians=num_gaussians, cutoff=cutoff)
     return unit_vectors, rbf_features
-
-
-def atom37_to_atoms(
-    atom_tensor: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Convert atom37 representation to flat atom list.
-
-    Args:
-        atom_tensor: (N_res, 37, 3) atom37 coordinates
-
-    Returns:
-        coords: (N_atoms, 3) coordinates of present atoms
-        residue_index: (N_atoms,) which residue each atom belongs to
-        atom_type: (N_atoms,) atom type index (0-36)
-    """
-    present = (atom_tensor != ATOM37_FILL).any(dim=-1)  # (N_res, 37)
-    nz = present.nonzero(as_tuple=False)  # (N_atoms, 2)
-    residue_index = nz[:, 0]
-    atom_type = nz[:, 1].long()
-
-    flat = atom_tensor.reshape(-1, 3)
-    flat_mask = present.reshape(-1)
-    coords = flat[flat_mask]
-
-    return coords, residue_index, atom_type
 
 
 @torch.no_grad()
@@ -681,3 +660,34 @@ def save_protein_plot(
     ax.set_title(f"Step {step}")
     plt.savefig(f"{save_dir}/step_{step}.png")
     plt.close()
+
+
+def auc_pr_and_best_f1(scores: Tensor, labels: Tensor) -> tuple[float, float]:
+    """
+    Average precision and best F1 from one sorted-score precision-recall sweep.
+
+    Scores a *ranking*, so it cannot be averaged from per-shard sums the way a
+    loss can -- pool the candidates first (see `all_gather_concat`), then compute.
+    best_f1 is the max of 2PR/(P+R) over every score threshold.
+
+    Args:
+        scores: (N,) candidate scores; higher ranks first.
+        labels: (N,) binary labels aligned with `scores`.
+
+    Returns:
+        (auc_pr, best_f1); both nan when there are no positives to rank.
+    """
+    if labels.numel() == 0 or labels.sum() == 0:
+        return float("nan"), float("nan")
+
+    lab = labels[torch.argsort(scores, descending=True)].double()
+    tp = torch.cumsum(lab, dim=0)
+    precision = tp / torch.arange(1, lab.numel() + 1, device=lab.device)
+    recall = tp / lab.sum()
+    rec_prev = torch.cat([recall.new_zeros(1), recall[:-1]])
+    ap = torch.sum((recall - rec_prev) * precision).item()
+
+    best_f1 = (
+        (2.0 * precision * recall / (precision + recall).clamp_min(1e-12)).max().item()
+    )
+    return ap, best_f1
