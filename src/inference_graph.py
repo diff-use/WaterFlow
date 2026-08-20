@@ -1,16 +1,16 @@
 # inference_graph.py
 
-"""Build the flow-model input graph from a raw PDB/CIF at inference time.
+"""Building the flow-model input graph from a raw PDB/CIF at inference time.
 
 The training ProteinWaterDataset couples graph construction to ground-truth
 water quality filtering and a training cache. Inference needs only the geometry
-half -- protein + symmetry mates + hets, no waters -- so this module imports the
-independent building blocks from src.dataset/src.utils and replicates just
-the inline assembly that isn't already a standalone function.
+half -- protein + symmetry mates + hets, no waters. This module imports the
+independent building blocks from src.dataset/src.utils and replicates the parts
+of pre-processing that aren't already a standalone function.
 
 The produced HeteroData matches what ProteinWaterDataset.__getitem__ yields
 (same node order, residue indexing, PP edges and embedding attachment) but with
-empty water nodes: the flow model samples candidate waters itself.
+no water nodes. The flow model samples candidate waters itself.
 """
 
 from __future__ import annotations
@@ -83,6 +83,8 @@ def build_inference_graph(
     struc_path = str(struc_path)
     if cache_key is None:
         cache_key = Path(struc_path).stem
+    if encoder_type not in ("gvp", "slae", "esm"):
+        raise ValueError(f"encoder_type={encoder_type!r} must be one of gvp, slae, esm")
     if encoder_type in ("slae", "esm") and processed_dir is None:
         raise ValueError(
             f"encoder_type={encoder_type!r} needs precomputed embeddings; pass "

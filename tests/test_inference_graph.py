@@ -51,20 +51,6 @@ class TestInferenceGraphContract:
         assert data["water"].pos.shape == (0, 3)
         assert data["protein"].pos.mean(dim=0).abs().max().item() < 1e-4  # centered
 
-    def test_protein_node_contract(self, pdb_6eey):
-        data = build_inference_graph(pdb_6eey, encoder_type="gvp")
-        p = data["protein"]
-        assert p.x.shape == (p.num_nodes, 16)
-        assert p.pos.shape == (p.num_nodes, 3)
-        assert p.residue_index.shape == (p.num_nodes,)
-        assert p.is_mate.shape == (p.num_nodes,) and not p.is_mate.any()
-        assert p.is_ligand.shape == (p.num_nodes,)
-        assert data.num_asu_protein_atoms == p.num_nodes
-        assert data.pdb_id == "6eey_final"
-        # PP edges present with 16-dim RBF features
-        assert data[EDGE_PP].edge_index.shape[0] == 2
-        assert data[EDGE_PP].edge_rbf.shape[1] == 16
-
     def test_cif_input_matches_pdb(self, pdb_6eey, cif_6eey):
         from_pdb = build_inference_graph(pdb_6eey, encoder_type="gvp")
         from_cif = build_inference_graph(cif_6eey, encoder_type="gvp")
@@ -81,12 +67,9 @@ class TestInferenceGraphContract:
         with pytest.raises(ValueError, match="processed_dir"):
             build_inference_graph(pdb_6eey, encoder_type="esm", processed_dir=None)
 
-    def test_ligands_appended_after_protein(self, pdb_4h0b):
-        data = build_inference_graph(pdb_4h0b, encoder_type="gvp", include_ligands=True)
-        p = data["protein"]
-        assert p.is_ligand.any()
-        # ligands are the trailing block: every ligand index is past the protein
-        assert int(p.is_ligand.nonzero().min()) == int((~p.is_ligand).sum())
+    def test_unknown_encoder_rejected(self, pdb_6eey):
+        with pytest.raises(ValueError, match="must be one of"):
+            build_inference_graph(pdb_6eey, encoder_type="onehot")
 
     def test_include_ligands_false_drops_them(self, pdb_4h0b):
         data = build_inference_graph(
@@ -113,10 +96,24 @@ class TestEquivalenceWithDataset:
     sees exactly what training preprocessing would have built."""
 
     @pytest.mark.parametrize("fixture", ["pdb_6eey", "pdb_4h0b"])
-    def test_protein_graph_matches_dataset_no_mates(self, fixture, tmp_path, request):
+    @pytest.mark.parametrize("include_mates", [False, True])
+    @pytest.mark.parametrize("include_ligands", [True, False])
+    def test_protein_graph_matches_dataset(
+        self, fixture, include_mates, include_ligands, tmp_path, request
+    ):
         path = request.getfixturevalue(fixture)
-        inf = build_inference_graph(path, encoder_type="gvp", include_mates=False)
-        ds = _dataset_graph(path, tmp_path, include_mates=False)
+        inf = build_inference_graph(
+            path,
+            encoder_type="gvp",
+            include_mates=include_mates,
+            include_ligands=include_ligands,
+        )
+        ds = _dataset_graph(
+            path,
+            tmp_path,
+            include_mates=include_mates,
+            include_ligands=include_ligands,
+        )
 
         assert inf["protein"].num_nodes == ds["protein"].num_nodes
         assert torch.allclose(inf["protein"].pos, ds["protein"].pos, atol=1e-4)
@@ -126,8 +123,13 @@ class TestEquivalenceWithDataset:
         assert torch.equal(inf["protein"].is_mate, ds["protein"].is_mate)
         assert inf.num_asu_protein_atoms == ds.num_asu_protein_atoms
         assert inf["protein"].num_protein_residues == ds["protein"].num_protein_residues
-        # PP topology matches (same deterministic radius graph)
+        assert inf["protein"].num_residues == ds["protein"].num_residues
+        # PP topology and edge features match (same deterministic radius graph)
         assert torch.equal(inf[EDGE_PP].edge_index, ds[EDGE_PP].edge_index)
+        assert torch.allclose(
+            inf[EDGE_PP].edge_unit_vectors, ds[EDGE_PP].edge_unit_vectors, atol=1e-4
+        )
+        assert torch.allclose(inf[EDGE_PP].edge_rbf, ds[EDGE_PP].edge_rbf, atol=1e-4)
 
 
 @pytest.mark.unit
