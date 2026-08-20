@@ -1395,6 +1395,21 @@ def main():
         best_sel_score = float("-inf") if best_sel_score is None else best_sel_score
         logger.info(f"Resumed from {ckpt_path} at epoch {start_epoch}.")
 
+    # A generative selection metric reads the sampling eval, so best.pt can only
+    # update on eval epochs. If none fall in the remaining schedule, fall back to
+    # val_loss so best.pt still gets written.
+    selection_metric = args.selection_metric
+    remaining_epochs = range(start_epoch + 1, args.epochs + 1)
+    if selection_metric != "val_loss" and not any(
+        e % args.eval_every == 0 for e in remaining_epochs
+    ):
+        logger.warning(
+            f"--selection_metric {selection_metric} needs an eval epoch, but none "
+            f"fall in epochs {start_epoch + 1}..{args.epochs} at --eval_every "
+            f"{args.eval_every}; selecting best.pt on val_loss instead."
+        )
+        selection_metric = "val_loss"
+
     for epoch in range(start_epoch + 1, args.epochs + 1):
         # Without this every epoch replays the same shard order on every rank.
         if ddp_is_active():
@@ -1471,19 +1486,19 @@ def main():
             best_val_loss = val_metrics["val/loss"]
 
         improved = False
-        if args.selection_metric == "val_loss":
+        if selection_metric == "val_loss":
             sel = -val_metrics["val/loss"]
             if sel > best_sel_score:
                 best_sel_score = sel
                 improved = True
         elif eval_metrics:  # generative metric, defined only on eval epochs
-            if args.selection_metric == "blend":
+            if selection_metric == "blend":
                 raw = (
                     0.85 * eval_metrics["eval/avg_f1"]
                     + 0.15 * eval_metrics["eval/avg_auc_pr"]
                 )
             else:
-                raw = eval_metrics[f"eval/avg_{args.selection_metric}"]
+                raw = eval_metrics[f"eval/avg_{selection_metric}"]
             sel_history.append(raw)
             sel = sum(sel_history[-3:]) / len(sel_history[-3:])  # rolling-3 smoothed
             if sel > best_sel_score:
