@@ -35,9 +35,8 @@ from torch_geometric.data import Batch
 from tqdm import tqdm
 
 from scripts.inference import _extract_dataset_filter_config
-from src.confidence import ConfidenceGVP
+from src.confidence import build_confidence_model, ConfidenceGVP
 from src.confidence_dataset import ConfidenceDataset
-from src.constants import NUM_RBF
 from src.dataset import ProteinWaterDataset
 from src.distributed import (
     all_gather_concat,
@@ -48,7 +47,6 @@ from src.distributed import (
     setup_distributed,
     teardown_distributed,
 )
-from src.encoder_base import build_encoder, resolve_encoder_config
 from src.utils import auc_pr_and_best_f1, setup_logging_for_tqdm
 
 
@@ -297,39 +295,6 @@ def _set_model_mode(
     if training and freeze_backbone_enabled:
         for name in BACKBONE_MODULE_NAMES:
             getattr(model, name).eval()
-
-
-def build_confidence_model(config: dict, device: torch.device) -> ConfidenceGVP:
-    """
-    Instantiate `ConfidenceGVP` from the flow run's hyperparameters.
-
-    Mirroring the flow's encoder and hidden dims is what lets the head
-    warm-start from a checkpoint that shares the same backbone shape.
-
-    Args:
-        config: The flow run's recorded config.
-        device: Device to build on.
-
-    Returns:
-        The model, on `device`.
-    """
-    encoder = build_encoder(resolve_encoder_config(config), device)
-    return ConfidenceGVP(
-        encoder=encoder,
-        hidden_dims=(config.get("hidden_s") or 256, config.get("hidden_v") or 64),
-        edge_scalar_dim=config.get("edge_scalar_dim") or NUM_RBF,
-        layers=config.get("flow_layers") or 3,
-        drop_rate=config.get("drop_rate", 0.1),
-        n_message_gvps=config.get("n_message_gvps", 2),
-        n_update_gvps=config.get("n_update_gvps", 2),
-        cutoff=config.get("cutoff", 8.0),
-        max_neighbors=config.get("max_neighbors", 256),
-        knn_fallback_k=config.get("knn_fallback_k", 8),
-        # Fixed, not from flow config: candidates are scored with no cached PW
-        # edges and can land where the radius query leaves them isolated, so the
-        # knn fallback is always needed (see ConfidenceGVP docstring).
-        dynamic_edge_policy="knn_if_isolated",
-    ).to(device)
 
 
 def _warm_start_from(
