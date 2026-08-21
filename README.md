@@ -1,20 +1,22 @@
-# WaterFlow
+# WaterFlow: Prediction of Ordered Water Molecule Positions on Protein Structures 
 
-WaterFlow places ordered water molecules on protein surfaces. It has two trained
-components: a **flow generator** that proposes candidate waters conditioned on the
-protein structure, and a **confidence scorer** that ranks each candidate so a final
-set can be selected.
+<p align="center">
+  <img src="figures/graphical_abstract.png" alt="WaterFlow pipeline: prior → flow → candidates → clustering → kept waters" width="900">
+</p>
 
-The two pipelines below are documented separately.
+WaterFlow has two trained components: a **flow-matching generator** that proposes candidate waters conditioned on the
+protein structure, and a **confidence scorer** that ranks and scores each candidate to obtain final water coordinates.
 
-**Prediction** ([Predicting waters](#predicting-waters)) runs the trained
-components on a structure: the flow generator samples candidate waters, the
-confidence scorer ranks them, and the ranked candidates are clustered and culled to
-the final set written back into the structure.
+The documentation is split into two main components:
+
+**Prediction** ([Predicting waters](#predicting-waters)) runs inference with the trained
+models on a structure: the flow-matching generator samples candidate waters, the
+confidence model scores them, and the scored candidates are clustered and thresholded to
+the final set written back into the input structure.
 
 **Training** ([Training your own models](#training-your-own-models)) produces the
-two components in four steps: precompute embeddings, train the flow generator,
-cache candidate waters sampled from it, then train the confidence scorer on those
+two models in four steps: precomputing embeddings, training the flow generator,
+caching candidate waters sampled from it, then training the confidence model on those
 candidates.
 
 ## Table of Contents
@@ -61,6 +63,10 @@ the wheel URL to your toolkit.
 strips any existing waters, builds the graph from protein + hets, samples
 candidates with the flow model, scores them with the confidence model, selects the
 final set, and writes the input structure with the predicted waters added.
+
+<p align="center">
+  <img src="figures/inference_sweep.gif" alt="Flow ODE integration sweeping candidate waters from the prior to final kept waters" width="900">
+</p>
 
 It needs a trained **flow run** and **confidence run** — pass their run directories
 (each holds `config.json` and `checkpoints/`). See
