@@ -130,6 +130,7 @@ def sample_waters_uniform_ball(
     cutoff: float = DEFAULT_EDGE_CUTOFF,
     device: torch.device | None = None,
     anchor_mask: Tensor | None = None,
+    generator: torch.Generator | None = None,
 ) -> Tensor:
     """
     Sample water positions uniformly inside balls of radius *cutoff* centred
@@ -218,16 +219,21 @@ def sample_waters_uniform_ball(
 
     # pick a random protein atom per water (uniform with replacement)
     graph_offsets = offsets[batch_w]
-    local_idx = (torch.rand(total_waters, device=device) * graph_sizes.float()).long()
+    local_idx = (
+        torch.rand(total_waters, device=device, generator=generator)
+        * graph_sizes.float()
+    ).long()
     anchors = protein_pos[graph_offsets + local_idx]
 
     # uniform direction on the unit sphere
-    direction = torch.randn(total_waters, 3, device=device, dtype=protein_pos.dtype)
+    direction = torch.randn(
+        total_waters, 3, device=device, dtype=protein_pos.dtype, generator=generator
+    )
     direction = direction / direction.norm(dim=-1, keepdim=True).clamp(min=1e-12)
 
     # uniform radius inside the ball: r = R * U^(1/3)
     r = cutoff * torch.rand(
-        total_waters, 1, device=device, dtype=protein_pos.dtype
+        total_waters, 1, device=device, dtype=protein_pos.dtype, generator=generator
     ).pow(1.0 / 3.0)
 
     return anchors + r * direction
@@ -238,6 +244,7 @@ def sample_waters_scaled_gaussian(
     sigma_per_graph: Tensor,
     device: torch.device,
     dtype: torch.dtype = torch.float32,
+    generator: torch.Generator | None = None,
 ) -> Tensor:
     """
     Sample water positions from N(0, sigma^2 * I) with no rejection.
@@ -261,7 +268,10 @@ def sample_waters_scaled_gaussian(
 
     sigma = sigma_per_graph.to(device=device, dtype=dtype)[batch_w].unsqueeze(-1)
 
-    return torch.randn(total_waters, 3, device=device, dtype=dtype) * sigma
+    return (
+        torch.randn(total_waters, 3, device=device, dtype=dtype, generator=generator)
+        * sigma
+    )
 
 
 def build_dynamic_edges(
@@ -978,9 +988,11 @@ class FlowMatcher:
         batch_data: HeteroData | Batch,
         batch_w: Tensor,
         device: torch.device,
+        generator: torch.Generator | None = None,
     ) -> Tensor:
         """Dispatch to the configured sampling strategy, sampling one water per
-        entry of batch_w and returning them in that order."""
+        entry of batch_w and returning them in that order. `generator`, if given,
+        replaces the global torch RNG."""
         # Targets are ASU-only, so mate atoms disperse the prior (uniform_ball) and
         # inflate its scale (scaled_gaussian). No mates -> no mask -> unchanged.
         asu_mask = self._asu_mask(batch_data)
@@ -993,6 +1005,7 @@ class FlowMatcher:
                 cutoff=self.graph_cutoff,
                 device=device,
                 anchor_mask=asu_mask,
+                generator=generator,
             )
         # scaled_gaussian
         sigma_per_graph = self.compute_sigma_per_graph(
@@ -1003,6 +1016,7 @@ class FlowMatcher:
             sigma_per_graph=sigma_per_graph,
             device=device,
             dtype=batch_data["protein"].pos.dtype,
+            generator=generator,
         )
 
     @staticmethod
@@ -1239,6 +1253,7 @@ class FlowMatcher:
         g: Batch,
         water_ratio: float,
         device: torch.device,
+        generator: torch.Generator | None = None,
     ) -> tuple[Tensor, Tensor]:
         """
         Create water node positions and batch indices based on protein residue count.
@@ -1258,7 +1273,7 @@ class FlowMatcher:
         num_waters = (num_residues.float() * water_ratio).long().clamp(min=1)
 
         batch_w = _batch_from_counts(num_waters, device)
-        x = self._sample_waters(g, batch_w, device)
+        x = self._sample_waters(g, batch_w, device, generator)
         total_waters = batch_w.size(0)
 
         # create water features (oxygen one-hot; +1 for the trailing 'other' bucket)
@@ -1280,6 +1295,7 @@ class FlowMatcher:
         g: Batch,
         water_count: int,
         device: torch.device,
+        generator: torch.Generator | None = None,
     ) -> tuple[Tensor, Tensor]:
         """
         Create water node positions and batch indices using a fixed count per protein.
@@ -1306,7 +1322,7 @@ class FlowMatcher:
         )
 
         batch_w = _batch_from_counts(num_waters, device)
-        x = self._sample_waters(g, batch_w, device)
+        x = self._sample_waters(g, batch_w, device, generator)
         total_waters = batch_w.size(0)
 
         # create water features (oxygen one-hot; +1 for the trailing 'other' bucket)
@@ -1329,6 +1345,7 @@ class FlowMatcher:
         water_ratio: float | None,
         water_count: int | None,
         device: torch.device,
+        generator: torch.Generator | None = None,
     ) -> tuple[Tensor, Tensor]:
         """
         Create the initial water nodes to integrate from.
@@ -1341,6 +1358,7 @@ class FlowMatcher:
                         Takes precedence over water_ratio. When neither is given,
                         the ground-truth water count is resampled from the prior.
             device: Device to create tensors on
+            generator: RNG for the prior noise; None uses the global torch RNG.
 
         Returns:
             x: (N_water_total, 3) initial noise positions
@@ -1348,17 +1366,25 @@ class FlowMatcher:
         """
         if water_count is not None:
             # sample fixed number of waters per protein
-            return self._setup_water_nodes_from_count(g, water_count, device)
+            return self._setup_water_nodes_from_count(g, water_count, device, generator)
 
         if water_ratio is not None:
             # sample waters based on residue count
-            return self._setup_water_nodes_from_ratio(g, water_ratio, device)
+            return self._setup_water_nodes_from_ratio(g, water_ratio, device, generator)
 
         # resample the existing water nodes in place; their batch is unchanged
         batch_w = g["water"].batch
-        x = self._sample_waters(g, batch_w, device)
+        x = self._sample_waters(g, batch_w, device, generator)
 
         return x, batch_w
+
+    @staticmethod
+    def _split_waters(
+        x: Tensor, batch_w_cpu: Tensor, num_graphs: int
+    ) -> list[np.ndarray]:
+        """Per-graph copies of water positions x, split by batch index."""
+        x_cpu = x.detach().cpu()
+        return [x_cpu[batch_w_cpu == i].numpy().copy() for i in range(num_graphs)]
 
     @torch.inference_mode()
     def euler_integrate(
@@ -1366,8 +1392,10 @@ class FlowMatcher:
         graphs: HeteroData | list[HeteroData],
         num_steps: int = 100,
         device: str | torch.device = "cuda",
+        return_trajectory: bool = False,
         water_ratio: float | None = None,
         water_count: int | None = None,
+        generator: torch.Generator | None = None,
     ) -> list[dict[str, np.ndarray]]:
         """
         Euler integration from noise to final positions.
@@ -1376,12 +1404,15 @@ class FlowMatcher:
             graphs: Single HeteroData or list of HeteroData graphs to process
             num_steps: Number of integration steps
             device: Device to run on
+            return_trajectory: Whether to also return the per-step trajectory
             water_ratio: If provided, sample num_residues * water_ratio waters
                         instead of using ground truth water count. Ignored when
                         water_count is also given.
             water_count: If provided, sample exactly this many waters per protein.
                         Takes precedence over water_ratio. When neither is given,
                         the ground-truth water count is resampled from the prior.
+            generator: RNG for the prior noise, the integration's only randomness.
+                        None uses the global torch RNG.
 
         Returns:
             List of dicts, one per input graph, each with keys:
@@ -1390,6 +1421,7 @@ class FlowMatcher:
                         water_ratio/water_count is set its count may differ from water_pred)
                 'water_pred': (Nw, 3) final prediction
                 'pdb_id': PDB identifier
+                'trajectory': list of (Nw, 3) at each step (if return_trajectory=True)
         """
         self.model.eval()
         device = torch.device(device if torch.cuda.is_available() else "cpu")
@@ -1411,10 +1443,18 @@ class FlowMatcher:
         x1_true = g["water"].pos.clone()
         batch_w_true = g["water"].batch.clone()
 
-        x, batch_w = self._setup_water_nodes(g, water_ratio, water_count, device)
+        x, batch_w = self._setup_water_nodes(
+            g, water_ratio, water_count, device, generator
+        )
 
         ts = torch.linspace(0, 1, num_steps, device=device)
         dt = ts[1] - ts[0]
+
+        batch_w_cpu = batch_w.cpu()
+        if return_trajectory:
+            trajectories = [
+                [pos] for pos in self._split_waters(x, batch_w_cpu, num_graphs)
+            ]
 
         for i in range(num_steps - 1):
             t_scalar = ts[i]
@@ -1424,11 +1464,16 @@ class FlowMatcher:
             v = self.model(g, t)
             x = x + dt * v
 
+            if return_trajectory:
+                for traj, pos in zip(
+                    trajectories, self._split_waters(x, batch_w_cpu, num_graphs)
+                ):
+                    traj.append(pos)
+
         # split results by graph
         x_cpu = x.detach().cpu()
         protein_pos_cpu = g["protein"].pos.detach().cpu()
         x1_true_cpu = x1_true.detach().cpu()
-        batch_w_cpu = batch_w.cpu()
         batch_w_true_cpu = batch_w_true.cpu()
         batch_p_cpu = batch_p.cpu()
 
@@ -1444,6 +1489,8 @@ class FlowMatcher:
                 "water_pred": x_cpu[mask_w].numpy(),
                 "pdb_id": pdb_ids[i],
             }
+            if return_trajectory:
+                result["trajectory"] = trajectories[i]
             results.append(result)
 
         return results
@@ -1457,6 +1504,7 @@ class FlowMatcher:
         return_trajectory: bool = True,
         water_ratio: float | None = None,
         water_count: int | None = None,
+        generator: torch.Generator | None = None,
     ) -> list[dict[str, np.ndarray]]:
         """
         RK4 integration from noise to final positions.
@@ -1472,6 +1520,8 @@ class FlowMatcher:
             water_count: If provided, sample exactly this many waters per protein.
                         Takes precedence over water_ratio. When neither is given,
                         the ground-truth water count is resampled from the prior.
+            generator: RNG for the prior noise, the integration's only randomness.
+                        None uses the global torch RNG.
 
         Returns:
             List of dicts, one per input graph, each with keys:
@@ -1501,19 +1551,18 @@ class FlowMatcher:
         x1_true = g["water"].pos.clone()
         batch_w_true = g["water"].batch.clone()
 
-        x, batch_w = self._setup_water_nodes(g, water_ratio, water_count, device)
+        x, batch_w = self._setup_water_nodes(
+            g, water_ratio, water_count, device, generator
+        )
 
         ts = torch.linspace(0, 1, num_steps, device=device)
         dt = ts[1] - ts[0]
 
+        batch_w_cpu = batch_w.cpu()
         if return_trajectory:
-            # store trajectory per-graph
-            trajectories = [[] for _ in range(num_graphs)]
-            x_cpu = x.detach().cpu()
-            batch_w_cpu = batch_w.cpu()
-            for i in range(num_graphs):
-                mask = batch_w_cpu == i
-                trajectories[i].append(x_cpu[mask].numpy().copy())
+            trajectories = [
+                [pos] for pos in self._split_waters(x, batch_w_cpu, num_graphs)
+            ]
 
         # rK4 integration
         for step in tqdm(range(num_steps - 1), desc="RK4 integration", leave=False):
@@ -1532,16 +1581,15 @@ class FlowMatcher:
             x = x + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
 
             if return_trajectory:
-                x_cpu = x.detach().cpu()
-                for i in range(num_graphs):
-                    mask = batch_w_cpu == i
-                    trajectories[i].append(x_cpu[mask].numpy().copy())
+                for traj, pos in zip(
+                    trajectories, self._split_waters(x, batch_w_cpu, num_graphs)
+                ):
+                    traj.append(pos)
 
         # split results by graph
         x_cpu = x.detach().cpu()
         protein_pos_cpu = g["protein"].pos.detach().cpu()
         x1_true_cpu = x1_true.detach().cpu()
-        batch_w_cpu = batch_w.cpu()
         batch_w_true_cpu = batch_w_true.cpu()
         batch_p_cpu = batch_p.cpu()
 
