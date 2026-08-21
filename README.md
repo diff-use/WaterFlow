@@ -77,7 +77,7 @@ produce them.
 **Data processing.** Prediction does not use the training data pipeline. For each
 input structure it builds an *inference graph* directly from the raw PDB/CIF:
 
-- **Waters are culled.** They are what the model predicts, so any waters in the file
+- **Waters are removed.** They are what the model predicts, so any waters in the file
   are dropped — the graph starts with no water nodes.
 - Protein and hets (ligands, ions, cofactors, nucleic acids) are kept, coordinates
   are centered on the ASU protein centroid, and symmetry mates are added when the
@@ -124,7 +124,7 @@ extension.
 This is the main knob. Both modes sample `--water_ratio * num_residues` candidates,
 score each, and cluster overlapping candidates into van der Waals centroids (each
 centroid keeps its cluster's highest confidence). They differ in how the final set
-is culled:
+is chosen:
 
 | `--selection` | Rule | Use when |
 |---|---|---|
