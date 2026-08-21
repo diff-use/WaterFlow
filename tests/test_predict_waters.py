@@ -5,7 +5,6 @@ collection, frame recovery). The integration test runs the whole pipeline with
 tiny untrained gvp models, so it needs no trained checkpoints or embeddings.
 """
 
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,52 +14,36 @@ import torch
 
 from scripts.predict_waters import (
     _collect_struc_paths,
-    _kept_atoms_and_center,
-    build_confidence_model,
+    _input_frame,
     load_state_dict_lenient,
     parse_args,
     predict_structures,
     select_waters,
 )
-from src.confidence import ConfidenceGVP
+from src.confidence import build_confidence_model, ConfidenceGVP
+from src.dataset import parse_asu_with_biotite
 from src.flow import FlowMatcher, FlowWaterGVP
+from src.structure_io import read_space_group
 
 
 @pytest.mark.unit
 class TestSelectWaters:
-    def test_confidence_threshold_filters_before_clustering(self):
-        # far-apart candidates; the 0.1 one is below threshold and must not survive
-        pos = torch.tensor([[0.0, 0, 0], [10.0, 0, 0]])
-        conf = torch.tensor([0.9, 0.1])
-        sel_pos, sel_conf = select_waters(pos, conf, mode="confidence", threshold=0.5)
-        assert sel_pos.shape[0] == 1
-        assert torch.allclose(sel_pos[0], pos[0])
-
-    def test_no_threshold_keeps_all_clusters(self):
-        pos = torch.tensor([[0.0, 0, 0], [10.0, 0, 0]])
-        conf = torch.tensor([0.9, 0.8])
-        sel_pos, _ = select_waters(pos, conf, mode="confidence", threshold=None)
-        assert sel_pos.shape[0] == 2
-
     def test_unknown_mode_raises(self):
         with pytest.raises(ValueError, match="mode"):
             select_waters(torch.zeros(1, 3), torch.ones(1), mode="bogus")
 
     def test_density_keeps_top_n_by_confidence(self):
-        # Four far-apart candidates -> four singleton clusters, so the kept
-        # count is set by the density formula alone, not by clustering merges.
+        # Four far-apart candidates: four singleton clusters, so the kept count
+        # comes from the density formula alone. floor(0.6 * 5) = 3.
         pos = torch.tensor([[0.0, 0, 0], [10.0, 0, 0], [20.0, 0, 0], [30.0, 0, 0]])
         conf = torch.tensor([0.2, 0.9, 0.5, 0.7])
-        # floor(0.6 * 5) = 3 kept, highest confidence first
         sel_pos, sel_conf = select_waters(
             pos, conf, mode="density", density_ratio=0.6, num_asu_residues=5
         )
         assert sel_pos.shape[0] == 3
         assert torch.allclose(sel_conf, torch.tensor([0.9, 0.7, 0.5]))
 
-    def test_density_applies_no_cutoff(self):
-        # A near-zero confidence candidate still survives in density mode: it is
-        # kept because it lands within the top-N count, not filtered by a cutoff.
+    def test_density_has_no_cutoff(self):
         pos = torch.tensor([[0.0, 0, 0], [10.0, 0, 0]])
         conf = torch.tensor([0.9, 0.01])
         sel_pos, _ = select_waters(
@@ -75,40 +58,33 @@ class TestSelectWaters:
 
 @pytest.mark.unit
 class TestSelectionCLI:
-    """--selection wiring: each mode owns one knob and rejects the other's."""
+    """Each selection mode owns one knob and rejects the other's."""
 
     @staticmethod
-    def _argv(*extra: str) -> list[str]:
-        return [
-            "predict_waters",
-            "--flow_run_dir", "f",
-            "--confidence_run_dir", "c",
-            "--struc", "s.pdb",
-            "--out_dir", "o",
-            *extra,
-        ]
+    def _parse(*extra: str):
+        base = ["--flow_run_dir", "f", "--confidence_run_dir", "c"]
+        base += ["--struc", "s.pdb", "--out_dir", "o"]
+        return parse_args(base + list(extra))
 
-    def test_confidence_fills_default_threshold(self, monkeypatch):
-        monkeypatch.setattr(sys, "argv", self._argv("--selection", "confidence"))
-        args = parse_args()
-        assert args.threshold == 0.5 and args.density_ratio is None
+    def test_confidence_default_threshold(self):
+        args = self._parse()
+        assert args.confidence_threshold == 0.5 and args.density_ratio is None
 
-    def test_density_fills_default_ratio(self, monkeypatch):
-        monkeypatch.setattr(sys, "argv", self._argv("--selection", "density"))
-        args = parse_args()
-        assert args.density_ratio == 0.6 and args.threshold is None
+    def test_density_default_ratio(self):
+        args = self._parse("--selection", "density")
+        assert args.density_ratio == 0.6 and args.confidence_threshold is None
 
-    def test_confidence_rejects_density_ratio(self, monkeypatch):
-        argv = self._argv("--selection", "confidence", "--density_ratio", "0.6")
-        monkeypatch.setattr(sys, "argv", argv)
+    def test_confidence_rejects_density_ratio(self):
         with pytest.raises(SystemExit):
-            parse_args()
+            self._parse("--density_ratio", "0.6")
 
-    def test_density_rejects_threshold(self, monkeypatch):
-        argv = self._argv("--selection", "density", "--threshold", "0.5")
-        monkeypatch.setattr(sys, "argv", argv)
+    def test_density_rejects_threshold(self):
         with pytest.raises(SystemExit):
-            parse_args()
+            self._parse("--selection", "density", "--confidence_threshold", "0.5")
+
+    def test_threshold_range(self):
+        with pytest.raises(SystemExit):
+            self._parse("--confidence_threshold", "1.5")
 
 
 @pytest.mark.unit
@@ -141,27 +117,37 @@ class TestInputsAndFrame:
         paths = _collect_struc_paths(SimpleNamespace(struc=pdb_6eey, pdb_list=None))
         assert paths == [pdb_6eey]
 
-    def test_pdb_list_resolves_files(self, pdb_6eey, tmp_path):
-        base = Path(pdb_6eey).parent.parent
+    def test_pdb_list_resolves_names_with_and_without_ext(self, pdb_6eey, tmp_path):
+        base = Path(pdb_6eey).parent
         lst = tmp_path / "list.txt"
-        lst.write_text("6eey_final\n")
+        # one entry carries an extension, one omits it; both resolve to a file
+        lst.write_text(f"{Path(pdb_6eey).name}\n6eey_final\n")
         paths = _collect_struc_paths(
             SimpleNamespace(struc=None, pdb_list=str(lst), base_pdb_dir=str(base))
         )
-        assert len(paths) == 1 and Path(paths[0]).stem == "6eey_final"
+        assert len(paths) == 2
+        assert all(Path(p).stem == "6eey_final" for p in paths)
 
-    def test_kept_atoms_drop_waters_and_center_is_protein_centroid(self, pdb_4h0b):
-        from src.dataset import parse_asu_with_biotite
+    def test_pdb_list_warns_on_missing(self, tmp_path):
+        lst = tmp_path / "list.txt"
+        lst.write_text("does_not_exist\n")
+        paths = _collect_struc_paths(
+            SimpleNamespace(struc=None, pdb_list=str(lst), base_pdb_dir=str(tmp_path))
+        )
+        assert paths == []
 
-        kept, center = _kept_atoms_and_center(pdb_4h0b)
+    def test_input_frame(self, pdb_4h0b):
+        kept, center, space_group = _input_frame(pdb_4h0b)
+        protein, _w, lig = parse_asu_with_biotite(pdb_4h0b)
         assert int((kept.res_name == "HOH").sum()) == 0
-        protein, _w, _lig = parse_asu_with_biotite(pdb_4h0b)
+        assert len(kept) == len(protein) + len(lig)
         assert np.allclose(center, protein.coord.mean(axis=0))
+        assert space_group == "P 6"
 
 
 @pytest.mark.integration
 class TestEndToEnd:
-    def test_pipeline_writes_predicted_structure(self, pdb_6eey, gvp_encoder, tmp_path):
+    def test_pipeline_writes_predicted_structure(self, pdb_4h0b, gvp_encoder, tmp_path):
         """Whole pipeline on tiny untrained gvp models: graph -> sample -> score ->
         cluster -> select -> un-center -> write. No checkpoints or embeddings."""
         device = torch.device("cpu")
@@ -182,14 +168,14 @@ class TestEndToEnd:
             num_steps=2,
             water_ratio=1.0,
             selection="confidence",
-            threshold=0.0,  # keep all, so the write path is exercised
+            confidence_threshold=0.0,  # keep all, so the write path is exercised
             density_ratio=None,
             out_dir=str(out_dir),
             out_format=".pdb",
         )
 
         predict_structures(
-            [pdb_6eey],
+            [pdb_4h0b],
             flow_matcher,
             conf_model,
             {"encoder_type": "gvp"},
@@ -197,13 +183,28 @@ class TestEndToEnd:
             device,
         )
 
-        pdb_out = out_dir / "6eey_final_pred.pdb"
-        coords_out = out_dir / "6eey_final_waters.txt"
+        pdb_out = out_dir / "4h0b_final_pred.pdb"
+        coords_out = out_dir / "4h0b_final_waters.txt"
         assert pdb_out.exists() and coords_out.exists()
-        # the written structure has HOH waters, and coords are back in the input frame
         from biotite.structure.io.pdb import PDBFile
 
-        written = PDBFile.read(str(pdb_out)).get_structure(model=1)
-        n_waters = int((written.res_name == "HOH").sum())
+        pdb_file = PDBFile.read(str(pdb_out))
+        written = pdb_file.get_structure(model=1)
+        is_water = written.res_name == "HOH"
+        n_waters = int(is_water.sum())
         assert n_waters > 0
-        assert np.loadtxt(coords_out).reshape(-1, 3).shape[0] == n_waters
+
+        # Protein + ligand atoms are written unchanged, in the input frame, with
+        # the input unit cell and space group.
+        protein, _w, lig = parse_asu_with_biotite(pdb_4h0b)
+        kept = protein + lig
+        assert np.allclose(written.coord[~is_water], kept.coord, atol=1e-3)
+        assert np.allclose(written.box, kept.box, atol=1e-3)
+        assert read_space_group(str(pdb_out)) == read_space_group(pdb_4h0b)
+
+        # Water rows in the txt match the written waters: x y z in the input
+        # frame and confidence in [0, 1].
+        rows = np.loadtxt(coords_out).reshape(-1, 4)
+        assert rows.shape[0] == n_waters
+        assert np.allclose(rows[:, :3], written.coord[is_water], atol=1e-3)
+        assert ((rows[:, 3] >= 0) & (rows[:, 3] <= 1)).all()

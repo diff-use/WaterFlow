@@ -1,22 +1,25 @@
 # predict_waters.py
 
-"""End-to-end water prediction from a raw PDB/CIF file.
+"""Predict waters for raw PDB/CIF files.
 
-Takes structures (with or without waters), strips them to protein + hets, samples
-candidate waters from a trained flow checkpoint, scores them with a confidence
-checkpoint, clusters and selects the final set, and writes out predicted-water
-structures (PDB/CIF) plus their coordinates.
+Per structure: drop existing waters, build the flow graph from protein + hets,
+sample candidate waters with a flow checkpoint, score them with a confidence
+checkpoint, cluster and threshold, then write the input structure with the
+predicted waters added (`<name>_pred.pdb|cif`) and a `<name>_waters.txt` of
+`x y z confidence` rows. No ground truth is involved.
 
-This is the *prediction* entry point; inference.py remains the cache-based
-evaluation/benchmark tool. Shared flow machinery is imported, not duplicated.
+NOTE: scripts/inference.py on the other hand, evaluates the flow model alone, 
+on cached training-format graphs, against the ground-truth waters.
+
+For esm/slae encoders the protein embeddings must already be in
+--processed_dir (see generate_esm_embeddings.py / generate_slae_embeddings.py).
 
 Usage:
     python -m scripts.predict_waters \\
         --flow_run_dir <flow_run> --confidence_run_dir <conf_run> \\
-        --struc protein.cif --out_dir out/ \\
-        --selection confidence --threshold 0.5
+        --struc protein.cif --out_dir out/ --confidence_threshold 0.5
 
-    Density mode keeps a fixed count instead of a cutoff:
+    Density mode keeps a fixed count per residue instead of a cutoff:
         ... --selection density --density_ratio 0.6
 """
 
@@ -25,6 +28,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import biotite.structure as bts
 import numpy as np
 import torch
 import torch.nn as nn
@@ -32,19 +36,17 @@ from loguru import logger
 from tqdm import tqdm
 
 from scripts.inference import build_model_from_config, load_config, run_inference_batch
-from src.confidence import cluster_waters_vdw, ConfidenceGVP
-from src.constants import NUM_RBF
-from src.dataset import element_onehot, parse_asu_with_biotite
-from src.encoder_base import build_encoder
+from src.confidence import build_confidence_model, cluster_waters_vdw, ConfidenceGVP
+from src.confidence_dataset import _oxygen_features
+from src.dataset import parse_asu_with_biotite
 from src.flow import FlowMatcher
 from src.inference_graph import build_inference_graph
-from src.structure_io import merge_waters, write_structure
+from src.structure_io import merge_waters, read_space_group, write_structure
 from src.utils import setup_logging_for_tqdm
 
 
-VDW_RADIUS_A = 1.52  # oxygen vdW radius; clustering/NMS radius
-DEFAULT_CONFIDENCE_THRESHOLD = 0.5  # confidence-mode cutoff when unset
-DEFAULT_DENSITY_RATIO = 0.6  # density-mode waters per ASU residue when unset
+DEFAULT_CONFIDENCE_THRESHOLD = 0.5  # confidence mode
+DEFAULT_DENSITY_RATIO = 0.6  # density mode, waters per ASU residue
 
 
 # ---------------------------------------------------------------------------
@@ -52,48 +54,15 @@ DEFAULT_DENSITY_RATIO = 0.6  # density-mode waters per ASU residue when unset
 # ---------------------------------------------------------------------------
 
 
-def build_confidence_model(config: dict, device: torch.device) -> ConfidenceGVP:
-    """Instantiate ConfidenceGVP from a flow run's config (mirrors train_confidence)."""
-    resolved = config.get("resolved_encoder_config")
-    if resolved:
-        encoder_config = resolved.copy()
-    else:
-        encoder_type = config.get("encoder_type", "gvp")
-        encoder_config = {
-            "encoder_type": encoder_type,
-            "hidden_s": config.get("hidden_s") or 256,
-            "hidden_v": config.get("hidden_v") or 64,
-            "node_scalar_in": config.get("node_scalar_in") or 16,
-            "freeze_encoder": config.get("freeze_encoder", False),
-            "encoder_ckpt": config.get("encoder_ckpt"),
-        }
-        if encoder_type in {"slae", "esm"}:
-            encoder_config["embedding_key"] = "embedding"
-            encoder_config["embedding_dim"] = config.get("embedding_dim")
-
-    encoder = build_encoder(encoder_config, device)
-    return ConfidenceGVP(
-        encoder=encoder,
-        hidden_dims=(config.get("hidden_s") or 256, config.get("hidden_v") or 64),
-        edge_scalar_dim=config.get("edge_scalar_dim") or NUM_RBF,
-        layers=config.get("flow_layers") or 3,
-        drop_rate=config.get("drop_rate", 0.1),
-        n_message_gvps=config.get("n_message_gvps", 2),
-        n_update_gvps=config.get("n_update_gvps", 2),
-        cutoff=config.get("cutoff", 8.0),
-        max_neighbors=config.get("max_neighbors", 256),
-        dynamic_edge_policy="knn_if_isolated",
-    ).to(device)
-
-
 def load_state_dict_lenient(
     model: nn.Module, checkpoint_path: Path, device: torch.device
 ) -> None:
     """Load weights with strict=False, warning on any missing/unexpected keys.
 
-    Older flow checkpoints predate the self-conditioning layers, so a strict load
-    would raise; the trained weights still transfer, and the extra layers stay at
-    init (harmless when self-conditioning is off at inference).
+    A checkpoint and the current model can differ by a few layers across
+    versions; a strict load would raise. The matched weights still transfer,
+    unmatched checkpoint keys are dropped, and any unmatched model layer stays
+    at init. Missing or unexpected keys are warned, not fatal.
     """
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
@@ -130,7 +99,7 @@ def score_candidates(
         return candidate_pos.new_zeros(0)
     scored = graph.clone()
     scored["water"].pos = candidate_pos.to(device)
-    scored["water"].x = element_onehot(["O"] * n).to(device)
+    scored["water"].x = _oxygen_features(n, device=device)
     scored["water"].num_nodes = n
     scored = scored.to(device)
     with torch.inference_mode():
@@ -145,31 +114,24 @@ def select_waters(
     threshold: float | None = None,
     density_ratio: float | None = None,
     num_asu_residues: int | None = None,
-    radius: float = VDW_RADIUS_A,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Cluster the scored candidates and cull to the final set of waters.
+    """Cluster candidates and cull to the final set.
 
-    confidence: the threshold is applied *before* clustering, so a
-    sub-threshold candidate cannot pull a centroid off-site; every resulting
-    centroid is kept.
-    density: cluster with no cutoff, then keep the highest-confidence
-    N = floor(density_ratio * num_asu_residues) centroids. cluster_waters_vdw
-    returns centroids in descending confidence, so this is a slice.
+    confidence: threshold is applied before clustering (sub-threshold
+    candidates cannot pull a centroid), then all resulting centroids are kept.
+    density: cluster with no cutoff, then keep the top
+    floor(density_ratio * num_asu_residues) centroids by confidence.
     """
     if mode == "confidence":
-        return cluster_waters_vdw(
-            candidate_pos, confidences, radius=radius, threshold=threshold
-        )
+        return cluster_waters_vdw(candidate_pos, confidences, threshold=threshold)
     if mode == "density":
         if density_ratio is None or num_asu_residues is None:
             raise ValueError(
                 "density selection needs density_ratio and num_asu_residues"
             )
-        centroids, centroid_conf = cluster_waters_vdw(
-            candidate_pos, confidences, radius=radius, threshold=None
-        )
-        n_keep = int(density_ratio * num_asu_residues)  # floor for a positive ratio
-        return centroids[:n_keep], centroid_conf[:n_keep]
+        pos, conf = cluster_waters_vdw(candidate_pos, confidences)  # sorted desc
+        n_keep = int(density_ratio * num_asu_residues)
+        return pos[:n_keep], conf[:n_keep]
     raise ValueError(f"Unknown selection mode: {mode!r}")
 
 
@@ -178,16 +140,17 @@ def select_waters(
 # ---------------------------------------------------------------------------
 
 
-def _kept_atoms_and_center(struc_path: str):
-    """Protein + hets to write out, and the ASU protein centroid used to centre.
+def _input_frame(struc_path: str) -> tuple[bts.AtomArray, np.ndarray, str | None]:
+    """Atoms to write out, the ASU protein centroid, and the input space group.
 
-    Recomputes the centroid build_inference_graph used, so predicted waters
-    (sampled in the centred frame) return to the input reference frame.
+    The centroid is the one build_inference_graph centred on, so adding it back
+    returns predicted waters to the input frame. Hets are always written, whether
+    or not the flow model saw them: the output is the input structure plus waters.
     """
     protein_atoms, _waters, ligand_atoms = parse_asu_with_biotite(struc_path)
     center = protein_atoms.coord.mean(axis=0)
     kept = protein_atoms + ligand_atoms if len(ligand_atoms) else protein_atoms
-    return kept, center
+    return kept, center, read_space_group(struc_path)
 
 
 def predict_structures(
@@ -199,7 +162,7 @@ def predict_structures(
     device: torch.device,
 ) -> None:
     """Predict + write final waters for a batch of structures."""
-    graphs, centers, kept_atoms, out_names = [], [], [], []
+    graphs, frames, out_names = [], [], []
     encoder_type = flow_config.get("encoder_type", "gvp")
     for path in struc_paths:
         graph = build_inference_graph(
@@ -211,10 +174,8 @@ def predict_structures(
             cutoff=flow_config.get("cutoff", 8.0),
             max_neighbors=flow_config.get("max_neighbors", 256),
         )
-        kept, center = _kept_atoms_and_center(path)
         graphs.append(graph)
-        centers.append(center)
-        kept_atoms.append(kept)
+        frames.append(_input_frame(path))
         out_names.append(Path(path).stem)
 
     # Batched flow sampling -> candidate waters (centred frame).
@@ -230,8 +191,8 @@ def predict_structures(
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    for graph, result, center, kept, name in zip(
-        graphs, results, centers, kept_atoms, out_names
+    for graph, result, (kept, center, space_group), name in zip(
+        graphs, results, frames, out_names
     ):
         candidate_pos = torch.as_tensor(result["water_pred"], dtype=torch.float32)
         conf = score_candidates(conf_model, graph, candidate_pos, device)
@@ -239,15 +200,25 @@ def predict_structures(
             candidate_pos,
             conf,
             mode=args.selection,
-            threshold=args.threshold,
+            threshold=args.confidence_threshold,
             density_ratio=args.density_ratio,
             num_asu_residues=int(graph["protein"].num_protein_residues),
         )
-        # Back to the input frame, then write structure + coordinates.
+        # Back to the input frame, then write structure + scored coordinates.
         water_xyz = sel_pos.numpy() + center
         structure = merge_waters(kept, water_xyz)
-        write_structure(structure, str(out_dir / f"{name}_pred{args.out_format}"))
-        np.savetxt(out_dir / f"{name}_waters.txt", water_xyz, fmt="%.3f")
+        write_structure(
+            structure,
+            str(out_dir / f"{name}_pred{args.out_format}"),
+            space_group=space_group,
+        )
+        xyz_conf = np.column_stack([water_xyz, sel_conf.numpy()])
+        np.savetxt(
+            out_dir / f"{name}_waters.txt",
+            xyz_conf,
+            fmt=["%.3f", "%.3f", "%.3f", "%.4f"],
+            header="x y z confidence",
+        )
         logger.info(f"{name}: {len(water_xyz)} waters -> {out_dir}")
 
 
@@ -257,26 +228,32 @@ def predict_structures(
 
 
 def _collect_struc_paths(args: argparse.Namespace) -> list[str]:
+    """Resolve the structures to run: a single --struc, or names from --pdb_list.
+
+    Each list entry is a path under --base_pdb_dir. It may carry a .pdb/.cif
+    extension or omit it (both are tried), and may include a subdirectory.
+    """
     if args.struc:
         return [args.struc]
-    keys = [
+    base = Path(args.base_pdb_dir)
+    names = [
         ln.strip() for ln in Path(args.pdb_list).read_text().splitlines() if ln.strip()
     ]
-    base = Path(args.base_pdb_dir)
     paths = []
-    for key in keys:
-        pdb_id = key.removesuffix("_final")
-        for ext in (".cif", ".pdb"):
-            cand = base / pdb_id / f"{key}{ext}"
-            if cand.exists():
-                paths.append(str(cand))
-                break
+    for name in names:
+        if (base / name).suffix.lower() in (".cif", ".pdb"):
+            candidates = [base / name]
         else:
-            logger.warning(f"No structure file found for {key} under {base}")
+            candidates = [base / f"{name}{ext}" for ext in (".cif", ".pdb")]
+        match = next((c for c in candidates if c.exists()), None)
+        if match is not None:
+            paths.append(str(match))
+        else:
+            logger.warning(f"No structure file found for {name!r} under {base}")
     return paths
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
         "--flow_run_dir",
@@ -289,10 +266,19 @@ def parse_args() -> argparse.Namespace:
 
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--struc", help="A single PDB/CIF file.")
-    src.add_argument("--pdb_list", help="Text file of <pdb_id>_final keys.")
-    p.add_argument("--base_pdb_dir", help="Base dir for --pdb_list entries.")
+    src.add_argument(
+        "--pdb_list",
+        help="Text file of structure names under --base_pdb_dir, one per line; "
+        "each may include or omit a .pdb/.cif extension.",
+    )
+    p.add_argument("--base_pdb_dir", help="Directory --pdb_list names resolve against.")
     p.add_argument(
-        "--processed_dir", default=None, help="Embedding cache root (esm/slae only)."
+        "--processed_dir",
+        default=None,
+        help="Embedding cache root for esm/slae encoders (unused for gvp). "
+        "Embeddings are loaded, not generated: run generate_esm_embeddings.py or "
+        "generate_slae_embeddings.py first. Looked up by file stem under "
+        "processed_dir/<encoder_type>.",
     )
     p.add_argument("--out_dir", required=True)
     p.add_argument("--out_format", default=".pdb", choices=[".pdb", ".cif"])
@@ -304,24 +290,18 @@ def parse_args() -> argparse.Namespace:
         help="Final-water selection rule.",
     )
     p.add_argument(
-        "--threshold",
+        "--confidence_threshold",
         type=float,
         default=None,
-        help=(
-            f"Confidence cutoff for --selection confidence "
-            f"(default {DEFAULT_CONFIDENCE_THRESHOLD}). Not allowed with density."
-        ),
+        help="confidence mode: drop candidates scoring below this, in [0, 1] "
+        f"(default {DEFAULT_CONFIDENCE_THRESHOLD}).",
     )
     p.add_argument(
         "--density_ratio",
         type=float,
         default=None,
-        help=(
-            f"Waters per ASU residue for --selection density "
-            f"(default {DEFAULT_DENSITY_RATIO}); keeps "
-            f"floor(density_ratio * num_ASU_residues) by confidence. "
-            f"Not allowed with confidence."
-        ),
+        help="density mode: keep floor(ratio * ASU residues) waters by confidence "
+        f"(default {DEFAULT_DENSITY_RATIO}).",
     )
 
     p.add_argument(
@@ -342,23 +322,24 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--device", default="cuda")
     p.add_argument("--log_level", default="INFO")
 
-    args = p.parse_args()
+    args = p.parse_args(argv)
     if args.pdb_list and not args.base_pdb_dir:
         p.error("--pdb_list requires --base_pdb_dir")
-
-    # --threshold belongs to confidence mode and --density_ratio to density mode.
-    # Reject the other one rather than silently ignoring it, and fill the mode's
-    # own default when the user left it unset.
+    # Each mode has one knob. Reject the other mode's and fill the default.
     if args.selection == "confidence":
         if args.density_ratio is not None:
             p.error("--density_ratio only applies to --selection density")
-        if args.threshold is None:
-            args.threshold = DEFAULT_CONFIDENCE_THRESHOLD
-    else:  # density
-        if args.threshold is not None:
-            p.error("--threshold only applies to --selection confidence")
+        if args.confidence_threshold is None:
+            args.confidence_threshold = DEFAULT_CONFIDENCE_THRESHOLD
+        if not 0.0 <= args.confidence_threshold <= 1.0:
+            p.error("--confidence_threshold must be in [0, 1]")
+    else:
+        if args.confidence_threshold is not None:
+            p.error("--confidence_threshold only applies to --selection confidence")
         if args.density_ratio is None:
             args.density_ratio = DEFAULT_DENSITY_RATIO
+        if args.density_ratio <= 0:
+            p.error("--density_ratio must be > 0")
     return args
 
 
