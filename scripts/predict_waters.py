@@ -26,6 +26,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 
 import biotite.structure as bts
@@ -117,10 +118,11 @@ def select_waters(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Cluster candidates and cull to the final set.
 
-    confidence: threshold is applied before clustering (sub-threshold
-    candidates cannot pull a centroid), then all resulting centroids are kept.
+    confidence: candidates with confidence >= threshold are clustered (the rest
+    cannot pull a centroid) and every resulting centroid is kept.
     density: cluster with no cutoff, then keep the top
-    floor(density_ratio * num_asu_residues) centroids by confidence.
+    floor(density_ratio * num_asu_residues) centroids by confidence, or all of
+    them if there are fewer.
     """
     if mode == "confidence":
         return cluster_waters_vdw(candidate_pos, confidences, threshold=threshold)
@@ -129,8 +131,16 @@ def select_waters(
             raise ValueError(
                 "density selection needs density_ratio and num_asu_residues"
             )
+        if not (math.isfinite(density_ratio) and density_ratio > 0):
+            raise ValueError(
+                f"density_ratio must be finite and > 0, got {density_ratio}"
+            )
         pos, conf = cluster_waters_vdw(candidate_pos, confidences)  # sorted desc
         n_keep = int(density_ratio * num_asu_residues)
+        if n_keep > len(pos):
+            logger.warning(
+                f"density: asked for {n_keep} waters but only {len(pos)} centroids"
+            )
         return pos[:n_keep], conf[:n_keep]
     raise ValueError(f"Unknown selection mode: {mode!r}")
 
@@ -204,6 +214,8 @@ def predict_structures(
             density_ratio=args.density_ratio,
             num_asu_residues=int(graph["protein"].num_protein_residues),
         )
+        if len(sel_pos) == 0:
+            logger.warning(f"{name}: no waters selected")
         # Back to the input frame, then write structure + scored coordinates.
         water_xyz = sel_pos.numpy() + center
         structure = merge_waters(kept, water_xyz)
@@ -293,14 +305,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--confidence_threshold",
         type=float,
         default=None,
-        help="confidence mode: drop candidates scoring below this, in [0, 1] "
+        help="confidence mode: keep candidates with confidence >= this, in [0, 1] "
         f"(default {DEFAULT_CONFIDENCE_THRESHOLD}).",
     )
     p.add_argument(
         "--density_ratio",
         type=float,
         default=None,
-        help="density mode: keep floor(ratio * ASU residues) waters by confidence "
+        help="density mode: keep the top floor(ratio * ASU residues) waters by "
+        "confidence, or all if fewer; ratio > 0 "
         f"(default {DEFAULT_DENSITY_RATIO}).",
     )
 
@@ -333,13 +346,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             args.confidence_threshold = DEFAULT_CONFIDENCE_THRESHOLD
         if not 0.0 <= args.confidence_threshold <= 1.0:
             p.error("--confidence_threshold must be in [0, 1]")
-    else:
+    else:  # density (argparse choices rejects anything else)
         if args.confidence_threshold is not None:
             p.error("--confidence_threshold only applies to --selection confidence")
         if args.density_ratio is None:
             args.density_ratio = DEFAULT_DENSITY_RATIO
-        if args.density_ratio <= 0:
-            p.error("--density_ratio must be > 0")
+        if not (math.isfinite(args.density_ratio) and args.density_ratio > 0):
+            p.error("--density_ratio must be finite and > 0")
     return args
 
 

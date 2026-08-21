@@ -55,6 +55,29 @@ class TestSelectWaters:
         with pytest.raises(ValueError, match="density"):
             select_waters(torch.zeros(1, 3), torch.ones(1), mode="density")
 
+    @pytest.mark.parametrize("ratio", [0.0, -1.0, float("nan"), float("inf")])
+    def test_density_rejects_bad_ratio(self, ratio):
+        with pytest.raises(ValueError, match="density_ratio"):
+            select_waters(
+                torch.zeros(1, 3),
+                torch.ones(1),
+                mode="density",
+                density_ratio=ratio,
+                num_asu_residues=5,
+            )
+
+    def test_nothing_survives(self):
+        pos = torch.tensor([[0.0, 0, 0], [10.0, 0, 0]])
+        conf = torch.tensor([0.9, 0.8])
+        # confidence: threshold above every score
+        sel_pos, sel_conf = select_waters(pos, conf, mode="confidence", threshold=1.0)
+        assert sel_pos.shape == (0, 3) and sel_conf.shape == (0,)
+        # density: floor(0.1 * 5) = 0
+        sel_pos, sel_conf = select_waters(
+            pos, conf, mode="density", density_ratio=0.1, num_asu_residues=5
+        )
+        assert sel_pos.shape == (0, 3) and sel_conf.shape == (0,)
+
 
 @pytest.mark.unit
 class TestSelectionCLI:
@@ -85,6 +108,11 @@ class TestSelectionCLI:
     def test_threshold_range(self):
         with pytest.raises(SystemExit):
             self._parse("--confidence_threshold", "1.5")
+
+    @pytest.mark.parametrize("ratio", ["0", "-1", "nan", "inf"])
+    def test_density_ratio_range(self, ratio):
+        with pytest.raises(SystemExit):
+            self._parse("--selection", "density", "--density_ratio", ratio)
 
 
 @pytest.mark.unit
@@ -147,7 +175,10 @@ class TestInputsAndFrame:
 
 @pytest.mark.integration
 class TestEndToEnd:
-    def test_pipeline_writes_predicted_structure(self, pdb_4h0b, gvp_encoder, tmp_path):
+    @pytest.mark.parametrize("selection", ["confidence", "density"])
+    def test_pipeline_writes_predicted_structure(
+        self, selection, pdb_4h0b, gvp_encoder, tmp_path
+    ):
         """Whole pipeline on tiny untrained gvp models: graph -> sample -> score ->
         cluster -> select -> un-center -> write. No checkpoints or embeddings."""
         device = torch.device("cpu")
@@ -167,9 +198,10 @@ class TestEndToEnd:
             method="euler",
             num_steps=2,
             water_ratio=1.0,
-            selection="confidence",
-            confidence_threshold=0.0,  # keep all, so the write path is exercised
-            density_ratio=None,
+            selection=selection,
+            # Permissive settings so waters survive and the write path runs.
+            confidence_threshold=0.0 if selection == "confidence" else None,
+            density_ratio=1.0 if selection == "density" else None,
             out_dir=str(out_dir),
             out_format=".pdb",
         )
