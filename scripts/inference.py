@@ -7,7 +7,7 @@ Takes a text file of PDB paths, runs trajectory integration (euler/rk4),
 and outputs plots, gifs, and metrics for each PDB.
 
 Usage:
-    python scripts/inference.py \
+    python -m scripts.inference \
         --run_dir /path/to/run_directory \
         --pdb_list /path/to/pdb_list.txt \
         --output_dir /path/to/output \

@@ -10,7 +10,7 @@ model. It handles:
 - Checkpointing and W&B logging
 
 Usage:
-    python scripts/train.py \\
+    python -m scripts.train \\
         --train_list /path/to/train.txt \\
         --val_list /path/to/val.txt \\
         --encoder_type gvp \\
