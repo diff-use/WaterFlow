@@ -1,26 +1,32 @@
 # WaterFlow
 
-WaterFlow places ordered water molecules on protein surfaces. A flow-matching
-generator proposes candidate waters conditioned on the protein structure, and a
-confidence model scores each candidate so a final set can be selected.
+WaterFlow places ordered water molecules on protein surfaces. It has two trained
+components: a **flow generator** that proposes candidate waters conditioned on the
+protein structure, and a **confidence scorer** that ranks each candidate so a final
+set can be selected.
 
-The pipeline runs in two stages:
+There are two pipelines, one for each thing you might want to do:
 
-1. **Flow generator** — samples candidate water positions from a learned velocity
-   field, conditioned on protein (and optional ligand / symmetry-mate) context.
-2. **Confidence scorer** — assigns each candidate a score in `[0, 1]`; candidates
-   are then clustered and culled to the final waters.
+**Prediction** — run the tool on a structure ([Predicting waters](#predicting-waters)):
+
+```
+flow generator → confidence scorer → cluster + select → write waters
+     sample            score              cull            to structure
+```
+
+**Training** — produce the two components ([Training your own models](#training-your-own-models)):
+
+```
+precompute embeddings → train flow generator → cache candidate waters → train confidence scorer
+```
 
 ## Table of Contents
 
 - [Installation](#installation)
-- [Pipeline](#pipeline)
-  - [1. Precompute embeddings](#1-precompute-embeddings)
-  - [2. Train the flow generator](#2-train-the-flow-generator)
-  - [3. Cache candidate waters](#3-cache-candidate-waters)
-  - [4. Train the confidence scorer](#4-train-the-confidence-scorer)
-  - [5. Predict waters end to end](#5-predict-waters-end-to-end)
-  - [6. Evaluate the flow generator](#6-evaluate-the-flow-generator)
+- [Predicting waters](#predicting-waters)
+  - [Selecting the final waters](#selecting-the-final-waters)
+  - [Options](#options)
+- [Training your own models](#training-your-own-models)
 - [Documentation](#documentation)
 
 ## Installation
@@ -31,11 +37,7 @@ WaterFlow uses [`uv`](https://docs.astral.sh/uv/) with Python 3.12.
 uv sync
 ```
 
-Run any script through `uv run`:
-
-```bash
-uv run python -m scripts.train --help
-```
+Every command runs through `uv run`.
 
 <details>
 <summary>Building a virtual environment from scratch</summary>
@@ -56,12 +58,91 @@ the wheel URL to your toolkit.
 
 </details>
 
-## Pipeline
+## Predicting waters
 
-The stages below run in order. Training reads structures from a `--base_pdb_dir`
-laid out as `<base_pdb_dir>/<pdb_id>/<pdb_id>_final.{cif,pdb}`, with split files
-listing one bare ID per line (`6eey_final`). See [docs/data.md](docs/data.md) for
-the directory layout, cache structure, and quality filters.
+`predict_waters.py` is the end-to-end tool. Given a raw PDB or mmCIF structure it
+strips any existing waters, builds the graph from protein + hets, samples
+candidates with the flow model, scores them with the confidence model, selects the
+final set, and writes the input structure with the predicted waters added.
+
+It needs a trained **flow run** and **confidence run** — pass their run directories
+(each holds `config.json` and `checkpoints/`). See
+[Training your own models](#training-your-own-models) to produce them.
+
+```bash
+uv run python -m scripts.predict_waters \
+    --flow_run_dir <flow_run> \
+    --confidence_run_dir <conf_run> \
+    --struc protein.cif \
+    --out_dir out/ \
+    --selection density \
+    --density_ratio 0.6
+```
+
+Run a batch by pointing at a list instead of a single file:
+
+```bash
+uv run python -m scripts.predict_waters \
+    --flow_run_dir <flow_run> \
+    --confidence_run_dir <conf_run> \
+    --pdb_list structures.txt --base_pdb_dir <pdb_dir> \
+    --out_dir out/
+```
+
+Each list entry is a path under `--base_pdb_dir`, with or without a `.pdb`/`.cif`
+extension. For the `esm` or `slae` encoder, pass `--processed_dir <cache_root>`;
+the embeddings must already exist there (see
+[embeddings](#1-precompute-embeddings)). The `gvp` encoder needs neither.
+
+**Outputs**, per structure, in the input coordinate frame:
+
+- `<name>_pred.pdb` (or `.cif` with `--out_format .cif`) — the input protein and
+  hets with predicted waters added as `HOH` oxygens.
+- `<name>_waters.txt` — one `x y z confidence` row per predicted water.
+
+### Selecting the final waters
+
+This is the main knob. Both modes sample `--water_ratio * num_residues` candidates,
+score each, and cluster overlapping candidates into van der Waals centroids (each
+centroid keeps its cluster's highest confidence). They differ in how the final set
+is culled:
+
+| `--selection` | Rule | Use when |
+|---|---|---|
+| `confidence` (default) | Drop candidates below `--confidence_threshold` (default `0.5`), then keep every centroid. | You want a calibrated score cutoff; the water count follows from the data. |
+| `density` | Cluster with no cutoff, then keep the top `floor(--density_ratio * ASU_residues)` centroids by confidence (default ratio `0.6`). | You want a target hydration level tied to protein size, not an absolute score. |
+
+Each mode accepts only its own knob: `--confidence_threshold` is rejected under
+`density`, and `--density_ratio` is rejected under `confidence`.
+
+### Options
+
+| Argument | Default | Description |
+|---|---|---|
+| `--flow_run_dir` | required | Flow run directory (`config.json` + `checkpoints/`) |
+| `--confidence_run_dir` | required | Confidence run directory |
+| `--struc` / `--pdb_list` | one required | A single structure file, or a list of names under `--base_pdb_dir` |
+| `--out_dir` | required | Output directory |
+| `--out_format` | `.pdb` | Written structure format: `.pdb` or `.cif` |
+| `--selection` | `confidence` | `confidence` or `density` (see above) |
+| `--confidence_threshold` | `0.5` | `confidence` mode: drop candidates scoring below this |
+| `--density_ratio` | `0.6` | `density` mode: keep `floor(ratio × ASU residues)` waters |
+| `--water_ratio` | `8.0` | Candidates sampled = ratio × num_residues |
+| `--num_steps` | `20` | Flow integration steps |
+| `--method` | `euler` | Integration method: `euler` or `rk4` |
+| `--include_mates` | flow run's setting | Add symmetry mates to the graph |
+| `--flow_checkpoint` / `--confidence_checkpoint` | `best.pt` | Checkpoint filename within each run's `checkpoints/` |
+| `--processed_dir` | none | Embedding cache root for `esm`/`slae` (unused for `gvp`) |
+| `--batch_size` | `4` | Structures per batch |
+| `--device` | `cuda` | Compute device |
+
+## Training your own models
+
+Producing the flow and confidence checkpoints is a four-step pipeline. Training
+reads structures from a `--base_pdb_dir` laid out as
+`<base_pdb_dir>/<pdb_id>/<pdb_id>_final.{cif,pdb}`, with split files listing one
+bare ID per line (`6eey_final`). See [docs/data.md](docs/data.md) for the directory
+layout, cache structure, and quality filters.
 
 ### 1. Precompute embeddings
 
@@ -99,10 +180,10 @@ uv run python -m scripts.train \
 ```
 
 Checkpoints, `config.json`, and logs land in `<save_dir>/<run_name>/`. That run
-directory is what later stages point to as `--flow_run_dir`.
+directory is the `--flow_run_dir` for later stages.
 
-**Multi-GPU:** launch the same command with `torchrun` — no code flag needed.
-Plain `python -m scripts.train` stays single-GPU.
+**Multi-GPU:** launch the same command with `torchrun` — no code flag needed. Plain
+`python -m scripts.train` stays single-GPU.
 
 ```bash
 uv run torchrun --nproc_per_node=4 -m scripts.train \
@@ -154,50 +235,11 @@ uv run python -m scripts.train_confidence \
 (used for checkpoint selection) and best F1. Multi-GPU works the same way as flow
 training — prefix with `torchrun --nproc_per_node=N`.
 
-### 5. Predict waters end to end
+### Evaluating the flow generator alone
 
-`predict_waters.py` runs the full pipeline on raw structures: it strips any
-existing waters, builds the graph from protein + hets, samples candidates with
-the flow model, scores them with the confidence model, selects the final set, and
-writes the input structure with the predicted waters added.
-
-```bash
-uv run python -m scripts.predict_waters \
-    --flow_run_dir <flow_run> \
-    --confidence_run_dir <conf_run> \
-    --struc protein.cif \
-    --out_dir out/ \
-    --selection density \
-    --density_ratio 0.6
-```
-
-Pass `--pdb_list <file> --base_pdb_dir <dir>` instead of `--struc` to run a batch.
-Outputs, per structure, in the input coordinate frame:
-
-- `<name>_pred.pdb` (or `.cif` with `--out_format .cif`) — the input protein and
-  hets with predicted waters added as `HOH` oxygens.
-- `<name>_waters.txt` — one `x y z confidence` row per predicted water.
-
-#### Selecting the final waters
-
-Both modes sample `--water_ratio * num_residues` candidates, score each, and
-cluster overlapping candidates into van der Waals centroids (each centroid keeps
-its cluster's highest confidence). They differ in how the final set is culled:
-
-| `--selection` | Rule | Use when |
-|---|---|---|
-| `confidence` (default) | Drop candidates below `--confidence_threshold` (default `0.5`), then keep every centroid. | You want a calibrated score cutoff; the water count follows from the data. |
-| `density` | Cluster with no cutoff, then keep the top `floor(--density_ratio * ASU_residues)` centroids by confidence (default ratio `0.6`). | You want a target hydration level tied to protein size, not an absolute score. |
-
-Each mode accepts only its own knob: `--confidence_threshold` is rejected under
-`density`, and `--density_ratio` is rejected under `confidence`.
-
-### 6. Evaluate the flow generator
-
-`inference.py` scores the flow generator alone against ground-truth waters. It
-reads cached training-format graphs (not raw files) and reports precision, recall,
-and RMSD. This is the flow-only evaluation, distinct from the end-to-end
-`predict_waters.py` above — no confidence model is involved.
+`inference.py` scores the flow generator against ground-truth waters, separately
+from the confidence model. It reads cached training-format graphs (not raw files)
+and reports precision, recall, and RMSD.
 
 ```bash
 uv run python -m scripts.inference \
