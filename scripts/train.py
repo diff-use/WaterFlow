@@ -23,6 +23,7 @@ import contextlib
 import json
 import multiprocessing as mp
 import os
+import random
 import shutil
 import tempfile
 from datetime import datetime
@@ -60,6 +61,13 @@ from src.utils import (
     plot_3d_frame,
     setup_logging_for_tqdm,
 )
+
+
+# best.pt selection. blend = 0.85*F1 + 0.15*AUC-PR. Generative metrics are
+# averaged over the last SEL_ROLLING_WINDOW eval epochs to smooth sampling noise.
+BLEND_F1_WEIGHT = 0.85
+BLEND_AUC_PR_WEIGHT = 1.0 - BLEND_F1_WEIGHT
+SEL_ROLLING_WINDOW = 3
 
 
 def generate_run_name(args: argparse.Namespace) -> str:
@@ -381,6 +389,13 @@ def parse_args():
         help="eta_min = lr * eta_min_factor",
     )
     p.add_argument(
+        "--lr_decay_epochs",
+        type=int,
+        default=None,
+        help="Cosine T_max in epochs. The LR reaches eta_min after this many epochs "
+        "and holds there. Defaults to --epochs.",
+    )
+    p.add_argument(
         "--step_size", type=int, default=50, help="StepLR step size (epochs)"
     )
     p.add_argument("--step_gamma", type=float, default=0.5, help="StepLR gamma")
@@ -410,7 +425,34 @@ def parse_args():
     p.add_argument("--save_every", type=int, default=10)
     p.add_argument("--eval_every", type=int, default=5)
     p.add_argument("--n_eval_samples", type=int, default=3)
-    p.add_argument("--rk4_steps", type=int, default=100)
+    p.add_argument(
+        "--eval_method",
+        type=str,
+        default="euler",
+        choices=["euler", "rk4"],
+        help="Integrator for the sampling eval.",
+    )
+    p.add_argument(
+        "--eval_steps",
+        type=int,
+        default=50,
+        help="Integration steps for the sampling eval.",
+    )
+    p.add_argument(
+        "--selection_metric",
+        type=str,
+        default="blend",
+        choices=["val_loss", "f1", "auc_pr", "blend"],
+        help="Metric that selects best.pt. 'val_loss' is checked every epoch. "
+        f"'f1', 'auc_pr' and 'blend' ({BLEND_F1_WEIGHT}*F1 + {BLEND_AUC_PR_WEIGHT:g}"
+        "*AUC-PR) come from the sampling eval, so they are checked on eval epochs "
+        f"only and averaged over the last {SEL_ROLLING_WINDOW} of them.",
+    )
+    p.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from the latest epoch checkpoint under save_dir/run_name.",
+    )
     p.add_argument(
         "--save_gifs", action="store_true", help="Save trajectory GIFs during eval"
     )
@@ -419,6 +461,19 @@ def parse_args():
         type=float,
         default=1.0,
         help="Distance threshold in Angstroms for precision/recall (default: 1.0)",
+    )
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Global seed for weight init and data shuffling. Pass a negative "
+        "value to leave them unseeded.",
+    )
+    p.add_argument(
+        "--val_seed",
+        type=int,
+        default=1234,
+        help="Seed for picking the eval samples and for their prior noise.",
     )
 
     # logging / wandb
@@ -432,6 +487,8 @@ def parse_args():
         p.error("--embedding_dim is only valid for cached encoders: slae or esm")
     if args.sample_cache_size < 0:
         p.error("--sample_cache_size must be >= 0")
+    if args.resume and args.run_name is None:
+        p.error("--resume requires --run_name (generated names are timestamped)")
     return args
 
 
@@ -683,9 +740,9 @@ def build_model(
 
 
 def run_eval_sampling(
-    flow_matcher, val_loader, args, epoch, device, global_step, eval_indices, run_dir
+    flow_matcher, val_loader, args, epoch, device, eval_indices, run_dir
 ):
-    """Run RK4 integration on fixed eval samples and log results.
+    """Sample the fixed eval set with the configured integrator and return metrics.
 
     Args:
         eval_indices: Fixed list of dataset indices to evaluate (sampled once at start)
@@ -693,11 +750,18 @@ def run_eval_sampling(
     """
     flow_matcher.model.eval()
 
-    # Each rank integrates a disjoint stride of eval_indices; the metric sums are
-    # all-reduced below so every rank ends with identical averages.
+    # Rank r handles samples r, r + world_size, ... The sums are all-reduced below.
     rank, world_size = ddp_rank_and_world()
     results = []
 
+    integrate = (
+        flow_matcher.euler_integrate
+        if args.eval_method == "euler"
+        else flow_matcher.rk4_integrate
+    )
+    # The prior noise is the only randomness in eval. Seeding a fresh generator
+    # here gives every eval epoch the same noise and leaves the training RNG alone.
+    eval_rng = torch.Generator(device=device).manual_seed(args.val_seed)
     for i, idx in enumerate(eval_indices):
         # Shard by global position i, so plot/GIF filenames never collide.
         if i % world_size != rank:
@@ -706,12 +770,13 @@ def run_eval_sampling(
         if graph["water"].num_nodes == 0:
             continue
 
-        out = flow_matcher.rk4_integrate(
+        out = integrate(
             graph,
-            num_steps=args.rk4_steps,
+            num_steps=args.eval_steps,
             device=device,
-            return_trajectory=True,
-        )[0]  # rk4_integrate returns a list, get the single result
+            return_trajectory=args.save_gifs,  # frames for the GIFs
+            generator=eval_rng,
+        )[0]  # integrators return a list; take the single result
 
         # compute metrics
         final_metrics = compute_placement_metrics(
@@ -747,8 +812,7 @@ def run_eval_sampling(
         plt.savefig(plot_path, dpi=150)
         plt.close()
 
-        # save GIF if requested
-        if args.save_gifs and "trajectory" in out:
+        if args.save_gifs:
             gif_path = run_dir / "gifs" / f"epoch{epoch}_sample{i}.gif"
             gif_path.parent.mkdir(parents=True, exist_ok=True)
             create_trajectory_gif(
@@ -761,7 +825,7 @@ def run_eval_sampling(
                 pdb_id=graph.pdb_id,
             )
 
-    # Every rank must reach this, even one whose stride was all zero-water graphs.
+    # Every rank must reach this collective, even one with no results.
     avg_metrics, _ = all_reduce_means(
         {
             f"eval/avg_{key}": sum(r[key] for r in results)
@@ -770,9 +834,6 @@ def run_eval_sampling(
         len(results),
         device,
     )
-    if not avg_metrics:
-        return {}
-    wandb.log(avg_metrics, step=global_step)
     return avg_metrics
 
 
@@ -780,9 +841,9 @@ def _needs_grad_sync(step: int, n_batches: int, accum_steps: int) -> bool:
     """
     Whether this micro-step's backward must all-reduce gradients under DDP.
 
-    True on every accumulation boundary, and throughout the epoch's trailing
-    partial window: that window ends in an optimizer.step() too, and stepping on
-    gradients that were never all-reduced leaves the ranks permanently diverged.
+    True at every accumulation boundary and for the leftover steps at the end of
+    the epoch, which also end in an optimizer.step(). Stepping on gradients that
+    were never all-reduced leaves the ranks out of sync for good.
     """
     if (step + 1) % accum_steps == 0:
         return True
@@ -814,8 +875,7 @@ def train_epoch(
             skipped_batches += 1
             continue
 
-        # Suppress the gradient all-reduce on micro-steps that are not followed by
-        # an optimizer.step(), keeping comms at one all-reduce per optimizer step.
+        # Only all-reduce gradients on micro-steps followed by an optimizer.step().
         no_sync = ddp_is_active() and not _needs_grad_sync(
             step, len(train_loader), args.grad_accum_steps
         )
@@ -896,10 +956,8 @@ def train_epoch(
 
     final_global_step = (epoch - 1) * len(train_loader) + len(train_loader) - 1
 
-    # All-reduce the metric sums once per epoch, so the logged numbers cover every
-    # rank's shard. Must run before the zero-batch check below: a rank that skipped
-    # all its batches would return early and never join the all-reduce, hanging the
-    # rest.
+    # All-reduce before the zero-batch return below. A rank that skipped every
+    # batch would otherwise never join the collective and hang the others.
     train_metrics, processed_batches = all_reduce_means(
         {"train/epoch_loss": total_loss, "train/epoch_rmsd": total_rmsd},
         processed_batches,
@@ -945,7 +1003,7 @@ def val_epoch(
         total_loss += metrics["loss"]
         total_rmsd += metrics["rmsd"]
 
-    # Best-checkpoint selection keys off val/loss, so ranks must agree on it.
+    # Selection reads val/loss, so every rank needs the same value.
     val_metrics, processed_batches = all_reduce_means(
         {"val/loss": total_loss, "val/rmsd": total_rmsd},
         processed_batches,
@@ -971,6 +1029,14 @@ def count_parameters(model):
     return trainable, total
 
 
+def _latest_epoch_checkpoint(ckpt_dir: Path) -> Path | None:
+    """Highest-numbered epoch_<n>.pt in ckpt_dir, or None if there is none."""
+    ckpts = list(ckpt_dir.glob("epoch_*.pt"))
+    if not ckpts:
+        return None
+    return max(ckpts, key=lambda p: int(p.stem.split("_")[1]))
+
+
 def save_checkpoint(
     model,
     optimizer,
@@ -980,6 +1046,10 @@ def save_checkpoint(
     optimizer_step_count,
     path,
     best=False,
+    best_val_loss=None,
+    best_sel_score=None,
+    selection_metric=None,
+    sel_history=None,
 ):
     """
     Save model checkpoint with optimizer and scheduler states.
@@ -993,6 +1063,12 @@ def save_checkpoint(
         optimizer_step_count: Total number of optimizer steps taken
         path: Path object for checkpoint file destination
         best: If True, log as best checkpoint
+        best_val_loss: Best val loss so far (resume metadata)
+        best_sel_score: Best selection score so far, on selection_metric's scale
+        selection_metric: Metric behind best_sel_score. A resume resets the
+            score if this changes.
+        sel_history: Per-eval-epoch selection scores, so a resume continues the
+            rolling window
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -1007,6 +1083,10 @@ def save_checkpoint(
             "main_scheduler_state_dict": main_scheduler.state_dict()
             if main_scheduler
             else None,
+            "best_val_loss": best_val_loss,
+            "best_sel_score": best_sel_score,
+            "selection_metric": selection_metric,
+            "sel_history": sel_history,
         },
         path,
     )
@@ -1037,8 +1117,11 @@ def build_scheduler(optimizer, args):
     # Main scheduler (stepped per epoch, after warmup)
     main_scheduler = None
     if args.scheduler == "cosine":
+        t_max = (
+            args.lr_decay_epochs if args.lr_decay_epochs is not None else args.epochs
+        )
         main_scheduler = CosineAnnealingLR(
-            optimizer, T_max=args.epochs, eta_min=args.lr * args.eta_min_factor
+            optimizer, T_max=t_max, eta_min=args.lr * args.eta_min_factor
         )
     elif args.scheduler == "step":
         main_scheduler = StepLR(
@@ -1093,15 +1176,15 @@ def build_cache(args: argparse.Namespace) -> None:
             preprocess=False,
             **dataset_kwargs,
         )
-        # Entries can repeat a cache_key; dedup so each file is stat-ed once.
+        # Entries can share a cache_key. Dedup so each file is checked once.
         keys = list(dict.fromkeys(entry["cache_key"] for entry in probe.entries))
         missing = [k for k in keys if not (probe.geometry_dir / f"{k}.pt").is_file()]
         if not missing:
             return  # warm cache: nothing to build
 
         logger.info(f"build_cache: preprocessing {len(missing)} missing entries")
-        # One worker per CPU over disjoint key shards. A single shard still goes
-        # through the pool, so PyMOL never runs in this (parent) process.
+        # One worker per CPU, each on its own shard of keys. Always use the pool,
+        # even for one shard, so PyMOL never runs in the parent process.
         n_shards = max(1, min(len(missing), os.cpu_count() or 1))
         shard_files = []
         for i in range(n_shards):
@@ -1126,26 +1209,29 @@ def main():
     """Run the full training pipeline."""
     args = parse_args()
 
-    # Build the cache on rank 0 before the NCCL group exists. A warm cache is a
-    # no-op probe; only a first cold build is slow, and coordinating that on the
-    # NCCL group would trip its collective watchdog (minutes). A CPU store has no
-    # such watchdog, so rank 0 can take as long as it needs; it is then reused as
-    # NCCL's rendezvous.
+    # Seed weight init and shuffling. A negative --seed leaves them unseeded.
+    if args.seed >= 0:
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        torch.cuda.manual_seed_all(args.seed)
+
+    # Build the cache on rank 0 before the NCCL group exists. A cold build can
+    # take longer than NCCL's timeout. Other ranks wait on a CPU store, which is
+    # then reused to set up NCCL.
     store = run_once_on_main(lambda: build_cache(args), key="wf_cache_ready")
 
-    # Under torchrun each rank binds its own GPU; a plain launch yields (0, 0, 1).
+    # Under torchrun each rank gets its own GPU. A plain launch yields (0, 0, 1).
     rank, local_rank, world_size = setup_distributed(store=store)
     main_proc = is_main_process(rank)
-    # Under torchrun each rank owns the GPU that setup_distributed pinned with
-    # set_device(local_rank); a plain launch uses --device (CPU if no CUDA). We do
-    # not write this back to args, so the recorded config stays rank-independent.
+    # Under DDP use the GPU set in setup_distributed, otherwise --device.
     if ddp_is_active():
         device = torch.device("cuda", local_rank)
     else:
         device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
-    # Resolve AMP once: it needs a CUDA device with bf16 support. Write the
-    # verdict back to args so the recorded config.json reflects what actually ran.
+    # AMP needs CUDA with bf16. Write the result back to args so config.json
+    # shows what ran.
     if args.use_amp and (device.type != "cuda" or not torch.cuda.is_bf16_supported()):
         reason = (
             "device is not CUDA"
@@ -1166,8 +1252,7 @@ def main():
         (run_dir / "gifs").mkdir(exist_ok=True)
     ddp_barrier()  # other ranks wait until run_dir exists
 
-    # Rank 0 owns the log file; other ranks log to console only, so N processes
-    # never interleave writes into it.
+    # Only rank 0 writes the log file. Other ranks log to the console.
     log_file = Path(args.log_file) if args.log_file else run_dir / "train.log"
     setup_logging_for_tqdm(
         level=args.log_level, log_file=str(log_file) if main_proc else None
@@ -1215,9 +1300,10 @@ def main():
         **dataset_kwargs,
     )
 
-    # sample fixed eval indices
-    np.random.seed(42)
-    eval_indices = np.random.choice(
+    # Fixed eval indices. Use a local generator so --val_seed does not reseed
+    # numpy's global RNG.
+    rng = np.random.default_rng(args.val_seed)
+    eval_indices = rng.choice(
         len(val_loader.dataset),
         min(args.n_eval_samples, len(val_loader.dataset)),
         replace=False,
@@ -1261,9 +1347,8 @@ def main():
             json.dump(config_dict, f, indent=2)
         logger.info(f"Configuration saved to: {config_file}")
 
-    # Non-main ranks run a disabled client, so every wandb.log call site stays a
-    # no-op without a per-call guard. None on the main rank defers to WANDB_MODE
-    # (default: online); an explicit mode here would override that env var.
+    # Non-main ranks get a disabled wandb client, so wandb.log is a no-op there.
+    # mode=None on rank 0 means WANDB_MODE (default online) applies.
     wandb.init(
         project=args.wandb_project,
         dir=args.wandb_dir,
@@ -1274,17 +1359,15 @@ def main():
 
     model = build_model(args, device, encoder_config=encoder_config)
     if ddp_is_active():
-        # broadcast_buffers=False is safe (no BatchNorm; LayerNorm has no synced
-        # buffers). find_unused_parameters=True because ablated edge types can
-        # leave the used-parameter set varying across backwards.
+        # Ablated edge types can leave parameters unused in a backward.
         model = DDP(
             model,
             device_ids=[local_rank],
             broadcast_buffers=False,
             find_unused_parameters=True,
         )
-    # Unwrapped module: parameter access, sanity forward, sampling, and
-    # state_dicts. Saving the wrapper would prefix every key with "module.".
+    # Use the unwrapped module for parameters, sampling and state_dicts. Saving
+    # the DDP wrapper would prefix every key with "module.".
     raw_model = getattr(model, "module", model)
 
     trainable_params, total_params = count_parameters(raw_model)
@@ -1313,7 +1396,7 @@ def main():
         use_amp=args.use_amp,
     )
 
-    # fused AdamW is a CUDA-only kernel; it silently requires all params on GPU.
+    # Fused AdamW is a CUDA-only kernel.
     optimizer = AdamW(
         [p for p in raw_model.parameters() if p.requires_grad],
         lr=args.lr,
@@ -1323,9 +1406,60 @@ def main():
     warmup_scheduler, main_scheduler = build_scheduler(optimizer, args)
 
     best_val_loss = float("inf")
+    best_sel_score = float("-inf")
+    sel_history: list[float] = []
     optimizer_step_count = 0
+    start_epoch = 0
+    ckpt_metric = None
 
-    for epoch in range(1, args.epochs + 1):
+    if args.resume:
+        ckpt_path = _latest_epoch_checkpoint(run_dir / "checkpoints")
+        if ckpt_path is None:
+            raise FileNotFoundError(
+                f"--resume set but no epoch_*.pt found under {run_dir / 'checkpoints'}."
+            )
+        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+        raw_model.load_state_dict(ckpt["model_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        if warmup_scheduler is not None and ckpt.get("warmup_scheduler_state_dict"):
+            warmup_scheduler.load_state_dict(ckpt["warmup_scheduler_state_dict"])
+        if main_scheduler is not None and ckpt.get("main_scheduler_state_dict"):
+            main_scheduler.load_state_dict(ckpt["main_scheduler_state_dict"])
+        start_epoch = ckpt["epoch"]
+        optimizer_step_count = ckpt["optimizer_step_count"]
+        best_val_loss = ckpt.get("best_val_loss")
+        best_val_loss = float("inf") if best_val_loss is None else best_val_loss
+        best_sel_score = ckpt.get("best_sel_score")
+        best_sel_score = float("-inf") if best_sel_score is None else best_sel_score
+        sel_history = ckpt.get("sel_history") or []
+        ckpt_metric = ckpt.get("selection_metric")
+        logger.info(f"Resumed from {ckpt_path} at epoch {start_epoch}.")
+
+    # Generative metrics only exist on eval epochs. If no eval epoch is left,
+    # select on val_loss so best.pt is still written.
+    selection_metric = args.selection_metric
+    remaining_epochs = range(start_epoch + 1, args.epochs + 1)
+    if selection_metric != "val_loss" and not any(
+        e % args.eval_every == 0 for e in remaining_epochs
+    ):
+        logger.warning(
+            f"--selection_metric {selection_metric} needs an eval epoch, but none "
+            f"fall in epochs {start_epoch + 1}..{args.epochs} at --eval_every "
+            f"{args.eval_every}. Selecting best.pt on val_loss instead."
+        )
+        selection_metric = "val_loss"
+
+    # best_sel_score and sel_history are on the selection metric's scale. Reset
+    # them if the metric differs from the checkpoint's.
+    if ckpt_metric is not None and ckpt_metric != selection_metric:
+        logger.warning(
+            f"Selection metric changed ({ckpt_metric} -> {selection_metric}); "
+            "resetting best_sel_score."
+        )
+        best_sel_score = float("-inf")
+        sel_history = []
+
+    for epoch in range(start_epoch + 1, args.epochs + 1):
         # Without this every epoch replays the same shard order on every rank.
         if ddp_is_active():
             train_loader.sampler.set_epoch(epoch)
@@ -1341,7 +1475,7 @@ def main():
             epoch,
             optimizer_step_count,
         )
-        # Log epoch-level metrics with epoch number for per-epoch tracking
+        # Tag epoch metrics with the epoch number.
         train_metrics["epoch"] = epoch
         wandb.log(train_metrics, step=global_step)
 
@@ -1349,44 +1483,25 @@ def main():
         val_metrics["epoch"] = epoch
         wandb.log(val_metrics, step=global_step)
 
-        # Step main scheduler per epoch (after warmup completes)
+        # Step the main scheduler once per epoch after warmup. Cosine reaches
+        # eta_min at T_max and would rise again past it, so stop stepping there.
         if main_scheduler is not None and optimizer_step_count >= args.warmup_steps:
-            main_scheduler.step()
+            past_cosine_horizon = (
+                isinstance(main_scheduler, CosineAnnealingLR)
+                and main_scheduler.last_epoch >= main_scheduler.T_max
+            )
+            if not past_cosine_horizon:
+                main_scheduler.step()
 
         logger.info(
             f"Epoch {epoch}: train_loss={train_metrics['train/epoch_loss']:.4f}, "
             f"val_loss={val_metrics['val/loss']:.4f}, val_rmsd={val_metrics['val/rmsd']:.2f}"
         )
 
-        # val/loss is all-reduced, so every rank agrees on the best epoch and
-        # updates best_val_loss identically; only rank 0 writes it out.
-        if val_metrics["val/loss"] < best_val_loss:
-            best_val_loss = val_metrics["val/loss"]
-            if main_proc:
-                save_checkpoint(
-                    raw_model,
-                    optimizer,
-                    warmup_scheduler,
-                    main_scheduler,
-                    epoch,
-                    optimizer_step_count,
-                    run_dir / "checkpoints" / "best.pt",
-                    best=True,
-                )
-
-        if epoch % args.save_every == 0 and main_proc:
-            save_checkpoint(
-                raw_model,
-                optimizer,
-                warmup_scheduler,
-                main_scheduler,
-                epoch,
-                optimizer_step_count,
-                run_dir / "checkpoints" / f"epoch_{epoch}.pt",
-            )
-
-        # All ranks enter: run_eval_sampling ends in a collective. Swap in the
-        # unwrapped module so no DDP forward machinery fires during integration.
+        # Eval runs before selection so generative metrics are available for it.
+        # All ranks enter (it ends in a collective). Use the unwrapped module so
+        # DDP hooks do not run during integration.
+        eval_metrics = {}
         if epoch % args.eval_every == 0:
             wrapped = flow_matcher.model
             flow_matcher.model = raw_model
@@ -1397,13 +1512,13 @@ def main():
                     args,
                     epoch,
                     device,
-                    global_step,
                     eval_indices,
                     run_dir,
                 )
             finally:
                 flow_matcher.model = wrapped
             if eval_metrics:
+                wandb.log(eval_metrics, step=global_step)
                 logger.info(
                     f"Eval: RMSD={eval_metrics['eval/avg_rmsd']:.2f}A, "
                     f"Precision={eval_metrics['eval/avg_precision']:.2%}, "
@@ -1411,6 +1526,63 @@ def main():
                     f"F1={eval_metrics['eval/avg_f1']:.3f}, "
                     f"AUC-PR={eval_metrics['eval/avg_auc_pr']:.3f}"
                 )
+
+        # All values below are all-reduced, so every rank picks the same epoch.
+        # Only rank 0 writes. best_val_loss is always tracked for the checkpoint.
+        if val_metrics["val/loss"] < best_val_loss:
+            best_val_loss = val_metrics["val/loss"]
+
+        improved = False
+        if selection_metric == "val_loss":
+            sel = -val_metrics["val/loss"]
+            if sel > best_sel_score:
+                best_sel_score = sel
+                improved = True
+        elif eval_metrics:  # generative metric, defined only on eval epochs
+            if selection_metric == "blend":
+                raw = (
+                    BLEND_F1_WEIGHT * eval_metrics["eval/avg_f1"]
+                    + BLEND_AUC_PR_WEIGHT * eval_metrics["eval/avg_auc_pr"]
+                )
+            else:
+                raw = eval_metrics[f"eval/avg_{selection_metric}"]
+            sel_history.append(raw)
+            window = sel_history[-SEL_ROLLING_WINDOW:]
+            sel = sum(window) / len(window)
+            if sel > best_sel_score:
+                best_sel_score = sel
+                improved = True
+
+        if improved and main_proc:
+            save_checkpoint(
+                raw_model,
+                optimizer,
+                warmup_scheduler,
+                main_scheduler,
+                epoch,
+                optimizer_step_count,
+                run_dir / "checkpoints" / "best.pt",
+                best=True,
+                best_val_loss=best_val_loss,
+                best_sel_score=best_sel_score,
+                selection_metric=selection_metric,
+                sel_history=sel_history,
+            )
+
+        if epoch % args.save_every == 0 and main_proc:
+            save_checkpoint(
+                raw_model,
+                optimizer,
+                warmup_scheduler,
+                main_scheduler,
+                epoch,
+                optimizer_step_count,
+                run_dir / "checkpoints" / f"epoch_{epoch}.pt",
+                best_val_loss=best_val_loss,
+                best_sel_score=best_sel_score,
+                selection_metric=selection_metric,
+                sel_history=sel_history,
+            )
 
         # Realign ranks: rank 0 may have spent extra time writing checkpoints.
         ddp_barrier()

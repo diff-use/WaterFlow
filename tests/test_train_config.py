@@ -11,9 +11,10 @@ from scripts.train import (
     _uses_cached_embeddings,
     parse_args,
     resolve_encoder_config,
+    run_eval_sampling,
 )
 from src.encoder_base import build_encoder
-from src.flow import FlowWaterGVP
+from src.flow import FlowMatcher, FlowWaterGVP
 
 
 @pytest.fixture
@@ -245,3 +246,40 @@ def test_inference_extracts_filter_config_from_training_config():
     assert extracted["filter_by_edia"] is False
     assert extracted["max_com_dist"] == 25.0  # default
     assert extracted["min_edia"] == 0.4  # default
+
+
+def test_eval_rng_is_isolated(device, gvp_encoder, tmp_path):
+    """--val_seed fixes the eval draws but must not leak into the training stream."""
+    graph = HeteroData()
+    graph["protein"].pos = torch.randn(10, 3, device=device)
+    graph["protein"].x = torch.randn(10, 16, device=device)
+    graph["protein"].batch = torch.zeros(10, dtype=torch.long, device=device)
+    graph["water"].pos = torch.randn(5, 3, device=device)
+    graph["water"].x = torch.randn(5, 16, device=device)
+    graph["water"].batch = torch.zeros(5, dtype=torch.long, device=device)
+    graph["protein", "pp", "protein"].edge_index = torch.tensor(
+        [[0, 1, 2, 3], [1, 2, 3, 4]], dtype=torch.long, device=device
+    )
+    model = FlowWaterGVP(encoder=gvp_encoder, hidden_dims=(64, 8), layers=1).to(device)
+    fm = FlowMatcher(model)
+    args = Namespace(
+        val_seed=1234, eval_method="euler", eval_steps=3, threshold=1.0, save_gifs=False
+    )
+    loader = Namespace(dataset=[graph])
+
+    def eval_once():
+        return run_eval_sampling(
+            fm, loader, args, 1, device, eval_indices=[0], run_dir=tmp_path
+        )
+
+    # Training's next draw is the same with or without an eval in between.
+    torch.manual_seed(7)
+    expected = torch.rand(3, device=device)
+    torch.manual_seed(7)
+    first = eval_once()
+    assert torch.equal(torch.rand(3, device=device), expected)
+
+    # Eval is pinned to val_seed regardless of the outer RNG state.
+    torch.manual_seed(99)
+    second = eval_once()
+    assert first and second == pytest.approx(first, rel=1e-4)
