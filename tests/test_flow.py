@@ -702,11 +702,22 @@ class TestFlowMatcher:
         assert "protein_pos" in result
         assert "water_true" in result
         assert "pdb_id" in result
+        assert "trajectory" not in result
 
         water_pred = result["water_pred"]
         n_water = simple_hetero_data["water"].num_nodes
         assert water_pred.shape == (n_water, 3)
         assert isinstance(water_pred, np.ndarray)
+
+    @pytest.mark.slow
+    def test_euler_trajectory(self, flow_matcher, simple_hetero_data, device):
+        result = flow_matcher.euler_integrate(
+            simple_hetero_data, num_steps=5, device=str(device), return_trajectory=True
+        )[0]
+        assert len(result["trajectory"]) == 5
+        n_water = simple_hetero_data["water"].num_nodes
+        assert all(frame.shape == (n_water, 3) for frame in result["trajectory"])
+        np.testing.assert_array_equal(result["trajectory"][-1], result["water_pred"])
 
     @pytest.mark.slow
     def test_rk4_integrate(self, flow_matcher, simple_hetero_data, device):
