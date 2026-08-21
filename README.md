@@ -68,9 +68,27 @@ final set, and writes the input structure with the predicted waters added.
   <img src="figures/inference_sweep.gif" alt="Flow ODE integration sweeping candidate waters from the prior to final kept waters" width="900">
 </p>
 
-It needs a trained **flow run** and **confidence run** — pass their run directories
-(each holds `config.json` and `checkpoints/`). See
-[Training your own models](#training-your-own-models) to produce them.
+### Before you run
+
+**Trained models.** Pass a flow run and a confidence run with `--flow_run_dir` /
+`--confidence_run_dir`. See [Training your own models](#training-your-own-models) to
+produce them.
+
+**Data processing.** Prediction does not use the training data pipeline. For each
+input structure it builds an *inference graph* directly from the raw PDB/CIF:
+
+- **Waters are culled.** They are what the model predicts, so any waters in the file
+  are dropped — the graph starts with no water nodes.
+- Protein and hets (ligands, ions, cofactors, nucleic acids) are kept, coordinates
+  are centered on the ASU protein centroid, and symmetry mates are added when the
+  flow run used them. No geometry cache and no quality filtering are involved.
+
+**Embeddings.** If the flow model uses the ESM encoder (the default), precompute
+embeddings for your inputs first — the same step as for training
+([Precompute embeddings](#1-precompute-embeddings)) — into `<processed_dir>/esm/`,
+and pass `--processed_dir <cache_root>`. Each embedding is keyed by the input's file
+stem (`protein.cif` → `esm/protein.pt`), so the names must match. The `gvp` encoder
+needs no embeddings and no `--processed_dir`.
 
 ```bash
 uv run python -m scripts.predict_waters \
@@ -93,9 +111,7 @@ uv run python -m scripts.predict_waters \
 ```
 
 Each list entry is a path under `--base_pdb_dir`, with or without a `.pdb`/`.cif`
-extension. For the `esm` or `slae` encoder, pass `--processed_dir <cache_root>`;
-the embeddings must already exist there (see
-[embeddings](#1-precompute-embeddings)). The `gvp` encoder needs neither.
+extension.
 
 **Outputs**, per structure, in the input coordinate frame:
 
