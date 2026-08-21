@@ -12,6 +12,7 @@ This module provides:
   and NMS over those centroids
 - ConfidenceGVP: scores candidate waters through the same GVP backbone as
   FlowWaterGVP, minus time conditioning
+- build_confidence_model: ConfidenceGVP from a flow run's recorded config
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from torch import nn, Tensor
 from torch_geometric.data import HeteroData
 
 from src.constants import EDGE_PP, EDGE_PW, NUM_RBF
-from src.encoder_base import BaseProteinEncoder
+from src.encoder_base import BaseProteinEncoder, build_encoder, resolve_encoder_config
 from src.flow import ProteinWaterUpdate
 from src.gvp import GVP
 
@@ -137,10 +138,13 @@ def smootherstep_target(
 # ---------------------------------------------------------------------------
 
 
+OXYGEN_VDW_RADIUS = 1.52  # Angstroms. Clustering and NMS radius for waters.
+
+
 def cluster_waters_vdw(
     positions: Tensor,
     confidences: Tensor,
-    radius: float = 1.52,
+    radius: float = OXYGEN_VDW_RADIUS,
     threshold: float | None = None,
 ) -> tuple[Tensor, Tensor]:
     """
@@ -155,7 +159,7 @@ def cluster_waters_vdw(
     Args:
         positions: (N, 3) candidate water positions.
         confidences: (N,) scalar confidences, higher is better.
-        radius: Absorption and NMS radius in Angstroms. Default 1.52, the vdW
+        radius: Absorption and NMS radius in Angstroms. Defaults to the vdW
             radius of oxygen.
         threshold: Drop candidates scoring below this before clustering. None
             keeps all.
@@ -430,3 +434,36 @@ class ConfidenceGVP(nn.Module):
         if return_logits:
             return logits
         return torch.sigmoid(logits)
+
+
+def build_confidence_model(config: dict, device: torch.device) -> ConfidenceGVP:
+    """
+    Instantiate `ConfidenceGVP` from the flow run's hyperparameters.
+
+    Mirroring the flow's encoder and hidden dims is what lets the head
+    warm-start from a checkpoint that shares the same backbone shape.
+
+    Args:
+        config: The flow run's recorded config.
+        device: Device to build on.
+
+    Returns:
+        The model, on `device`.
+    """
+    encoder = build_encoder(resolve_encoder_config(config), device)
+    return ConfidenceGVP(
+        encoder=encoder,
+        hidden_dims=(config.get("hidden_s") or 256, config.get("hidden_v") or 64),
+        edge_scalar_dim=config.get("edge_scalar_dim") or NUM_RBF,
+        layers=config.get("flow_layers") or 3,
+        drop_rate=config.get("drop_rate", 0.1),
+        n_message_gvps=config.get("n_message_gvps", 2),
+        n_update_gvps=config.get("n_update_gvps", 2),
+        cutoff=config.get("cutoff", 8.0),
+        max_neighbors=config.get("max_neighbors", 256),
+        knn_fallback_k=config.get("knn_fallback_k", 8),
+        # Fixed, not from flow config: candidates are scored with no cached PW
+        # edges and can land where the radius query leaves them isolated, so the
+        # knn fallback is always needed (see ConfidenceGVP docstring).
+        dynamic_edge_policy="knn_if_isolated",
+    ).to(device)

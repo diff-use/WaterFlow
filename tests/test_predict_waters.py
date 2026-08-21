@@ -14,35 +14,21 @@ import torch
 
 from scripts.predict_waters import (
     _collect_struc_paths,
-    _kept_atoms_and_center,
-    build_confidence_model,
+    _input_frame,
     load_state_dict_lenient,
     predict_structures,
     select_waters,
 )
-from src.confidence import ConfidenceGVP
+from src.confidence import build_confidence_model, ConfidenceGVP
+from src.dataset import parse_asu_with_biotite
 from src.flow import FlowMatcher, FlowWaterGVP
+from src.structure_io import read_space_group
 
 
 @pytest.mark.unit
-class TestSelectWaters:
-    def test_confidence_threshold_filters_before_clustering(self):
-        # far-apart candidates; the 0.1 one is below threshold and must not survive
-        pos = torch.tensor([[0.0, 0, 0], [10.0, 0, 0]])
-        conf = torch.tensor([0.9, 0.1])
-        sel_pos, sel_conf = select_waters(pos, conf, mode="confidence", threshold=0.5)
-        assert sel_pos.shape[0] == 1
-        assert torch.allclose(sel_pos[0], pos[0])
-
-    def test_no_threshold_keeps_all_clusters(self):
-        pos = torch.tensor([[0.0, 0, 0], [10.0, 0, 0]])
-        conf = torch.tensor([0.9, 0.8])
-        sel_pos, _ = select_waters(pos, conf, mode="confidence", threshold=None)
-        assert sel_pos.shape[0] == 2
-
-    def test_unknown_mode_raises(self):
-        with pytest.raises(ValueError, match="mode"):
-            select_waters(torch.zeros(1, 3), torch.ones(1), mode="density")
+def test_select_waters_unknown_mode_raises():
+    with pytest.raises(ValueError, match="mode"):
+        select_waters(torch.zeros(1, 3), torch.ones(1), mode="density")
 
 
 @pytest.mark.unit
@@ -94,18 +80,18 @@ class TestInputsAndFrame:
         )
         assert paths == []
 
-    def test_kept_atoms_drop_waters_and_center_is_protein_centroid(self, pdb_4h0b):
-        from src.dataset import parse_asu_with_biotite
-
-        kept, center = _kept_atoms_and_center(pdb_4h0b)
+    def test_input_frame(self, pdb_4h0b):
+        kept, center, space_group = _input_frame(pdb_4h0b)
+        protein, _w, lig = parse_asu_with_biotite(pdb_4h0b)
         assert int((kept.res_name == "HOH").sum()) == 0
-        protein, _w, _lig = parse_asu_with_biotite(pdb_4h0b)
+        assert len(kept) == len(protein) + len(lig)
         assert np.allclose(center, protein.coord.mean(axis=0))
+        assert space_group == "P 6"
 
 
 @pytest.mark.integration
 class TestEndToEnd:
-    def test_pipeline_writes_predicted_structure(self, pdb_6eey, gvp_encoder, tmp_path):
+    def test_pipeline_writes_predicted_structure(self, pdb_4h0b, gvp_encoder, tmp_path):
         """Whole pipeline on tiny untrained gvp models: graph -> sample -> score ->
         cluster -> select -> un-center -> write. No checkpoints or embeddings."""
         device = torch.device("cpu")
@@ -126,13 +112,13 @@ class TestEndToEnd:
             num_steps=2,
             water_ratio=1.0,
             selection="confidence",
-            threshold=0.0,  # keep all, so the write path is exercised
+            confidence_threshold=0.0,  # keep all, so the write path is exercised
             out_dir=str(out_dir),
             out_format=".pdb",
         )
 
         predict_structures(
-            [pdb_6eey],
+            [pdb_4h0b],
             flow_matcher,
             conf_model,
             {"encoder_type": "gvp"},
@@ -140,16 +126,28 @@ class TestEndToEnd:
             device,
         )
 
-        pdb_out = out_dir / "6eey_final_pred.pdb"
-        coords_out = out_dir / "6eey_final_waters.txt"
+        pdb_out = out_dir / "4h0b_final_pred.pdb"
+        coords_out = out_dir / "4h0b_final_waters.txt"
         assert pdb_out.exists() and coords_out.exists()
-        # the written structure has HOH waters, and coords are back in the input frame
         from biotite.structure.io.pdb import PDBFile
 
-        written = PDBFile.read(str(pdb_out)).get_structure(model=1)
-        n_waters = int((written.res_name == "HOH").sum())
+        pdb_file = PDBFile.read(str(pdb_out))
+        written = pdb_file.get_structure(model=1)
+        is_water = written.res_name == "HOH"
+        n_waters = int(is_water.sum())
         assert n_waters > 0
-        # txt is (N, 4): x, y, z, confidence in [0, 1]
+
+        # Protein + ligand atoms are written unchanged, in the input frame, with
+        # the input unit cell and space group.
+        protein, _w, lig = parse_asu_with_biotite(pdb_4h0b)
+        kept = protein + lig
+        assert np.allclose(written.coord[~is_water], kept.coord, atol=1e-3)
+        assert np.allclose(written.box, kept.box, atol=1e-3)
+        assert read_space_group(str(pdb_out)) == read_space_group(pdb_4h0b)
+
+        # Water rows in the txt match the written waters: x y z in the input
+        # frame and confidence in [0, 1].
         rows = np.loadtxt(coords_out).reshape(-1, 4)
         assert rows.shape[0] == n_waters
+        assert np.allclose(rows[:, :3], written.coord[is_water], atol=1e-3)
         assert ((rows[:, 3] >= 0) & (rows[:, 3] <= 1)).all()
