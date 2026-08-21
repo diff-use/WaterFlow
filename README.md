@@ -5,20 +5,17 @@ components: a **flow generator** that proposes candidate waters conditioned on t
 protein structure, and a **confidence scorer** that ranks each candidate so a final
 set can be selected.
 
-There are two pipelines, one for each thing you might want to do:
+The two pipelines below are documented separately.
 
-**Prediction** — run the tool on a structure ([Predicting waters](#predicting-waters)):
+**Prediction** ([Predicting waters](#predicting-waters)) runs the trained
+components on a structure: the flow generator samples candidate waters, the
+confidence scorer ranks them, and the ranked candidates are clustered and culled to
+the final set written back into the structure.
 
-```
-flow generator → confidence scorer → cluster + select → write waters
-     sample            score              cull            to structure
-```
-
-**Training** — produce the two components ([Training your own models](#training-your-own-models)):
-
-```
-precompute embeddings → train flow generator → cache candidate waters → train confidence scorer
-```
+**Training** ([Training your own models](#training-your-own-models)) produces the
+two components in four steps: precompute embeddings, train the flow generator,
+cache candidate waters sampled from it, then train the confidence scorer on those
+candidates.
 
 ## Table of Contents
 
