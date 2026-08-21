@@ -16,6 +16,7 @@ from scripts.predict_waters import (
     _collect_struc_paths,
     _input_frame,
     load_state_dict_lenient,
+    parse_args,
     predict_structures,
     select_waters,
 )
@@ -26,9 +27,92 @@ from src.structure_io import read_space_group
 
 
 @pytest.mark.unit
-def test_select_waters_unknown_mode_raises():
-    with pytest.raises(ValueError, match="mode"):
-        select_waters(torch.zeros(1, 3), torch.ones(1), mode="density")
+class TestSelectWaters:
+    def test_unknown_mode_raises(self):
+        with pytest.raises(ValueError, match="mode"):
+            select_waters(torch.zeros(1, 3), torch.ones(1), mode="bogus")
+
+    def test_density_keeps_top_n_by_confidence(self):
+        # Four far-apart candidates: four singleton clusters, so the kept count
+        # comes from the density formula alone. floor(0.6 * 5) = 3.
+        pos = torch.tensor([[0.0, 0, 0], [10.0, 0, 0], [20.0, 0, 0], [30.0, 0, 0]])
+        conf = torch.tensor([0.2, 0.9, 0.5, 0.7])
+        sel_pos, sel_conf = select_waters(
+            pos, conf, mode="density", density_ratio=0.6, num_asu_residues=5
+        )
+        assert sel_pos.shape[0] == 3
+        assert torch.allclose(sel_conf, torch.tensor([0.9, 0.7, 0.5]))
+
+    def test_density_has_no_cutoff(self):
+        pos = torch.tensor([[0.0, 0, 0], [10.0, 0, 0]])
+        conf = torch.tensor([0.9, 0.01])
+        sel_pos, _ = select_waters(
+            pos, conf, mode="density", density_ratio=1.0, num_asu_residues=2
+        )
+        assert sel_pos.shape[0] == 2
+
+    def test_density_requires_ratio_and_residue_count(self):
+        with pytest.raises(ValueError, match="density"):
+            select_waters(torch.zeros(1, 3), torch.ones(1), mode="density")
+
+    @pytest.mark.parametrize("ratio", [0.0, -1.0, float("nan"), float("inf")])
+    def test_density_rejects_bad_ratio(self, ratio):
+        with pytest.raises(ValueError, match="density_ratio"):
+            select_waters(
+                torch.zeros(1, 3),
+                torch.ones(1),
+                mode="density",
+                density_ratio=ratio,
+                num_asu_residues=5,
+            )
+
+    def test_nothing_survives(self):
+        pos = torch.tensor([[0.0, 0, 0], [10.0, 0, 0]])
+        conf = torch.tensor([0.9, 0.8])
+        # confidence: threshold above every score
+        sel_pos, sel_conf = select_waters(pos, conf, mode="confidence", threshold=1.0)
+        assert sel_pos.shape == (0, 3) and sel_conf.shape == (0,)
+        # density: floor(0.1 * 5) = 0
+        sel_pos, sel_conf = select_waters(
+            pos, conf, mode="density", density_ratio=0.1, num_asu_residues=5
+        )
+        assert sel_pos.shape == (0, 3) and sel_conf.shape == (0,)
+
+
+@pytest.mark.unit
+class TestSelectionCLI:
+    """Each selection mode owns one knob and rejects the other's."""
+
+    @staticmethod
+    def _parse(*extra: str):
+        base = ["--flow_run_dir", "f", "--confidence_run_dir", "c"]
+        base += ["--struc", "s.pdb", "--out_dir", "o"]
+        return parse_args(base + list(extra))
+
+    def test_confidence_default_threshold(self):
+        args = self._parse()
+        assert args.confidence_threshold == 0.5 and args.density_ratio is None
+
+    def test_density_default_ratio(self):
+        args = self._parse("--selection", "density")
+        assert args.density_ratio == 0.6 and args.confidence_threshold is None
+
+    def test_confidence_rejects_density_ratio(self):
+        with pytest.raises(SystemExit):
+            self._parse("--density_ratio", "0.6")
+
+    def test_density_rejects_threshold(self):
+        with pytest.raises(SystemExit):
+            self._parse("--selection", "density", "--confidence_threshold", "0.5")
+
+    def test_threshold_range(self):
+        with pytest.raises(SystemExit):
+            self._parse("--confidence_threshold", "1.5")
+
+    @pytest.mark.parametrize("ratio", ["0", "-1", "nan", "inf"])
+    def test_density_ratio_range(self, ratio):
+        with pytest.raises(SystemExit):
+            self._parse("--selection", "density", "--density_ratio", ratio)
 
 
 @pytest.mark.unit
@@ -91,7 +175,10 @@ class TestInputsAndFrame:
 
 @pytest.mark.integration
 class TestEndToEnd:
-    def test_pipeline_writes_predicted_structure(self, pdb_4h0b, gvp_encoder, tmp_path):
+    @pytest.mark.parametrize("selection", ["confidence", "density"])
+    def test_pipeline_writes_predicted_structure(
+        self, selection, pdb_4h0b, gvp_encoder, tmp_path
+    ):
         """Whole pipeline on tiny untrained gvp models: graph -> sample -> score ->
         cluster -> select -> un-center -> write. No checkpoints or embeddings."""
         device = torch.device("cpu")
@@ -111,8 +198,10 @@ class TestEndToEnd:
             method="euler",
             num_steps=2,
             water_ratio=1.0,
-            selection="confidence",
-            confidence_threshold=0.0,  # keep all, so the write path is exercised
+            selection=selection,
+            # Permissive settings so waters survive and the write path runs.
+            confidence_threshold=0.0 if selection == "confidence" else None,
+            density_ratio=1.0 if selection == "density" else None,
             out_dir=str(out_dir),
             out_format=".pdb",
         )
