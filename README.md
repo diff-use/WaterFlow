@@ -21,9 +21,9 @@ WaterFlow is a two-stage Deep Learning model that predicts the positions of orde
   - [Step 3 — Generate ESM embeddings](#step-3--generate-esm-embeddings)
   - [Step 4 — Predict](#step-4--predict)
   - [Predicting on many structures](#predicting-on-many-structures)
+  - [Reusing work between runs](#reusing-work-between-runs)
   - [Selecting the final waters](#selecting-the-final-waters)
   - [Outputs](#outputs)
-  - [Reusing work between runs](#reusing-work-between-runs)
   - [All prediction options](#all-prediction-options)
   - [Troubleshooting](#troubleshooting)
 - [Training your own models](#training-your-own-models)
@@ -167,8 +167,11 @@ four names — see [Training your own models](#training-your-own-models).
 
 ### Step 3 — Generate ESM embeddings
 
-**The shipped checkpoints use the encoder that takes ESM3 embeddings as input, so this step is required.** Embeddings are
-loaded during prediction and not generated, hence we need to generate and cache ESM3 embeddings separately.
+The shipped checkpoints encode the protein with **ESM3** ([EvolutionaryScale
+ESM](https://github.com/evolutionaryscale/esm)), so this step is required. It is also the *only*
+embedding step in the repo — prediction and training both **load** cached embeddings and never
+generate them on the fly, so you run this same script once for whatever structures you need,
+whether you are predicting or training.
 
 ```bash
 uv run python -m scripts.generate_esm_embeddings \
@@ -176,11 +179,16 @@ uv run python -m scripts.generate_esm_embeddings \
     --cache_dir <cache_root>
 ```
 
-This writes `<cache_root>/esm/<protein>.pt`, keyed by the **file stem** of the input. Prediction
-looks the embedding up by that same stem, so `<protein>.cif` and `<protein>.pdb` both pair with
-`esm/<protein>.pt`. Pass the cache root as `--processed_dir <cache_root>` when predicting.
+This writes `<cache_root>/esm/<protein>.pt`, keyed by the input's **file stem**.
 
-`--struc` accepts several files at once:
+> **`<protein>` is not a flag.** It stands for your input file's stem — `1abc` for `1abc.cif`.
+> There is no option to set an input or output *name*: the stem of the file you pass is what
+> names the cached embedding and, later, every output file, and prediction looks the embedding up
+> by that same stem. So `<protein>.cif` and `<protein>.pdb` both pair with `esm/<protein>.pt`.
+
+Embed several structures in one pass by listing them after `--struc` (a shell glob works too),
+then predict them together with `--pdb_list` (see
+[Predicting on many structures](#predicting-on-many-structures)):
 
 ```bash
 uv run python -m scripts.generate_esm_embeddings \
@@ -188,12 +196,14 @@ uv run python -m scripts.generate_esm_embeddings \
     --cache_dir <cache_root>
 ```
 
-On its first run this downloads the `esm3-open` model from HuggingFace, which needs network
-access (and a HuggingFace login if the model is gated for your account). Later runs reuse the
-local copy.
+Pass the cache root as `--processed_dir <cache_root>` when predicting. The first run downloads the
+`esm3-open` weights from HuggingFace (network access, plus a HuggingFace login if the model is
+gated for your account); later runs reuse the local copy.
 
-> The `gvp` encoder uses only protein coordinate and chemical identity and no pre-trained embedding and needs no
-> `--processed_dir`, but none of the shipped checkpoints use it.
+> For training the invocation is the same script with a split file instead of raw paths
+> (`--split_file <split> --base_pdb_dir <dir>`); see [Precompute embeddings](#1-precompute-embeddings).
+> The `gvp` encoder learns from coordinates and chemical identity alone — no embeddings, no
+> `--processed_dir` — but none of the shipped checkpoints use it.
 
 ### Step 4 — Predict
 
@@ -232,8 +242,19 @@ uv run python -m scripts.predict_waters \
     --out_dir out/
 ```
 
-Generate all predictions in one pass by listing the files after `--struc`. Structures are processed in batches of
-`--batch_size` (default 4).
+Every listed structure still needs its own embedding under `<cache_root>/esm/<stem>.pt` —
+generate them all first (Step 3). Structures are processed in batches of `--batch_size`
+(default 4).
+
+### Reusing work between runs
+
+`--geometry_cache <dir>` caches the flow inputs (inference graphs) at `<dir>/<name>.pt` and the
+flow outputs (sampled candidates) at `<dir>/candidates/<name>.pt`. Both are reused when present,
+so a re-run skips graph construction and flow sampling for structures already cached. For a
+single small protein this barely matters; it pays off across repeated runs over many structures.
+
+Cache entries written by a mates checkpoint carry a `_mates` suffix (`<name>_mates.pt`), so mates
+and `mates_off` runs can safely share one cache directory without reusing each other's graphs.
 
 ### Selecting the final waters
 
@@ -267,18 +288,6 @@ Per structure, in the input coordinate frame:
 - `<protein>_pred.pdb` (or `.cif` with `--out_format .cif`) — the input protein and hets with
   predicted waters added as `HOH` oxygens.
 - `<protein>_waters.txt` — one `x y z confidence` row per predicted water.
-
-### Reusing work between runs
-
-`--geometry_cache <dir>` caches the flow inputs (inference graphs) at `<dir>/<name>.pt` and the
-flow outputs (sampled candidates) at `<dir>/candidates/<name>.pt`. Both are reused when
-present, so a re-run skips graph construction and flow sampling for structures already cached.
-For a single small protein this is not an expensive step; the cache matters for repeated runs
-over many structures.
-
-Cache entries written by a mates checkpoint carry a `_mates` suffix (`<name>_mates.pt`), so
-mates and `mates_off` runs can safely share one cache directory without reusing each other's
-graphs.
 
 ### All prediction options
 
@@ -370,17 +379,17 @@ Training then runs on all waters that survive the geometric filters. This is the
 for predicted or non-crystallographic inputs, where electron density does not exist.
 (`--no_filter_by_distance` and `--no_filter_by_bfactor` disable the other two.)
 
-**Logging is opt-in.** Training runs with Weights & Biases disabled unless you pass
-`--wandb_project`, so no account or `wandb login` is required. Supply a project name to log a
-run online:
-
-```bash
---wandb_project water-flow
-```
+**Logging is opt-in.** By default Weights & Biases runs in *disabled* mode: nothing is logged or
+uploaded and no W&B account or login is needed. Pass `--wandb_project <name>` to log the run
+online to that project instead, which does require a login. See
+[docs/training.md](docs/training.md#weights--biases) for the disabled-vs-online distinction and
+how to authenticate.
 
 ### 1. Precompute embeddings
 
-The shipped models use **ESM** (ESM3). Generate per-residue embeddings once, before training:
+Training loads ESM3 embeddings exactly as prediction does ([Step 3 — Generate ESM
+embeddings](#step-3--generate-esm-embeddings)). The only difference is that a training run keys
+them by split entry, so point the script at the split file rather than raw paths:
 
 ```bash
 uv run python -m scripts.generate_esm_embeddings \
@@ -389,9 +398,7 @@ uv run python -m scripts.generate_esm_embeddings \
     --cache_dir <cache_root>
 ```
 
-Embeddings are written to `<cache_root>/esm/`, keyed by split entry (`6eey_final` →
-`esm/6eey_final.pt`). Use `--struc` instead of `--split_file` for raw files outside the
-training layout, as in [Step 3](#step-3--generate-esm-embeddings).
+This writes `<cache_root>/esm/<pdb_id>_final.pt` (e.g. `6eey_final` → `esm/6eey_final.pt`).
 
 > **SLAE is legacy.** The `slae` encoder is kept for older runs. It depends on the external
 > `SLAE` package (not a WaterFlow dependency) and an autoencoder checkpoint — see
@@ -489,20 +496,9 @@ Then predict with `--ckpt_dir my_ckpts`.
 
 The commands below are the recipe recorded in the shipped
 `checkpoints/*/flow_config.json` and `confidence_config.json`, reduced to the flags that differ
-from current defaults. They reproduce every recorded setting **except one**, which no flag can
-express:
-
-> **The flow loss weighting differs.** Both released models record
-> `"loss_weighting": "uniform"` with `"loss_eps": null` — the loss was a plain unweighted MSE
-> over the velocity field. This repository instead always applies a timestep weighting that
-> upweights the end of the trajectory, `w = 1 / (loss_eps + (1 - t))` with `loss_eps = 1e-3`
-> hardcoded (`src/flow.py:1163`), and exposes no option to turn it off. A run following the
-> commands below therefore optimises a **different objective** than the released models did.
-> Everything else — architecture, graph construction, schedule, optimiser — matches.
-
-See [What the configs record but the scripts don't
-expose](#what-the-configs-record-but-the-scripts-dont-expose) for why the remaining unmatched
-keys do not affect the result.
+from current defaults. They reproduce every recorded setting. See [What the configs record but
+the scripts don't expose](#what-the-configs-record-but-the-scripts-dont-expose) for why the keys
+with no matching CLI flag do not change the result.
 
 **Flow generator — `checkpoints/mates`:**
 
@@ -571,11 +567,11 @@ had features this repository does not, so they record some keys with no matching
 architecture and graph-construction keys — encoder type, hidden dimensions, layer counts,
 cutoff, neighbour limits, edge ablations — and ignores everything else. Each unmatched key was
 either switched off in the recorded run or set to the behaviour the current code already
-implements, with one exception (`loss_weighting`) that matters only when *retraining*:
+implements:
 
 | Keys | Recorded value | Effect |
 |---|---|---|
-| `loss_weighting`, `loss_eps` | `uniform`, `null` | **Matters for retraining** — see the warning above. The earlier code could select uniform weighting; this repo always applies `1/(loss_eps + (1-t))`. No effect on inference. |
+| `loss_weighting`, `loss_eps` | `uniform`, `null` | Matches: the trainer uses a plain unweighted MSE over the velocity field. No effect on inference. |
 | `min_snr_gamma`, `t_logit_mean/std` | `5.0`, `0.0`/`1.0` | Inert under `loss_weighting: uniform`; neither exists in this repo. |
 | `t_dist` | `uniform` | Matches: `training_step` draws `t` from `torch.rand` (`src/flow.py:1147`). |
 | `plateau_*` | — | Only read when `scheduler` is `plateau`; both runs used `cosine`. |

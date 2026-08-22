@@ -88,10 +88,15 @@ the run configuration, and later stages read it via `--flow_run_dir` / `--run_di
 
 ### Weights & Biases
 
-Opt-in, as in the confidence trainer. Without `--wandb_project` the run logs
-nothing and needs no account or `wandb login`; setting it logs online, with
-`--wandb_dir` and `--run_name` controlling where the run is written and what it is
-called.
+Logging is opt-in. With no `--wandb_project`, W&B runs in **disabled** mode: `wandb.log`
+and `wandb.finish` are no-ops, nothing is written locally or uploaded, and no account or
+login is needed. This is the default, so a fresh clone trains without ever touching W&B.
+
+Passing `--wandb_project <name>` switches the run to **online** mode: metrics stream to that
+project on wandb.ai, which requires being logged in. Authenticate once per machine with
+`wandb login` (paste the key from https://wandb.ai/authorize) or set `WANDB_API_KEY` in the
+environment. `--wandb_dir` sets where the local run directory is written and `--run_name`
+sets the run's display name. Under DDP only rank 0 logs; the other ranks stay disabled.
 
 ## Multi-GPU (DDP)
 
