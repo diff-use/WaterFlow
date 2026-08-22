@@ -15,7 +15,6 @@ WaterFlow is a two-stage Deep Learning model that predicts the positions of orde
   - [System libraries](#system-libraries)
   - [Building an environment from scratch](#building-an-environment-from-scratch)
 - [Predicting waters](#predicting-waters)
-  - [Quickstart](#quickstart)
   - [Step 1 — Fetch the model weights](#step-1--fetch-the-model-weights)
   - [Step 2 — Pick a checkpoint set](#step-2--pick-a-checkpoint-set)
   - [Step 3 — Generate ESM embeddings](#step-3--generate-esm-embeddings)
@@ -91,31 +90,8 @@ structure it strips any existing waters, builds the graph from protein + het-ato
 candidates with the flow model, scores them with the confidence model, selects the final set,
 and writes the input structure back out with the predicted waters added.
 
-### Quickstart
-
-Replace `<protein>` with your structure's name throughout — the file stem is what ties the
-embedding to the prediction.
-
-```bash
-# 0. Install, once per machine
-uv sync
-sudo apt-get install -y libgl1              # PyMOL's OpenGL library
-git lfs install && git lfs pull             # download the model weights
-
-# 1. Generate ESM3 Embeddings -> cache/esm/<protein>.pt
-uv run python -m scripts.generate_esm_embeddings \
-    --struc <protein>.cif \
-    --cache_dir cache/
-
-# 2. Predict final positions -> out/<protein>_pred.pdb and out/<protein>_waters.txt
-uv run python -m scripts.predict_waters \
-    --struc <protein>.cif \
-    --processed_dir cache/ \
-    --out_dir out/
-```
-
-That is the whole path for one structure with the default (symmetry-mates) models. The
-sections below explain each step and the knobs worth changing.
+The four steps below cover it end to end: fetch the weights, pick a checkpoint set, generate
+embeddings, and predict.
 
 ### Step 1 — Fetch the model weights
 
@@ -556,7 +532,8 @@ already the default.
 The remaining flags in those configs are dataloader performance settings that do not change the
 model: `--num_workers 12 --pin_memory --persistent_workers --cache_load_mmap` for flow.
 
-#### What the configs record but the scripts don't expose
+<details>
+<summary><strong>What the configs record but the scripts don't expose</strong></summary>
 
 The shipped `*_config.json` files were written by an earlier version of the training code that
 had features this repository does not, so they record some keys with no matching CLI flag.
@@ -582,6 +559,8 @@ implements:
 
 The model **architecture** — encoder type, hidden dimensions, layer counts — is what must match
 for a checkpoint to load, and a run following the commands above matches it.
+
+</details>
 
 ### Evaluating the flow generator alone
 
