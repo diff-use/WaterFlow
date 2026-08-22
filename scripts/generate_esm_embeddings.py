@@ -10,6 +10,7 @@ This script:
 5. Saves embeddings to separate .pt files in cache_dir/esm/
 
 Usage:
+    # training layout: keyed by split entry ('6eey_final' -> esm/6eey_final.pt)
     uv run python -m scripts.generate_esm_embeddings \
         --split_file /path/to/split.txt \
         --cache_dir /path/to/cache \
@@ -18,6 +19,12 @@ Usage:
         [--model_name esm3-open] \
         [--batch_limit 10] \
         [--overwrite]
+
+    # raw structures: keyed by file stem (protein.cif -> esm/protein.pt), which
+    # is how predict_waters looks embeddings up
+    uv run python -m scripts.generate_esm_embeddings \
+        --struc protein.cif other.pdb \
+        --cache_dir /path/to/cache
 
 Output format (per cache file):
     {
@@ -166,8 +173,18 @@ def main() -> None:
     parser.add_argument(
         "--split_file",
         type=Path,
-        required=True,
-        help="Text file with PDB entries (one per line, e.g., '6eey_final')",
+        default=None,
+        help="Text file with PDB entries (one per line, e.g., '6eey_final'); "
+        "resolved under --base_pdb_dir and keyed by split entry.",
+    )
+    parser.add_argument(
+        "--struc",
+        type=Path,
+        nargs="+",
+        default=None,
+        help="One or more raw PDB/CIF files, keyed by file stem "
+        "(protein.cif -> esm/protein.pt). Use this for prediction inputs. "
+        "Takes precedence over --split_file.",
     )
     parser.add_argument(
         "--cache_dir",
@@ -178,8 +195,8 @@ def main() -> None:
     parser.add_argument(
         "--base_pdb_dir",
         type=Path,
-        default=Path("/sb/wankowicz_lab/data/srivasv/pdb_redo_data"),
-        help="Base directory containing PDB subdirectories",
+        default=None,
+        help="Base directory containing PDB subdirectories; required with --split_file",
     )
     parser.add_argument(
         "--model_name",
@@ -206,6 +223,10 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+    if not args.struc and not args.split_file:
+        parser.error("provide --struc <files> or --split_file <file>")
+    if args.split_file and args.base_pdb_dir is None:
+        parser.error("--split_file requires --base_pdb_dir")
 
     esm_cache_dir = args.cache_dir / "esm"
     esm_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -218,8 +239,16 @@ def main() -> None:
     model.eval()
     logger.info("Model loaded.")
 
-    entries = parse_split_file(args.split_file, args.base_pdb_dir)
-    logger.info(f"Found {len(entries)} entries in split file")
+    if args.struc:
+        # Key by file stem, matching how predict_waters looks embeddings up.
+        entries = [
+            {"cache_key": p.stem, "struc_path": p, "pdb_id": p.stem}
+            for p in args.struc
+        ]
+        logger.info(f"Embedding {len(entries)} structure(s) passed via --struc")
+    else:
+        entries = parse_split_file(args.split_file, args.base_pdb_dir)
+        logger.info(f"Found {len(entries)} entries in split file")
 
     if args.batch_limit:
         entries = entries[: args.batch_limit]

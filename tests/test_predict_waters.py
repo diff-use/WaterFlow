@@ -13,6 +13,7 @@ import pytest
 import torch
 
 from scripts.predict_waters import (
+    _check_embeddings,
     _collect_struc_paths,
     _input_frame,
     load_state_dict_lenient,
@@ -85,7 +86,7 @@ class TestSelectionCLI:
 
     @staticmethod
     def _parse(*extra: str):
-        base = ["--flow_run_dir", "f", "--confidence_run_dir", "c"]
+        base = ["--ckpt_dir", "c"]
         base += ["--struc", "s.pdb", "--out_dir", "o"]
         return parse_args(base + list(extra))
 
@@ -173,6 +174,25 @@ class TestInputsAndFrame:
         assert space_group == "P 6"
 
 
+@pytest.mark.unit
+class TestCheckEmbeddings:
+    def test_gvp_skips_check(self):
+        # gvp needs no embeddings, so nothing is required even with no cache.
+        _check_embeddings(["/no/such/protein.cif"], "gvp", None)
+
+    def test_missing_esm_embedding_raises_naming_files(self, tmp_path):
+        with pytest.raises(SystemExit) as exc:
+            _check_embeddings(["a/protein.cif", "b/other.pdb"], "esm", str(tmp_path))
+        msg = str(exc.value)
+        assert "protein.cif" in msg and "other.pdb" in msg
+
+    def test_present_esm_embeddings_pass(self, tmp_path):
+        emb = tmp_path / "esm"
+        emb.mkdir()
+        (emb / "protein.pt").touch()
+        _check_embeddings(["some/dir/protein.cif"], "esm", str(tmp_path))
+
+
 @pytest.mark.integration
 class TestEndToEnd:
     @pytest.mark.parametrize("selection", ["confidence", "density"])
@@ -194,6 +214,7 @@ class TestEndToEnd:
         out_dir = tmp_path / "out"
         args = SimpleNamespace(
             processed_dir=None,
+            geometry_cache=None,
             include_mates=False,
             method="euler",
             num_steps=2,
@@ -240,3 +261,94 @@ class TestEndToEnd:
         assert rows.shape[0] == n_waters
         assert np.allclose(rows[:, :3], written.coord[is_water], atol=1e-3)
         assert ((rows[:, 3] >= 0) & (rows[:, 3] <= 1)).all()
+
+    def test_geometry_cache_writes_and_reuses(self, pdb_4h0b, gvp_encoder, tmp_path):
+        """--geometry_cache stores the flow input graph (<name>.pt) and candidate
+        waters (candidates/<name>.pt); a second run reuses them, so its predicted
+        waters are identical instead of freshly sampled."""
+        device = torch.device("cpu")
+        flow_model = FlowWaterGVP(
+            encoder=gvp_encoder, hidden_dims=(64, 8), layers=1
+        ).to(device)
+        flow_model.eval()
+        flow_matcher = FlowMatcher(model=flow_model, sampling_strategy="uniform_ball")
+        conf_model = build_confidence_model(
+            {"encoder_type": "gvp", "hidden_s": 64, "hidden_v": 8, "flow_layers": 1},
+            device,
+        )
+        conf_model.eval()  # deterministic scores, so reuse yields identical output
+        cache = tmp_path / "geo_cache"
+
+        def run(out_dir):
+            args = SimpleNamespace(
+                processed_dir=None,
+                geometry_cache=str(cache),
+                include_mates=False,
+                method="euler",
+                num_steps=2,
+                water_ratio=1.0,
+                selection="confidence",
+                confidence_threshold=0.0,
+                density_ratio=None,
+                out_dir=str(out_dir),
+                out_format=".pdb",
+            )
+            predict_structures(
+                [pdb_4h0b], flow_matcher, conf_model, {"encoder_type": "gvp"}, args, device
+            )
+
+        run(tmp_path / "out1")
+        # include_mates=False -> no suffix on the cached names.
+        graph_pt = cache / "4h0b_final.pt"
+        cand_pt = cache / "candidates" / "4h0b_final.pt"
+        assert graph_pt.exists(), "flow-input graph not cached"
+        assert cand_pt.exists(), "candidate waters not cached"
+        assert "candidate_pos" in torch.load(cand_pt, weights_only=False)
+
+        # Second run reuses the cached candidates -> identical predicted waters.
+        run(tmp_path / "out2")
+        r1 = np.loadtxt(tmp_path / "out1" / "4h0b_final_waters.txt").reshape(-1, 4)
+        r2 = np.loadtxt(tmp_path / "out2" / "4h0b_final_waters.txt").reshape(-1, 4)
+        assert r1.shape == r2.shape and np.allclose(r1, r2, atol=1e-4)
+
+    def test_geometry_cache_separates_mates(self, pdb_4h0b, gvp_encoder, tmp_path):
+        """mates and mates_off share one --geometry_cache dir without colliding:
+        mates runs write <name>_mates.pt, mates_off runs write <name>.pt, so
+        neither reuses the other's cached graph or candidates."""
+        device = torch.device("cpu")
+        flow_model = FlowWaterGVP(
+            encoder=gvp_encoder, hidden_dims=(64, 8), layers=1
+        ).to(device)
+        flow_model.eval()
+        flow_matcher = FlowMatcher(model=flow_model, sampling_strategy="uniform_ball")
+        conf_model = build_confidence_model(
+            {"encoder_type": "gvp", "hidden_s": 64, "hidden_v": 8, "flow_layers": 1},
+            device,
+        )
+        conf_model.eval()
+        cache = tmp_path / "geo_cache"
+
+        def run(include_mates, out_dir):
+            args = SimpleNamespace(
+                processed_dir=None,
+                geometry_cache=str(cache),
+                include_mates=include_mates,
+                method="euler",
+                num_steps=2,
+                water_ratio=1.0,
+                selection="confidence",
+                confidence_threshold=0.0,
+                density_ratio=None,
+                out_dir=str(out_dir),
+                out_format=".pdb",
+            )
+            predict_structures(
+                [pdb_4h0b], flow_matcher, conf_model, {"encoder_type": "gvp"}, args, device
+            )
+
+        run(False, tmp_path / "off")
+        run(True, tmp_path / "on")
+        assert (cache / "4h0b_final.pt").exists()
+        assert (cache / "4h0b_final_mates.pt").exists()
+        assert (cache / "candidates" / "4h0b_final.pt").exists()
+        assert (cache / "candidates" / "4h0b_final_mates.pt").exists()

@@ -14,10 +14,16 @@ on cached training-format graphs, against the ground-truth waters.
 For esm/slae encoders the protein embeddings must already be in
 --processed_dir (see generate_esm_embeddings.py / generate_slae_embeddings.py).
 
+Models are loaded from a --ckpt_dir holding flow.pt, confidence.pt,
+flow_config.json and confidence_config.json. It defaults to the mates models
+shipped in the repo (checkpoints/mates); pass checkpoints/mates_off to run
+without symmetry mates.
+
 Usage:
-    python -m scripts.predict_waters \\
-        --flow_run_dir <flow_run> --confidence_run_dir <conf_run> \\
-        --struc protein.cif --out_dir out/ --confidence_threshold 0.5
+    python -m scripts.predict_waters --struc protein.cif --out_dir out/
+
+    Run without symmetry mates:
+        ... --ckpt_dir checkpoints/mates_off
 
     Density mode keeps a fixed count per residue instead of a cutoff:
         ... --selection density --density_ratio 0.6
@@ -26,6 +32,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import math
 from pathlib import Path
 
@@ -36,7 +43,7 @@ import torch.nn as nn
 from loguru import logger
 from tqdm import tqdm
 
-from scripts.inference import build_model_from_config, load_config, run_inference_batch
+from scripts.inference import build_model_from_config, run_inference_batch
 from src.confidence import build_confidence_model, cluster_waters_vdw, ConfidenceGVP
 from src.confidence_dataset import _oxygen_features
 from src.dataset import parse_asu_with_biotite
@@ -171,40 +178,83 @@ def predict_structures(
     args: argparse.Namespace,
     device: torch.device,
 ) -> None:
-    """Predict + write final waters for a batch of structures."""
+    """Predict + write final waters for a batch of structures.
+
+    With --geometry_cache set, the flow-model inputs (inference graphs) are cached
+    at <geometry_cache>/<name>.pt and the flow outputs (candidate waters) at
+    <geometry_cache>/candidates/<name>.pt. When the mates model is used the cached
+    names carry a `_mates` suffix (<name>_mates.pt), so mates and mates_off runs
+    can share one cache dir without reusing each other's graph. Either is reused
+    when present, so a re-run skips graph construction and flow sampling for
+    cached structures.
+    """
+    cache = Path(args.geometry_cache) if args.geometry_cache else None
+    cand_cache = cache / "candidates" if cache else None
+    mates_tag = "_mates" if args.include_mates else ""
+
     graphs, frames, out_names = [], [], []
     encoder_type = flow_config.get("encoder_type", "gvp")
     for path in struc_paths:
-        graph = build_inference_graph(
-            path,
-            encoder_type=encoder_type,
-            processed_dir=args.processed_dir,
-            include_mates=args.include_mates,
-            include_ligands=flow_config.get("include_ligands", True),
-            cutoff=flow_config.get("cutoff", 8.0),
-            max_neighbors=flow_config.get("max_neighbors", 256),
-        )
+        name = Path(path).stem
+        graph_pt = cache / f"{name}{mates_tag}.pt" if cache else None
+        if graph_pt is not None and graph_pt.exists():
+            graph = torch.load(graph_pt, weights_only=False)
+        else:
+            graph = build_inference_graph(
+                path,
+                encoder_type=encoder_type,
+                processed_dir=args.processed_dir,
+                include_mates=args.include_mates,
+                include_ligands=flow_config.get("include_ligands", True),
+                cutoff=flow_config.get("cutoff", 8.0),
+                max_neighbors=flow_config.get("max_neighbors", 256),
+            )
+            if graph_pt is not None:
+                cache.mkdir(parents=True, exist_ok=True)
+                torch.save(graph, graph_pt)
         graphs.append(graph)
         frames.append(_input_frame(path))
-        out_names.append(Path(path).stem)
+        out_names.append(name)
 
-    # Batched flow sampling -> candidate waters (centred frame).
-    results = run_inference_batch(
-        flow_matcher,
-        graphs,
-        method=args.method,
-        num_steps=args.num_steps,
-        device=str(device),
-        water_ratio=args.water_ratio,
-    )
+    # Candidate waters (centred frame): reuse cached samples, sample the rest in
+    # one batch.
+    candidates: list[torch.Tensor | None] = [None] * len(graphs)
+    todo_idx, todo_graphs = [], []
+    for i, name in enumerate(out_names):
+        cand_pt = cand_cache / f"{name}{mates_tag}.pt" if cand_cache else None
+        if cand_pt is not None and cand_pt.exists():
+            candidates[i] = torch.load(cand_pt, weights_only=False)["candidate_pos"]
+        else:
+            todo_idx.append(i)
+            todo_graphs.append(graphs[i])
+
+    if todo_graphs:
+        results = run_inference_batch(
+            flow_matcher,
+            todo_graphs,
+            method=args.method,
+            num_steps=args.num_steps,
+            device=str(device),
+            water_ratio=args.water_ratio,
+        )
+        if cand_cache is not None:
+            cand_cache.mkdir(parents=True, exist_ok=True)
+        for i, result in zip(todo_idx, results):
+            cand = torch.as_tensor(result["water_pred"], dtype=torch.float32)
+            candidates[i] = cand
+            if cand_cache is not None:
+                torch.save(
+                    {"candidate_pos": cand},
+                    cand_cache / f"{out_names[i]}{mates_tag}.pt",
+                )
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    for graph, result, (kept, center, space_group), name in zip(
-        graphs, results, frames, out_names
+    for graph, candidate_pos, (kept, center, space_group), name in zip(
+        graphs, candidates, frames, out_names
     ):
-        candidate_pos = torch.as_tensor(result["water_pred"], dtype=torch.float32)
+        candidate_pos = torch.as_tensor(candidate_pos, dtype=torch.float32)
         conf = score_candidates(conf_model, graph, candidate_pos, device)
         sel_pos, sel_conf = select_waters(
             candidate_pos,
@@ -265,16 +315,35 @@ def _collect_struc_paths(args: argparse.Namespace) -> list[str]:
     return paths
 
 
+def _check_embeddings(
+    paths: list[str], encoder_type: str, processed_dir: str | None
+) -> None:
+    """Fail fast (not deep in graph building) if an esm/slae embedding is missing.
+
+    esm/slae look up <processed_dir>/<encoder_type>/<stem>.pt per input; gvp needs
+    none and is skipped.
+    """
+    if encoder_type == "gvp":
+        return
+    emb_dir = Path(processed_dir or ".") / encoder_type
+    missing = [p for p in paths if not (emb_dir / f"{Path(p).stem}.pt").exists()]
+    if missing:
+        raise SystemExit(
+            f"Missing {encoder_type} embeddings under {emb_dir} for "
+            f"{[Path(p).name for p in missing]}. Generate them first with "
+            f"scripts/generate_{encoder_type}_embeddings.py"
+        )
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
-        "--flow_run_dir",
-        required=True,
-        help="Flow run dir (config.json + checkpoints/).",
+        "--ckpt_dir",
+        default="checkpoints/mates",
+        help="Directory holding flow.pt, confidence.pt, flow_config.json and "
+        "confidence_config.json. Default: the mates models shipped in the repo; "
+        "pass checkpoints/mates_off to run without symmetry mates.",
     )
-    p.add_argument("--confidence_run_dir", required=True, help="Confidence run dir.")
-    p.add_argument("--flow_checkpoint", default="best.pt")
-    p.add_argument("--confidence_checkpoint", default="best.pt")
 
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--struc", help="A single PDB/CIF file.")
@@ -291,6 +360,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "Embeddings are loaded, not generated: run generate_esm_embeddings.py or "
         "generate_slae_embeddings.py first. Looked up by file stem under "
         "processed_dir/<encoder_type>.",
+    )
+    p.add_argument(
+        "--geometry_cache",
+        default=None,
+        help="Directory to cache flow-model inputs (inference graphs) as "
+        "<name>.pt, with flow outputs (candidate waters) under a candidates/ "
+        "subdir. Mates runs get a `_mates` suffix (<name>_mates.pt), so mates and "
+        "mates_off can share one dir without colliding. Both are reused when "
+        "present, so a re-run skips graph construction and flow sampling for "
+        "cached structures. Off by default.",
     )
     p.add_argument("--out_dir", required=True)
     p.add_argument("--out_format", default=".pdb", choices=[".pdb", ".cif"])
@@ -361,29 +440,25 @@ def main() -> None:
     setup_logging_for_tqdm(level=args.log_level)
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
-    flow_dir = Path(args.flow_run_dir)
-    flow_config = load_config(flow_dir)
+    ckpt_dir = Path(args.ckpt_dir)
+    flow_config = json.loads((ckpt_dir / "flow_config.json").read_text())
     if args.include_mates is None:
         args.include_mates = flow_config.get("include_mates", False)
 
     flow_model = build_model_from_config(flow_config, device)
-    load_state_dict_lenient(
-        flow_model, flow_dir / "checkpoints" / args.flow_checkpoint, device
-    )
+    load_state_dict_lenient(flow_model, ckpt_dir / "flow.pt", device)
     flow_matcher = FlowMatcher(
         model=flow_model,
         sampling_strategy=flow_config.get("sampling_strategy", "uniform_ball"),
     )
 
-    conf_dir = Path(args.confidence_run_dir)
-    conf_config = load_config(conf_dir)
+    conf_config = json.loads((ckpt_dir / "confidence_config.json").read_text())
     conf_config = conf_config.get("flow_config", conf_config)  # confidence runs nest it
     conf_model = build_confidence_model(conf_config, device)
-    load_state_dict_lenient(
-        conf_model, conf_dir / "checkpoints" / args.confidence_checkpoint, device
-    )
+    load_state_dict_lenient(conf_model, ckpt_dir / "confidence.pt", device)
 
     paths = _collect_struc_paths(args)
+    _check_embeddings(paths, flow_config.get("encoder_type", "gvp"), args.processed_dir)
     logger.info(f"Predicting waters for {len(paths)} structure(s) on {device}")
     for start in tqdm(range(0, len(paths), args.batch_size), desc="predict"):
         predict_structures(

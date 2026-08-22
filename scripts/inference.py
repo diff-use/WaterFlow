@@ -7,7 +7,7 @@ Takes a text file of PDB paths, runs trajectory integration (euler/rk4),
 and outputs plots, gifs, and metrics for each PDB.
 
 Usage:
-    python scripts/inference.py \
+    python -m scripts.inference \
         --run_dir /path/to/run_directory \
         --pdb_list /path/to/pdb_list.txt \
         --output_dir /path/to/output \
@@ -55,11 +55,6 @@ def parse_args():
     # This would simplify inference invocation and ensure reproducibility.
     # Example: --config config.yaml would load inference settings.
 
-    # TODO: Remove hardcoded default paths. These should be required arguments
-    # or loaded from environment variables / config files for portability.
-    # Current hardcoded paths:
-    #   - processed_dir: /home/srivasv/flow_cache/
-    #   - base_pdb_dir: /sb/wankowicz_lab/data/srivasv/pdb_redo_data
     p = argparse.ArgumentParser(description="Run WaterFlow inference on PDB files")
 
     p.add_argument(
@@ -85,7 +80,7 @@ def parse_args():
     p.add_argument(
         "--processed_dir",
         type=str,
-        default="/home/srivasv/flow_cache/",
+        required=True,
         help="Parent directory containing all cached preprocessed data. This directory holds "
         "protein graphs, embeddings, and geometry subdirectories (e.g., processed_dir/geometry/). "
         "Each PDB's preprocessed data is stored in subdirectories organized by cache type.",
@@ -93,7 +88,7 @@ def parse_args():
     p.add_argument(
         "--base_pdb_dir",
         type=str,
-        default="/sb/wankowicz_lab/data/srivasv/pdb_redo_data",
+        required=True,
         help="Base directory containing PDB subdirectories for dataset creation",
     )
     p.add_argument(
