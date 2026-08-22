@@ -85,7 +85,7 @@ class TestSelectionCLI:
 
     @staticmethod
     def _parse(*extra: str):
-        base = ["--flow_run_dir", "f", "--confidence_run_dir", "c"]
+        base = ["--ckpt_dir", "c"]
         base += ["--struc", "s.pdb", "--out_dir", "o"]
         return parse_args(base + list(extra))
 

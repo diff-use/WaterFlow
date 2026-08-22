@@ -14,10 +14,16 @@ on cached training-format graphs, against the ground-truth waters.
 For esm/slae encoders the protein embeddings must already be in
 --processed_dir (see generate_esm_embeddings.py / generate_slae_embeddings.py).
 
+Models are loaded from a --ckpt_dir holding flow.pt, confidence.pt,
+flow_config.json and confidence_config.json. It defaults to the mates models
+shipped in the repo (checkpoints/mates); pass checkpoints/mates_off to run
+without symmetry mates.
+
 Usage:
-    python -m scripts.predict_waters \\
-        --flow_run_dir <flow_run> --confidence_run_dir <conf_run> \\
-        --struc protein.cif --out_dir out/ --confidence_threshold 0.5
+    python -m scripts.predict_waters --struc protein.cif --out_dir out/
+
+    Run without symmetry mates:
+        ... --ckpt_dir checkpoints/mates_off
 
     Density mode keeps a fixed count per residue instead of a cutoff:
         ... --selection density --density_ratio 0.6
@@ -26,6 +32,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import math
 from pathlib import Path
 
@@ -36,7 +43,7 @@ import torch.nn as nn
 from loguru import logger
 from tqdm import tqdm
 
-from scripts.inference import build_model_from_config, load_config, run_inference_batch
+from scripts.inference import build_model_from_config, run_inference_batch
 from src.confidence import build_confidence_model, cluster_waters_vdw, ConfidenceGVP
 from src.confidence_dataset import _oxygen_features
 from src.dataset import parse_asu_with_biotite
@@ -268,13 +275,12 @@ def _collect_struc_paths(args: argparse.Namespace) -> list[str]:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
-        "--flow_run_dir",
-        required=True,
-        help="Flow run dir (config.json + checkpoints/).",
+        "--ckpt_dir",
+        default="checkpoints/mates",
+        help="Directory holding flow.pt, confidence.pt, flow_config.json and "
+        "confidence_config.json. Default: the mates models shipped in the repo; "
+        "pass checkpoints/mates_off to run without symmetry mates.",
     )
-    p.add_argument("--confidence_run_dir", required=True, help="Confidence run dir.")
-    p.add_argument("--flow_checkpoint", default="best.pt")
-    p.add_argument("--confidence_checkpoint", default="best.pt")
 
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--struc", help="A single PDB/CIF file.")
@@ -361,27 +367,22 @@ def main() -> None:
     setup_logging_for_tqdm(level=args.log_level)
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
-    flow_dir = Path(args.flow_run_dir)
-    flow_config = load_config(flow_dir)
+    ckpt_dir = Path(args.ckpt_dir)
+    flow_config = json.loads((ckpt_dir / "flow_config.json").read_text())
     if args.include_mates is None:
         args.include_mates = flow_config.get("include_mates", False)
 
     flow_model = build_model_from_config(flow_config, device)
-    load_state_dict_lenient(
-        flow_model, flow_dir / "checkpoints" / args.flow_checkpoint, device
-    )
+    load_state_dict_lenient(flow_model, ckpt_dir / "flow.pt", device)
     flow_matcher = FlowMatcher(
         model=flow_model,
         sampling_strategy=flow_config.get("sampling_strategy", "uniform_ball"),
     )
 
-    conf_dir = Path(args.confidence_run_dir)
-    conf_config = load_config(conf_dir)
+    conf_config = json.loads((ckpt_dir / "confidence_config.json").read_text())
     conf_config = conf_config.get("flow_config", conf_config)  # confidence runs nest it
     conf_model = build_confidence_model(conf_config, device)
-    load_state_dict_lenient(
-        conf_model, conf_dir / "checkpoints" / args.confidence_checkpoint, device
-    )
+    load_state_dict_lenient(conf_model, ckpt_dir / "confidence.pt", device)
 
     paths = _collect_struc_paths(args)
     logger.info(f"Predicting waters for {len(paths)} structure(s) on {device}")

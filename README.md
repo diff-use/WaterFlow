@@ -36,7 +36,9 @@ WaterFlow uses [`uv`](https://docs.astral.sh/uv/) with Python 3.12.
 uv sync
 ```
 
-Every command runs through `uv run`.
+Every command runs through `uv run`. The pretrained checkpoints in `checkpoints/`
+are stored with [Git LFS](https://git-lfs.com); run `git lfs install && git lfs pull`
+after cloning to fetch the weights (see [Predicting waters](#predicting-waters)).
 
 <details>
 <summary>Building a virtual environment from scratch</summary>
@@ -70,9 +72,45 @@ final set, and writes the input structure with the predicted waters added.
 
 ### Before you run
 
-**Trained models.** Pass a flow run and a confidence run with `--flow_run_dir` /
-`--confidence_run_dir`. See [Training your own models](#training-your-own-models) to
-produce them.
+**Trained models.** The repo ships two pretrained ESM model sets under
+`checkpoints/`, with the weights stored in [Git LFS](https://git-lfs.com):
+
+| `--ckpt_dir` | Symmetry mates | Contents |
+|---|---|---|
+| `checkpoints/mates` (default) | yes | `flow.pt`, `confidence.pt`, `flow_config.json`, `confidence_config.json` |
+| `checkpoints/mates_off` | no | same four files |
+
+`predict_waters.py` defaults to `checkpoints/mates`. Pass `--ckpt_dir
+checkpoints/mates_off` to run without mates, or point it at your own directory of
+the same four files — see [Training your own models](#training-your-own-models).
+
+Fetch the weights before predicting. Install Git LFS — no root needed:
+
+```bash
+# Option A — conda / mamba:
+conda install -c conda-forge git-lfs
+
+# Option B — user-local binary, from https://github.com/git-lfs/git-lfs/releases:
+VERSION=3.5.1   # set to the latest release
+curl -L https://github.com/git-lfs/git-lfs/releases/download/v${VERSION}/git-lfs-linux-amd64-v${VERSION}.tar.gz \
+  | tar -xz -C /tmp
+mkdir -p ~/.local/bin && cp /tmp/git-lfs-${VERSION}/git-lfs ~/.local/bin/   # ensure ~/.local/bin is on PATH
+
+# Option C — system package manager (needs root):
+sudo apt-get install git-lfs   # Debian/Ubuntu (macOS: brew install git-lfs)
+```
+
+Then fetch the weights:
+
+```bash
+git lfs install    # once per machine
+git lfs pull       # download the checkpoint weights
+```
+
+Without Git LFS, `git clone` / `git pull` still succeed, but each `.pt` arrives as a
+small text pointer (a few hundred bytes) instead of the ~42 MB model, and loading it
+fails. Installing Git LFS and running `git lfs pull` replaces the pointers with the
+real files.
 
 **Data processing.** Prediction does not use the training data pipeline. For each
 input structure it builds an *inference graph* directly from the raw PDB/CIF:
@@ -90,28 +128,36 @@ and pass `--processed_dir <cache_root>`. Each embedding is keyed by the input's 
 stem (`protein.cif` → `esm/protein.pt`), so the names must match. The `gvp` encoder
 needs no embeddings and no `--processed_dir`.
 
+Predict with the default (mates) checkpoints:
+
 ```bash
 uv run python -m scripts.predict_waters \
-    --flow_run_dir <flow_run> \
-    --confidence_run_dir <conf_run> \
     --struc protein.cif \
+    --processed_dir <cache_root> \
     --out_dir out/ \
     --selection density \
     --density_ratio 0.6
 ```
 
-Run a batch by pointing at a list instead of a single file:
+Use the no-mates models instead:
 
 ```bash
 uv run python -m scripts.predict_waters \
-    --flow_run_dir <flow_run> \
-    --confidence_run_dir <conf_run> \
-    --pdb_list structures.txt --base_pdb_dir <pdb_dir> \
-    --out_dir out/
+    --struc protein.cif \
+    --processed_dir <cache_root> \
+    --out_dir out/ \
+    --ckpt_dir checkpoints/mates_off
 ```
 
-Each list entry is a path under `--base_pdb_dir`, with or without a `.pdb`/`.cif`
-extension.
+Run a batch by pointing at a list instead of a single file. Each entry is a path
+under `--base_pdb_dir`, with or without a `.pdb`/`.cif` extension:
+
+```bash
+uv run python -m scripts.predict_waters \
+    --pdb_list structures.txt --base_pdb_dir <pdb_dir> \
+    --processed_dir <cache_root> \
+    --out_dir out/
+```
 
 **Outputs**, per structure, in the input coordinate frame:
 
@@ -138,8 +184,7 @@ Each mode accepts only its own knob: `--confidence_threshold` is rejected under
 
 | Argument | Default | Description |
 |---|---|---|
-| `--flow_run_dir` | required | Flow run directory (`config.json` + `checkpoints/`) |
-| `--confidence_run_dir` | required | Confidence run directory |
+| `--ckpt_dir` | `checkpoints/mates` | Directory with `flow.pt`, `confidence.pt`, `flow_config.json`, `confidence_config.json`; use `checkpoints/mates_off` for no mates |
 | `--struc` / `--pdb_list` | one required | A single structure file, or a list of names under `--base_pdb_dir` |
 | `--out_dir` | required | Output directory |
 | `--out_format` | `.pdb` | Written structure format: `.pdb` or `.cif` |
@@ -149,8 +194,7 @@ Each mode accepts only its own knob: `--confidence_threshold` is rejected under
 | `--water_ratio` | `8.0` | Candidates sampled = ratio × num_residues |
 | `--num_steps` | `20` | Flow integration steps |
 | `--method` | `euler` | Integration method: `euler` or `rk4` |
-| `--include_mates` | flow run's setting | Add symmetry mates to the graph |
-| `--flow_checkpoint` / `--confidence_checkpoint` | `best.pt` | Checkpoint filename within each run's `checkpoints/` |
+| `--include_mates` | model's setting | Add symmetry mates to the graph |
 | `--processed_dir` | none | Embedding cache root for `esm`/`slae` (unused for `gvp`) |
 | `--batch_size` | `4` | Structures per batch |
 | `--device` | `cuda` | Compute device |
