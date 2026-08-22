@@ -181,8 +181,8 @@ uv run python -m scripts.generate_esm_embeddings \
 
 This writes `<cache_root>/esm/<protein>.pt`, keyed by the input's **file stem**.
 
-> **`<protein>` is not a flag.** It stands for your input file's stem — `1abc` for `1abc.cif`.
-> There is no option to set an input or output *name*: the stem of the file you pass is what
+> **`<protein>`** stands for your input file's stem, for e.g. `1abc` for `1abc.cif`.
+> The stem of the file you pass is what
 > names the cached embedding and, later, every output file, and prediction looks the embedding up
 > by that same stem. So `<protein>.cif` and `<protein>.pdb` both pair with `esm/<protein>.pt`.
 
@@ -258,7 +258,7 @@ and `mates_off` runs can safely share one cache directory without reusing each o
 
 ### Selecting the final waters
 
-This is the main knob. Both modes sample `--water_ratio × num_residues` candidates and score
+This is the main knob that determines how many waters your predict. Both modes sample `--water_ratio × num_residues` candidates and score
 each one, then cluster them in two rounds:
 
 1. **Absorb** — seed a cluster with the highest-confidence unassigned candidate, absorb every
@@ -496,9 +496,7 @@ Then predict with `--ckpt_dir my_ckpts`.
 
 The commands below are the recipe recorded in the shipped
 `checkpoints/*/flow_config.json` and `confidence_config.json`, reduced to the flags that differ
-from current defaults. They reproduce every recorded setting. See [What the configs record but
-the scripts don't expose](#what-the-configs-record-but-the-scripts-dont-expose) for why the keys
-with no matching CLI flag do not change the result.
+from current defaults. They reproduce every recorded setting.
 
 **Flow generator — `checkpoints/mates`:**
 
