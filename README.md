@@ -14,7 +14,7 @@ models on a structure: the flow-matching generator samples candidate waters, the
 confidence model scores them, and the scored candidates are clustered and thresholded to
 the final set written back into the input structure.
 
-**Training** ([Training your own models](#training-your-own-models)) produces the
+**Training** ([Training your own models](#training-your-own-models)) reproduces the
 two models in four steps: precomputing embeddings, training the flow generator,
 caching candidate waters sampled from it, then training the confidence model on those
 candidates.
@@ -61,19 +61,16 @@ the wheel URL to your toolkit.
 
 ## Predicting waters
 
-`predict_waters.py` is the end-to-end tool. Given a raw PDB or mmCIF structure it
-strips any existing waters, builds the graph from protein + hets, samples
+`scripts/predict_waters.py` is the end-to-end prediction tool. Given a raw PDB or mmCIF structure it
+strips any existing waters, builds the required dataset graph from protein + het-atoms, samples
 candidates with the flow model, scores them with the confidence model, selects the
-final set, and writes the input structure with the predicted waters added.
-
-<p align="center">
-  <img src="figures/inference_sweep.gif" alt="Flow ODE integration sweeping candidate waters from the prior to final kept waters" width="900">
-</p>
+final set, and writes out the input structure with the predicted waters added.
 
 ### Before you run
 
-**Trained models.** The repo ships two pretrained ESM model sets under
-`checkpoints/`, with the weights stored in [Git LFS](https://git-lfs.com):
+**Trained models.** This repo contains two types of pretrained models sets under
+`checkpoints/`, varying in whether they were trained with symmetry mates or not as added
+context nodes. The weights are stored in [Git LFS](https://git-lfs.com):
 
 | `--ckpt_dir` | Symmetry mates | Contents |
 |---|---|---|
@@ -84,7 +81,7 @@ final set, and writes the input structure with the predicted waters added.
 checkpoints/mates_off` to run without mates, or point it at your own directory of
 the same four files — see [Training your own models](#training-your-own-models).
 
-Fetch the weights before predicting. Install Git LFS — no root needed:
+Fetch the weights before predicting. Install Git LFS:
 
 ```bash
 # Option A — conda / mamba:
@@ -115,18 +112,18 @@ real files.
 **Data processing.** Prediction does not use the training data pipeline. For each
 input structure it builds an *inference graph* directly from the raw PDB/CIF:
 
-- **Waters are removed.** They are what the model predicts, so any waters in the file
-  are dropped — the graph starts with no water nodes.
+- **Waters are removed.** They are what the model predicts, so any existing waters in the file
+  are dropped and the graph starts with no water nodes.
 - Protein and hets (ligands, ions, cofactors, nucleic acids) are kept, coordinates
   are centered on the ASU protein centroid, and symmetry mates are added when the
-  flow run used them. No geometry cache and no quality filtering are involved.
+  flow run used them. 
 
 **Embeddings.** If the flow model uses the ESM encoder (the default), precompute
 embeddings for your inputs first — the same step as for training
-([Precompute embeddings](#1-precompute-embeddings)) — into `<processed_dir>/esm/`,
+([Precompute embeddings](#1-precompute-embeddings)) into `<processed_dir>/esm/`,
 and pass `--processed_dir <cache_root>`. Each embedding is keyed by the input's file
-stem (`protein.cif` → `esm/protein.pt`), so the names must match. The `gvp` encoder
-needs no embeddings and no `--processed_dir`.
+stem (`protein.cif` -> `esm/protein.pt`), so the names must match. The `gvp` encoder
+needs no embeddings and no `--processed_dir`. **The shipped checkpoints require ESM embeddings.** 
 
 Predict with the default (mates) checkpoints:
 
@@ -158,6 +155,11 @@ uv run python -m scripts.predict_waters \
     --processed_dir <cache_root> \
     --out_dir out/
 ```
+
+Pass `--geometry_cache <dir>` to cache the flow inputs (inference graphs) at
+`<dir>/<name>.pt` and the flow outputs (sampled candidates) at
+`<dir>/candidates/<name>.pt`. Both are reused when present, so a re-run skips graph
+construction and flow sampling for structures already cached.
 
 **Outputs**, per structure, in the input coordinate frame:
 
@@ -196,6 +198,7 @@ Each mode accepts only its own knob: `--confidence_threshold` is rejected under
 | `--method` | `euler` | Integration method: `euler` or `rk4` |
 | `--include_mates` | model's setting | Add symmetry mates to the graph |
 | `--processed_dir` | none | Embedding cache root for `esm`/`slae` (unused for `gvp`) |
+| `--geometry_cache` | none | Cache flow inputs at `<dir>/<name>.pt` and candidates at `<dir>/candidates/<name>.pt`; reused on re-runs |
 | `--batch_size` | `4` | Structures per batch |
 | `--device` | `cuda` | Compute device |
 
@@ -327,3 +330,7 @@ metrics that need ground truth are skipped automatically when it is set.
   edge construction.
 - [docs/training.md](docs/training.md) — full argument reference for the flow and
   confidence trainers, DDP, checkpoints, and W&B.
+
+<p align="center">
+  <img src="figures/inference_sweep.gif" alt="Flow ODE integration sweeping candidate waters from the prior to final kept waters" width="900">
+</p>

@@ -194,6 +194,7 @@ class TestEndToEnd:
         out_dir = tmp_path / "out"
         args = SimpleNamespace(
             processed_dir=None,
+            geometry_cache=None,
             include_mates=False,
             method="euler",
             num_steps=2,
@@ -240,3 +241,51 @@ class TestEndToEnd:
         assert rows.shape[0] == n_waters
         assert np.allclose(rows[:, :3], written.coord[is_water], atol=1e-3)
         assert ((rows[:, 3] >= 0) & (rows[:, 3] <= 1)).all()
+
+    def test_geometry_cache_writes_and_reuses(self, pdb_4h0b, gvp_encoder, tmp_path):
+        """--geometry_cache stores the flow input graph (<name>.pt) and candidate
+        waters (candidates/<name>.pt); a second run reuses them, so its predicted
+        waters are identical instead of freshly sampled."""
+        device = torch.device("cpu")
+        flow_model = FlowWaterGVP(
+            encoder=gvp_encoder, hidden_dims=(64, 8), layers=1
+        ).to(device)
+        flow_model.eval()
+        flow_matcher = FlowMatcher(model=flow_model, sampling_strategy="uniform_ball")
+        conf_model = build_confidence_model(
+            {"encoder_type": "gvp", "hidden_s": 64, "hidden_v": 8, "flow_layers": 1},
+            device,
+        )
+        conf_model.eval()  # deterministic scores, so reuse yields identical output
+        cache = tmp_path / "geo_cache"
+
+        def run(out_dir):
+            args = SimpleNamespace(
+                processed_dir=None,
+                geometry_cache=str(cache),
+                include_mates=False,
+                method="euler",
+                num_steps=2,
+                water_ratio=1.0,
+                selection="confidence",
+                confidence_threshold=0.0,
+                density_ratio=None,
+                out_dir=str(out_dir),
+                out_format=".pdb",
+            )
+            predict_structures(
+                [pdb_4h0b], flow_matcher, conf_model, {"encoder_type": "gvp"}, args, device
+            )
+
+        run(tmp_path / "out1")
+        graph_pt = cache / "4h0b_final.pt"
+        cand_pt = cache / "candidates" / "4h0b_final.pt"
+        assert graph_pt.exists(), "flow-input graph not cached"
+        assert cand_pt.exists(), "candidate waters not cached"
+        assert "candidate_pos" in torch.load(cand_pt, weights_only=False)
+
+        # Second run reuses the cached candidates -> identical predicted waters.
+        run(tmp_path / "out2")
+        r1 = np.loadtxt(tmp_path / "out1" / "4h0b_final_waters.txt").reshape(-1, 4)
+        r2 = np.loadtxt(tmp_path / "out2" / "4h0b_final_waters.txt").reshape(-1, 4)
+        assert r1.shape == r2.shape and np.allclose(r1, r2, atol=1e-4)

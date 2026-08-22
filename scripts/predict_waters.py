@@ -178,40 +178,74 @@ def predict_structures(
     args: argparse.Namespace,
     device: torch.device,
 ) -> None:
-    """Predict + write final waters for a batch of structures."""
+    """Predict + write final waters for a batch of structures.
+
+    With --geometry_cache set, the flow-model inputs (inference graphs) are cached
+    at <geometry_cache>/<name>.pt and the flow outputs (candidate waters) at
+    <geometry_cache>/candidates/<name>.pt. Either is reused when present, so a
+    re-run skips graph construction and flow sampling for cached structures.
+    """
+    cache = Path(args.geometry_cache) if args.geometry_cache else None
+    cand_cache = cache / "candidates" if cache else None
+
     graphs, frames, out_names = [], [], []
     encoder_type = flow_config.get("encoder_type", "gvp")
     for path in struc_paths:
-        graph = build_inference_graph(
-            path,
-            encoder_type=encoder_type,
-            processed_dir=args.processed_dir,
-            include_mates=args.include_mates,
-            include_ligands=flow_config.get("include_ligands", True),
-            cutoff=flow_config.get("cutoff", 8.0),
-            max_neighbors=flow_config.get("max_neighbors", 256),
-        )
+        name = Path(path).stem
+        graph_pt = cache / f"{name}.pt" if cache else None
+        if graph_pt is not None and graph_pt.exists():
+            graph = torch.load(graph_pt, weights_only=False)
+        else:
+            graph = build_inference_graph(
+                path,
+                encoder_type=encoder_type,
+                processed_dir=args.processed_dir,
+                include_mates=args.include_mates,
+                include_ligands=flow_config.get("include_ligands", True),
+                cutoff=flow_config.get("cutoff", 8.0),
+                max_neighbors=flow_config.get("max_neighbors", 256),
+                out_dir=cache,  # None -> not cached
+            )
         graphs.append(graph)
         frames.append(_input_frame(path))
-        out_names.append(Path(path).stem)
+        out_names.append(name)
 
-    # Batched flow sampling -> candidate waters (centred frame).
-    results = run_inference_batch(
-        flow_matcher,
-        graphs,
-        method=args.method,
-        num_steps=args.num_steps,
-        device=str(device),
-        water_ratio=args.water_ratio,
-    )
+    # Candidate waters (centred frame): reuse cached samples, sample the rest in
+    # one batch.
+    candidates: list[torch.Tensor | None] = [None] * len(graphs)
+    todo_idx, todo_graphs = [], []
+    for i, name in enumerate(out_names):
+        cand_pt = cand_cache / f"{name}.pt" if cand_cache else None
+        if cand_pt is not None and cand_pt.exists():
+            candidates[i] = torch.load(cand_pt, weights_only=False)["candidate_pos"]
+        else:
+            todo_idx.append(i)
+            todo_graphs.append(graphs[i])
+
+    if todo_graphs:
+        results = run_inference_batch(
+            flow_matcher,
+            todo_graphs,
+            method=args.method,
+            num_steps=args.num_steps,
+            device=str(device),
+            water_ratio=args.water_ratio,
+        )
+        if cand_cache is not None:
+            cand_cache.mkdir(parents=True, exist_ok=True)
+        for i, result in zip(todo_idx, results):
+            cand = torch.as_tensor(result["water_pred"], dtype=torch.float32)
+            candidates[i] = cand
+            if cand_cache is not None:
+                torch.save({"candidate_pos": cand}, cand_cache / f"{out_names[i]}.pt")
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    for graph, result, (kept, center, space_group), name in zip(
-        graphs, results, frames, out_names
+    for graph, candidate_pos, (kept, center, space_group), name in zip(
+        graphs, candidates, frames, out_names
     ):
-        candidate_pos = torch.as_tensor(result["water_pred"], dtype=torch.float32)
+        candidate_pos = torch.as_tensor(candidate_pos, dtype=torch.float32)
         conf = score_candidates(conf_model, graph, candidate_pos, device)
         sel_pos, sel_conf = select_waters(
             candidate_pos,
@@ -297,6 +331,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "Embeddings are loaded, not generated: run generate_esm_embeddings.py or "
         "generate_slae_embeddings.py first. Looked up by file stem under "
         "processed_dir/<encoder_type>.",
+    )
+    p.add_argument(
+        "--geometry_cache",
+        default=None,
+        help="Directory to cache flow-model inputs (inference graphs) as "
+        "<name>.pt, with flow outputs (candidate waters) under a candidates/ "
+        "subdir. Both are reused when present, so a re-run skips graph "
+        "construction and flow sampling for cached structures. Off by default.",
     )
     p.add_argument("--out_dir", required=True)
     p.add_argument("--out_format", default=".pdb", choices=[".pdb", ".cif"])
