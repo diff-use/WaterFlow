@@ -540,9 +540,9 @@ had features this repository does not, so they record some keys with no matching
 
 **These leftover keys do not affect model loading or inference.** Loading reads only the
 architecture and graph-construction keys — encoder type, hidden dimensions, layer counts,
-cutoff, neighbour limits, edge ablations — and ignores everything else. Each unmatched key was
+cutoff, neighbour limits, edge ablations and ignores everything else. Each unmatched key was
 either switched off in the recorded run or set to the behaviour the current code already
-implements:
+implements. There are also keys that set certain feature flags to false, such as late time-step path distortion and associated flags, that the models were not trained with and do not exist in the codebase any longer. 
 
 | Keys | Recorded value | Effect |
 |---|---|---|
