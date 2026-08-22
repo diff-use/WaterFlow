@@ -92,6 +92,11 @@ Preprocessed data is cached under `--processed_dir` in three layers:
     └── <pdb_id>_final.pt
 ```
 
+Embedding files are keyed by split entry (`<pdb_id>_final`) when generated from a
+`--split_file`. Generating from raw files with `--struc` keys them by file stem
+instead, which is how prediction looks them up — see the
+[README](../README.md#step-3--generate-esm-embeddings).
+
 The `protein_*` names predate mates and ligands: `N` is the total node count and
 these arrays hold every node. Node order is
 `[ASU protein | mate protein | ASU ligand | mate ligand]`, recovered with the two

@@ -5,8 +5,8 @@ trainer (`scripts/train_confidence.py`). For the end-to-end walkthrough, see the
 [README](../README.md); for data preparation and quality filters, see
 [data.md](data.md).
 
-`--processed_dir`, `--base_pdb_dir`, `--save_dir`, and `--wandb_dir` default to
-machine-specific paths baked into the scripts. Set them explicitly.
+`--processed_dir`, `--base_pdb_dir`, and `--save_dir` default to machine-specific
+paths baked into the scripts. Set them explicitly.
 
 ## Flow trainer
 
@@ -86,8 +86,10 @@ the run configuration, and later stages read it via `--flow_run_dir` / `--run_di
 
 ### Weights & Biases
 
-Enabled by default. `--wandb_project` (default `water-flow`), `--wandb_dir`, and
-`--run_name` control logging.
+Opt-in, as in the confidence trainer. Without `--wandb_project` the run logs
+nothing and needs no account or `wandb login`; setting it logs online, with
+`--wandb_dir` and `--run_name` controlling where the run is written and what it is
+called.
 
 ## Multi-GPU (DDP)
 
@@ -145,7 +147,7 @@ uv run python -m scripts.train_confidence \
 | `--r_in` / `--r_out` | `0.5` / `1.5` | Smootherstep plateau/floor radii (Å) |
 | `--accept_radius` | `1.0` | Acceptance radius (Å) for the AUC-PR label and `--hard_label` |
 | `--hard_label` | off | Train on `1[d <= accept_radius]` instead of the soft target |
-| `--wandb_project` | off | Set to enable W&B (disabled by default here) |
+| `--wandb_project` | off | Set to enable W&B (opt-in, as in the flow trainer) |
 
 Validation reports AUC-PR (used for checkpoint selection) and best F1. Multi-GPU
 works exactly like flow training — prefix with `torchrun --nproc_per_node=N`. Each

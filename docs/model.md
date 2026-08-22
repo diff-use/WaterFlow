@@ -37,12 +37,14 @@ positions, using Euler or RK4 steps.
 
 | Encoder | Description | Precomputation |
 |---|---|---|
-| `esm` (default) | ESM3 language-model embeddings, per residue | Yes — `generate_esm_embeddings.py` |
-| `gvp` | Geometric Vector Perceptron over 3D coordinates | No |
+| `esm` | ESM3 language-model embeddings, per residue | Yes — `generate_esm_embeddings.py` |
+| `gvp` (CLI default) | Geometric Vector Perceptron over 3D coordinates | No |
 | `slae` | SLAE per-atom embeddings ([preprint](https://www.biorxiv.org/content/10.1101/2025.10.03.680398v1)) — **legacy** | Yes — external `SLAE` package + checkpoint |
 
-ESM is the encoder used for current runs. SLAE is retained for older checkpoints;
-it depends on the external `SLAE` package, which is not a WaterFlow dependency.
+ESM is the encoder used for current runs and by the shipped checkpoints, but
+`--encoder_type` defaults to `gvp`, so pass `--encoder_type esm` explicitly. SLAE
+is retained for older checkpoints; it depends on the external `SLAE` package,
+which is not a WaterFlow dependency.
 
 ### Edge construction
 
