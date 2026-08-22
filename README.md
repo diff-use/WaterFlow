@@ -1,331 +1,458 @@
-# WaterFlow
+# WaterFlow: Prediction of Ordered Water Molecule Positions on Protein Structures
 
-Predicting water molecule placements on protein surfaces using flow matching conditioned on learned protein structure embeddings.
+<p align="center">
+  <img src="figures/graphical_abstract.png" alt="WaterFlow pipeline: prior → flow → candidates → clustering → kept waters" width="900">
+</p>
 
-## Project Structure
+WaterFlow is a two-stage Deep Learning model that predicts the positions of ordered water molecules conditioned on a protein structure. It has two trained components: a **candidate generator** trained with flow-matching, and a **confidence model** that ranks and scores each candidate to obtain final water coordinates.
 
-```
-WaterFlow/
-├── src/                    # Core library code
-│   ├── dataset.py          # ProteinWaterDataset and data loading
-│   ├── flow.py             # FlowMatcher and FlowWaterGVP model
-│   ├── confidence.py       # ConfidenceGVP scorer, targets, vdW clustering
-│   ├── gvp.py              # Geometric Vector Perceptron layers
-│   ├── gvp_encoder.py      # GVP-based protein encoder
-│   ├── encoder_base.py     # Encoder registry and factory (includes ESM/SLAE)
-│   ├── distributed.py      # DDP helpers (rank discovery, collectives, barriers)
-│   ├── constants.py        # Shared constants (RBF bins, etc.)
-│   └── utils.py            # Metrics, plotting, logging utilities
-├── scripts/                # Executable scripts
-│   ├── train.py            # Training pipeline
-│   ├── train_confidence.py # Train the confidence scorer on cached candidates
-│   ├── inference.py        # Run inference on trained models
-│   ├── cache_candidates.py # Sample candidate waters for confidence training
-│   ├── generate_esm_embeddings.py   # Precompute ESM embeddings
-│   └── generate_slae_embeddings.py  # Precompute SLAE embeddings
-├── tests/                  # Test suite
-│   ├── test_dataset.py     # Dataset and preprocessing tests
-│   ├── test_distributed.py # DDP helper and cache prebuild tests
-│   ├── test_confidence.py  # Confidence scorer, target and clustering tests
-│   ├── test_train_confidence.py # Confidence trainer: loss, freezing, epoch
-│   ├── test_flow.py        # Flow matching tests
-│   ├── test_encoder.py     # Encoder tests
-│   ├── test_forward.py     # End-to-end forward pass tests
-│   ├── test_gvp.py         # GVP layer tests
-│   ├── test_train_config.py # Training configuration tests
-│   └── test_utils.py       # Utility function tests
-└── splits/                 # Train/val/test split files
-    ├── train_list_0.95.txt # Training set (95% of data)
-    ├── valid_list_0.05.txt # Validation set (5% of data)
-    └── water_pdbs.txt      # Full list of PDBs with waters
-```
+- **[Predicting waters](#predicting-waters)** — running inference on the shipped models on your structure/s.
+- **[Training your own models](#training-your-own-models)** — reproduce both models from your own training sets or our own splits. 
 
-## Data Preparation
+## Table of Contents
 
-### Input Structure Files
+- [Installation](#installation)
+  - [System libraries](#system-libraries)
+  - [Building an environment from scratch](#building-an-environment-from-scratch)
+- [Predicting waters](#predicting-waters)
+  - [Quickstart](#quickstart)
+  - [Step 1 — Fetch the model weights](#step-1--fetch-the-model-weights)
+  - [Step 2 — Pick a checkpoint set](#step-2--pick-a-checkpoint-set)
+  - [Step 3 — Generate ESM embeddings](#step-3--generate-esm-embeddings)
+  - [Step 4 — Predict](#step-4--predict)
+  - [Predicting on many structures](#predicting-on-many-structures)
+  - [Selecting the final waters](#selecting-the-final-waters)
+  - [Outputs](#outputs)
+  - [Reusing work between runs](#reusing-work-between-runs)
+  - [All prediction options](#all-prediction-options)
+  - [Troubleshooting](#troubleshooting)
+- [Training your own models](#training-your-own-models)
+  - [Before you train](#before-you-train)
+  - [1. Precompute embeddings](#1-precompute-embeddings)
+  - [2. Train the flow generator](#2-train-the-flow-generator)
+  - [3. Cache candidate waters](#3-cache-candidate-waters)
+  - [4. Train the confidence scorer](#4-train-the-confidence-scorer)
+  - [Reproducing the released checkpoints](#reproducing-the-released-checkpoints)
+  - [Evaluating the flow generator alone](#evaluating-the-flow-generator-alone)
+- [Documentation](#documentation)
 
-WaterFlow reads PDB or mmCIF files, and expects them in a specific directory structure:
+## Installation
 
-```
-<base_pdb_dir>/
-├── 1abc/
-│   └── 1abc_final.cif      # .cif or .pdb
-├── 2xyz/
-│   └── 2xyz_final.pdb
-└── ...
+WaterFlow uses [`uv`](https://docs.astral.sh/uv/) with Python 3.12. From the repository root:
+
+```bash
+uv sync
 ```
 
-Each structure should have the `_final` suffix and contain:
-- Protein atoms (used as conditioning context)
-- Water molecules (HOH residues, used as ground truth)
+Every command below runs through `uv run`.
 
-**Format resolution:** entries in a split file are bare IDs (`6eey_final`) with no extension.
-For each entry WaterFlow looks in `<base_pdb_dir>/<pdb_id>/` and **prefers
-`<pdb_id>_final.cif` when it exists**, otherwise falls back to `<pdb_id>_final.pdb`. Both
-formats parse to identical atom counts, so the choice does not change the resulting graph.
-If neither file exists, reading the structure raises an error naming the missing path.
+### System libraries
 
-### Data Processing Pipeline
-
-WaterFlow processes structure files through several stages to create training-ready graph representations:
-
-**Structure Parsing**
-- Uses Biotite to extract protein atoms, water molecules (HOH residues), and ligands, dispatching on file extension (`.cif` via `CIFFile`, otherwise `PDBFile`)
-- "Ligand" means every non-protein, non-water heavy atom: small molecules, ions, cofactors, and nucleic acids. Included by default; disable with `--no-include_ligands`
-- Modified residues are retained during structure parsing and geometry preprocessing
-- When generating ESM embeddings, modified residues are mapped to encoder-compatible amino acid identities (e.g., MSE→M/MET, SEC→U/SEC)
-- Hydrogen atoms are excluded
-- Only the first model is used
-- For atoms with alternate conformations, the highest-occupancy conformer is selected
-
-**Crystal Contact Detection**
-- Uses PyMOL's `symexp` to generate symmetry mates, keeping whole residues and whole ligand entities with any atom within the cutoff of the ASU. Runs only when `include_mates=True`; a no-mates cache never invokes PyMOL
-- Protein mates and ligand mates are selected separately by PyMOL's own classifiers, so `is_ligand` stays exact for mate nodes too
-- **Mate waters are never selected.** A mate water is a symmetry image of an ASU water, which is what the model predicts, so keeping it as context leaks the label
-- Symmetry also maps atoms onto themselves (special positions) and reaches one residue through two operators. Mate atoms within 0.3Å of an ASU atom, a target water, or an already-kept mate atom are dropped (`dedup_mate_atoms`); mate ligands are judged whole, so a ligand is never fragmented (`dedup_mate_ligands_by_residue`)
-- A mate keeps its source residue's `(chain, res_id, ins_code)`, so it inherits that residue's ESM row through `emb_res_idx` instead of a zero vector, and it joins the distance-filter reference so a water in a crystal contact — near a neighbour surface but far from the ASU — is not dropped as solvent-far
-
-**Graph Representation**
-- Node types: `protein` (ASU + symmetry mates + ligands), `water` (ground truth)
-- Ligand atoms are appended after ASU and mate atoms and carry the boolean `is_ligand` mask plus `residue_index = -1` (they have no residue embedding, so residue pooling masks them out)
-- `is_mate` marks every non-ASU node, protein or ligand. The flow prior anchors on `~is_mate` so sampled waters start where the targets live
-- Edge types (defined in `src/constants.py`):
-  - `('protein', 'pp', 'protein')`: protein-protein edges — cached at preprocessing
-  - `('protein', 'pw', 'water')`: protein to water — built at runtime
-  - `('water', 'wp', 'protein')`: water to protein — built at runtime, ablatable
-  - `('water', 'ww', 'water')`: water-water edges — built at runtime, ablatable
-- Only PP edges are stored in the geometry cache; every water-touching edge is
-  rebuilt each forward pass, since water positions move during integration. See
-  [Edge Construction](#edge-construction)
-- Default edge cutoff: 8.0Å (`RBF_CUTOFF` in constants.py)
-
-**Feature Encoding**
-- Element vocabulary (15 elements + "other" bucket = 16 dims):
-  `C, N, O, S, P, SE, MG, ZN, CA, FE, NA, K, CL, F, BR`
-- Edge features: RBF distance encoding (16 Bessel basis functions)
-
-### Split File Format
-
-Split files are plain text with one PDB entry per line:
+`uv sync` installs the Python dependencies but **not** the OpenGL system library that PyMOL
+loads at import time. On a bare machine or container, pymol commands can fail with:
 
 ```
-# Example: splits/train_list_0.95.txt
-110m_final
-1a2p_final
-1a3h_final
+ImportError: libGL.so.1: cannot open shared object file: No such file or directory
 ```
 
-### Cache Directory Structure
+The traceback points at `import pymol2` in `src/dataset.py`, which every script imports. Fix it
+by installing the library (Debian/Ubuntu):
 
-Preprocessed data is cached under `--processed_dir` in a three-layer architecture:
-
-```
-<processed_dir>/
-├── geometry/              # Graph structures; see cache directory naming below
-│   └── <pdb_id>_final.pt
-│       - protein_pos: centered node coordinates (N, 3)
-│       - protein_x: element one-hot encoding (N, 16)
-│       - protein_res_idx: residue indices for grouping
-│       - is_ligand: bool mask marking the ligand atoms (N,)
-│       - is_mate: bool mask marking the symmetry-mate atoms (N,)
-│       - emb_res_idx: embedding row per atom; -1 means no row (N,)
-│       - water_pos, water_x: water coordinates and features
-│       - num_asu_protein: ASU protein atom count (mate boundary metadata)
-│       # The protein_* names predate mates and ligands: N is the total node
-│       # count and these arrays hold every node, not just protein atoms (same
-│       # for the data["protein"] node type). Select blocks with the masks.
-│       #
-│       # Node order is [ASU protein | mate protein | ASU ligand | mate ligand],
-│       # so the two masks recover every block:
-│       #   ASU protein  = ~is_mate & ~is_ligand    (== the first num_asu_protein)
-│       #   mate protein =  is_mate & ~is_ligand
-│       #   ASU ligand   = ~is_mate &  is_ligand
-│       #   mate ligand  =  is_mate &  is_ligand
-│       #
-│       # emb_res_idx indexes the ESM table: mate atoms carry the row of the ASU
-│       # residue they are a symmetry image of, and every ligand carries -1,
-│       # which reads as a zero row.
-├── <geometry_dir>/_filter_meta.json   # settings this directory was built with
-├── esm/                   # ESM embeddings (per-residue)
-│   └── <pdb_id>_final.pt
-│       - residue_embeddings: ESM3 embeddings (N_res, embed_dim)
-│       - sequence: extracted sequence string
-│       - num_residues: residue count
-└── slae/                  # SLAE embeddings (per-atom, 128-dim)
-    └── <pdb_id>_final.pt
-        - node_embeddings: atom-level embeddings aligned to geometry order
-        - atom37_coords: standard atom37 coordinates (N_res, 37, 3)
+```bash
+sudo apt-get install -y libgl1
 ```
 
-**Cache Directory Naming:**
+If PyMOL still fails to import, add `libxrender1 libxext6`. 
 
-The geometry cache directory name encodes the flags that change which nodes get cached, so
-configs that produce different graphs never share a directory:
+### Building an environment from scratch
 
-| `--include_mates` | `--include_ligands` | Directory |
-|---|---|---|
-| true | true (default) | `geometry_mates/` |
-| true | false | `geometry_mates_noligands/` |
-| false | true | `geometry/` |
-| false | false | `geometry_noligands/` |
+<details>
+<summary>Only if you cannot use <code>uv sync</code></summary>
 
-The base name comes from `--geometry_cache_name` (default `geometry`).
+`pyproject.toml` is the single source of truth for dependencies, including the pinned CUDA
+12.6 wheel indexes for `torch`, `torch-scatter`, `torch-cluster` and `pyg-lib`.
 
-**Filter Provenance:**
-
-Filtering happens *before* the cache is written, so the thresholds are a property of the
-directory, not of the run reading it — and the `.pt` files record none of them. Each geometry
-directory therefore carries a `_filter_meta.json` file holding the per-water filters and
-their toggles, the structure-level checks that decide which entries exist at all
-(`min_water_residue_ratio`, `max_com_dist`, `max_clash_fraction`, `clash_dist`,
-`interface_dist_threshold`), and the graph parameters behind the cached PP edges (`cutoff`,
-`max_neighbors`).
-
-The first run with `preprocess=True` writes it; every later run compares against it and
-**refuses to start** on a mismatch rather than appending differently filtered entries to the
-same directory. A disabled filter records `null` for its threshold, which cannot have changed
-the cached waters. Directories built before this existed have no such file: they load, and warn
-that their provenance is unverifiable, until a preprocessing run stamps them — so check your
-thresholds match the cache before that first run.
-
-**Cache Generation Notes:**
-- Geometry cache is generated automatically when `preprocess=True` (default)
-- ESM/SLAE caches require running the respective `generate_*_embeddings.py` scripts first
-- Preprocessing failures are logged to `<geometry_dir>/preprocessing_failures.log`
-- A cache file missing any field the loader reads (`is_ligand`, `is_mate`, `emb_res_idx`, …)
-  raises `KeyError`. Delete the geometry cache directory and let it regenerate
-
-## Environment Setup
-
-We use `uv` for our environment and package management, with Python 3.12.
-
-You can install the environment by running `uv sync` and running the scripts with `uv run python <script>` (Recommended). 
-
-Or if you want to install a fresh virtual environment from scratch, follow the steps below.
-
-Installing the environment:
+If you must build an environment manually:
 
 ```bash
 uv venv water --python 3.12
 source water/bin/activate
+uv pip install -r pyproject.toml          # resolves the same pins as uv sync
+```
+To target a different CUDA build, change the index URLs under `[[tool.uv.index]]` in
+`pyproject.toml` rather than installing wheels one by one.
 
-uv pip install torch==2.8.0
-uv pip install torch_geometric
-uv pip install torch_cluster torch_scatter pyg_lib -f https://data.pyg.org/whl/torch-2.8.0+cu126.html
-uv pip install esm biotite pymol-open-source scipy pandas numpy matplotlib pillow loguru tqdm wandb e3nn
-uv pip install pytest pytest-cov  # dev dependencies
+</details>
+
+## Predicting waters
+
+`scripts/predict_waters.py` is the end-to-end prediction tool script. Given a raw PDB or mmCIF
+structure it strips any existing waters, builds the graph from protein + het-atoms, samples
+candidates with the flow model, scores them with the confidence model, selects the final set,
+and writes the input structure back out with the predicted waters added.
+
+### Quickstart
+
+Replace `<protein>` with your structure's name throughout — the file stem is what ties the
+embedding to the prediction.
+
+```bash
+# 0. Install, once per machine
+uv sync
+sudo apt-get install -y libgl1              # PyMOL's OpenGL library
+git lfs install && git lfs pull             # download the model weights
+
+# 1. Generate ESM3 Embeddings -> cache/esm/<protein>.pt
+uv run python -m scripts.generate_esm_embeddings \
+    --struc <protein>.cif \
+    --cache_dir cache/
+
+# 2. Predict final positions -> out/<protein>_pred.pdb and out/<protein>_waters.txt
+uv run python -m scripts.predict_waters \
+    --struc <protein>.cif \
+    --processed_dir cache/ \
+    --out_dir out/
 ```
 
-If you have trouble installing torch_cluster or scatter, I would suggest changing the cuda version in the wheel.
+That is the whole path for one structure with the default (symmetry-mates) models. The
+sections below explain each step and the knobs worth changing.
 
-## Model Architecture
+### Step 1 — Fetch the model weights
 
-WaterFlow uses a two-stage architecture:
+The pretrained weights live in `checkpoints/` and are stored with
+[Git LFS](https://git-lfs.com). A plain `git clone` succeeds without LFS, but each `.pt`
+arrives as a few-hundred-byte text pointer instead of the ~42 MB model, and loading it fails.
 
-1. **Protein Encoder**: Encodes protein structure into per-residue embeddings
-2. **Flow Network**: Predicts velocity field for water molecule trajectories
+Install Git LFS if you do not have it:
 
-### Encoder Types
+```bash
+# Option A — conda / mamba:
+conda install -c conda-forge git-lfs
 
-| Encoder | Description | Precomputation Required |
-|---------|-------------|------------------------|
-| `gvp` | Geometric Vector Perceptron encoder that learns from 3D coordinates | No |
-| `esm` | Uses ESM3 language model embeddings | Yes (`generate_esm_embeddings.py`) |
-| `slae` | Uses SLAE ([Strictly Local All-Atom Environment](https://www.biorxiv.org/content/10.1101/2025.10.03.680398v1)) embeddings | Yes (`generate_slae_embeddings.py`) |
+# Option B — user-local binary, from https://github.com/git-lfs/git-lfs/releases:
+VERSION=3.5.1   # set to the latest release
+curl -L https://github.com/git-lfs/git-lfs/releases/download/v${VERSION}/git-lfs-linux-amd64-v${VERSION}.tar.gz \
+  | tar -xz -C /tmp
+mkdir -p ~/.local/bin && cp /tmp/git-lfs-${VERSION}/git-lfs ~/.local/bin/   # ensure ~/.local/bin is on PATH
 
-### Edge Construction
+# Option C — system package manager (needs root):
+sudo apt-get install git-lfs   # Debian/Ubuntu (macOS: brew install git-lfs)
+```
 
-Water-touching edges (PW, WW, WP) are rebuilt every forward pass because water
-positions change during integration. How they are built is fixed at model
-construction, so training and inference always agree:
+Then fetch the weights:
 
-| `--dynamic_edge_policy` | Behaviour |
-|-------------------------|-----------|
-| `auto` (default) | Resolves off the prior: `radius` under `uniform_ball`, `knn_if_isolated` under `scaled_gaussian` |
-| `radius` | Connect every pair within `--cutoff`, capped at `--max_neighbors` per source |
-| `knn` | Connect a fixed number of nearest neighbours (`--k_pw`, `--k_ww`, `--k_wp`) |
-| `knn_if_isolated` | A `radius` graph plus a KNN rescue for any node the cutoff stranded |
+```bash
+git lfs install    # once per machine
+git lfs pull       # replaces the pointers with the real files
+```
 
-`radius` and `knn` differ in which side the neighbour budget applies to. KNN
-queries *per destination*, so every destination is guaranteed edges but a source
-may have none — coverage checks must read the destination row. Radius guarantees
-nothing: a water with no protein atom inside `--cutoff` gets no PW edges at all.
+### Step 2 — Pick a checkpoint set
 
-`knn_if_isolated` repairs that: any water the radius query stranded is
-reconnected to its `--knn_fallback_k` nearest protein atoms regardless of
-distance (`0` disables the rescue). Plain `radius` does *not* rescue, and the
-flag has no effect under `knn`, which cannot strand a node. `auto` picks
-`knn_if_isolated` for `scaled_gaussian` precisely because Gaussian samples can
-land outside every cutoff, whereas uniform-ball samples cannot.
+Two model sets ship with the repo, differing in whether symmetry mates were used as additional
+context nodes during training:
 
-Set `--disable_ww` / `--disable_wp` to ablate those edge types; PW and PP are
-always active.
+| `--ckpt_dir` | Symmetry mates | Use when |
+|---|---|---|
+| `checkpoints/mates` (default) | yes | The input `.cif`/`.pdb` carries crystal header information |
+| `checkpoints/mates_off` | no | No crystal symmetry available — predicted structures, models, stripped files |
 
-## Embedding Generation
+Each directory holds the same four files: `flow.pt`, `confidence.pt`, `flow_config.json`,
+`confidence_config.json`. To use your own models, point `--ckpt_dir` at a directory with those
+four names — see [Training your own models](#training-your-own-models).
 
-For `esm` and `slae` encoder types, you must precompute embeddings before training or inference.
+> **Path resolution.** `--ckpt_dir` is an ordinary path resolved against your **current working
+> directory**, not the repository root. The default `checkpoints/mates` therefore only works
+> when you run from the top of the repo. From anywhere else, pass an absolute path such as
+> `--ckpt_dir /path/to/WaterFlow/checkpoints/mates`.
 
-### ESM Embeddings (for `--encoder_type esm`)
+### Step 3 — Generate ESM embeddings
+
+**The shipped checkpoints use the encoder that takes ESM3 embeddings as input, so this step is required.** Embeddings are
+loaded during prediction and not generated, hence we need to generate and cache ESM3 embeddings separately.
+
+```bash
+uv run python -m scripts.generate_esm_embeddings \
+    --struc <protein>.cif \
+    --cache_dir <cache_root>
+```
+
+This writes `<cache_root>/esm/<protein>.pt`, keyed by the **file stem** of the input. Prediction
+looks the embedding up by that same stem, so `<protein>.cif` and `<protein>.pdb` both pair with
+`esm/<protein>.pt`. Pass the cache root as `--processed_dir <cache_root>` when predicting.
+
+`--struc` accepts several files at once:
+
+```bash
+uv run python -m scripts.generate_esm_embeddings \
+    --struc a.cif b.cif c.pdb \
+    --cache_dir <cache_root>
+```
+
+On its first run this downloads the `esm3-open` model from HuggingFace, which needs network
+access (and a HuggingFace login if the model is gated for your account). Later runs reuse the
+local copy.
+
+> The `gvp` encoder uses only protein coordinate and chemical identity and no pre-trained embedding and needs no
+> `--processed_dir`, but none of the shipped checkpoints use it.
+
+### Step 4 — Predict
+
+```bash
+uv run python -m scripts.predict_waters \
+    --struc <protein>.cif \
+    --processed_dir <cache_root> \
+    --out_dir out/
+```
+
+To run without symmetry mates, add `--ckpt_dir checkpoints/mates_off`.
+
+If an embedding is missing, prediction stops immediately and names the files it could not find,
+rather than failing later inside graph construction.
+
+What happens to your structure along the way:
+
+- **Existing waters are removed.** They are what the model predicts, so the graph starts with
+  no water nodes.
+- **Protein and hets are kept** (ligands, ions, cofactors, nucleic acids). Coordinates are
+  centered on the ASU protein centroid, and symmetry mates are added when the selected
+  checkpoint used them.
+- Predicted waters are returned to the **input coordinate frame** before writing.
+
+### Predicting on many structures
+
+Point `--pdb_list` at a text file of structure names, one per line, resolved under
+`--base_pdb_dir`. Each entry may include or omit a `.pdb`/`.cif` extension and may name a
+subdirectory:
+
+```bash
+uv run python -m scripts.predict_waters \
+    --pdb_list structures.txt \
+    --base_pdb_dir <pdb_dir> \
+    --processed_dir <cache_root> \
+    --out_dir out/
+```
+
+Generate all predictions in one pass by listing the files after `--struc`. Structures are processed in batches of
+`--batch_size` (default 4).
+
+### Selecting the final waters
+
+This is the main knob. Both modes sample `--water_ratio × num_residues` candidates and score
+each one, then cluster them in two rounds:
+
+1. **Absorb** — seed a cluster with the highest-confidence unassigned candidate, absorb every
+   unassigned candidate within the van der Waals radius of oxygen (1.52 Å), and emit a
+   confidence-weighted centroid carrying the cluster's highest confidence.
+2. **Merge** — run non-maximum suppression over those centroids, dropping the lower-confidence
+   member of any pair still within the same radius.
+
+The modes differ in how the surviving centroids are culled:
+
+| `--selection` | Rule | Use when |
+|---|---|---|
+| `confidence` (default) | Drop candidates below `--confidence_threshold` (default `0.5`) before clustering, then keep every centroid. | You want a calibrated score cutoff, or only high-confidence waters. |
+| `density` | Cluster with no cutoff, then keep the top `floor(--density_ratio × ASU_residues)` centroids by confidence (default ratio `0.6`). | You want a hydration level tied to protein size rather than an absolute score. |
+
+Each mode accepts only its own knob: `--confidence_threshold` is rejected under `density`, and
+`--density_ratio` is rejected under `confidence`.
+
+> **`--water_ratio` sets how many candidates are *drawn*** (× the graph's residue count, which
+> mates roughly double), **while `--density_ratio` sets how many are *kept* after scoring candidates** (× ASU residues
+> only, so mates don't change it).
+
+### Outputs
+
+Per structure, in the input coordinate frame:
+
+- `<protein>_pred.pdb` (or `.cif` with `--out_format .cif`) — the input protein and hets with
+  predicted waters added as `HOH` oxygens.
+- `<protein>_waters.txt` — one `x y z confidence` row per predicted water.
+
+### Reusing work between runs
+
+`--geometry_cache <dir>` caches the flow inputs (inference graphs) at `<dir>/<name>.pt` and the
+flow outputs (sampled candidates) at `<dir>/candidates/<name>.pt`. Both are reused when
+present, so a re-run skips graph construction and flow sampling for structures already cached.
+For a single small protein this is not an expensive step; the cache matters for repeated runs
+over many structures.
+
+Cache entries written by a mates checkpoint carry a `_mates` suffix (`<name>_mates.pt`), so
+mates and `mates_off` runs can safely share one cache directory without reusing each other's
+graphs.
+
+### All prediction options
+
+| Argument | Default | Description |
+|---|---|---|
+| `--ckpt_dir` | `checkpoints/mates` | Directory with `flow.pt`, `confidence.pt`, `flow_config.json`, `confidence_config.json`; resolved against your working directory |
+| `--struc` / `--pdb_list` | one required | A single structure file, or a list of names under `--base_pdb_dir` |
+| `--base_pdb_dir` | none | Directory that `--pdb_list` names resolve against |
+| `--out_dir` | required | Output directory |
+| `--out_format` | `.pdb` | Written structure format: `.pdb` or `.cif` |
+| `--selection` | `confidence` | `confidence` or `density` (see above) |
+| `--confidence_threshold` | `0.5` | `confidence` mode only: drop candidates scoring below this |
+| `--density_ratio` | `0.6` | `density` mode only: keep `floor(ratio × ASU residues)` waters |
+| `--water_ratio` | `8.0` | Candidates sampled = ratio × residues in the graph (mates included when on) |
+| `--num_steps` | `20` | Flow integration steps |
+| `--method` | `euler` | Integration method: `euler` or `rk4` |
+| `--include_mates` | model's setting | Force symmetry mates on or off (`--no-include_mates` to disable) |
+| `--processed_dir` | none | Embedding cache root for `esm`/`slae` (unused for `gvp`) |
+| `--geometry_cache` | none | Cache inference graphs and candidates for reuse |
+| `--batch_size` | `4` | Structures per batch |
+| `--device` | `cuda` | Compute device |
+| `--log_level` | `INFO` | Logging verbosity |
+
+### Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| `ImportError: libGL.so.1: cannot open shared object file` | PyMOL's OpenGL library is missing. `sudo apt-get install -y libgl1` (see [System libraries](#system-libraries)). |
+| Checkpoint fails to load, `.pt` is only a few hundred bytes | Git LFS pointers were never resolved. Run `git lfs install && git lfs pull`. |
+| `Missing esm embeddings under ... for [...]` | Generate them for those files first with `generate_esm_embeddings --struc <files> --cache_dir <cache_root>`, and make sure `--processed_dir` points at that same cache root. |
+| `flow_config.json` not found | `--ckpt_dir` was resolved against the wrong directory. Run from the repository root or pass an absolute path. |
+| `<name>: no waters selected` | Every candidate scored below `--confidence_threshold`. Lower it, or switch to `--selection density`. |
+
+## Training your own models
+
+Producing the flow and confidence checkpoints is a four-step pipeline. Unlike prediction,
+training reads structures from a `--base_pdb_dir` laid out as
+`<base_pdb_dir>/<pdb_id>/<pdb_id>_final.{cif,pdb}`, with split files listing one bare ID per
+line (`6eey_final`). See [docs/data.md](docs/data.md) for the directory layout, cache
+structure, and quality filters.
+
+### Before you train
+
+Two defaults will stop a first run if you are not ready for them:
+
+**Quality filtering needs EDIA scores.** Water filtering by EDIA is on by default and expects a
+per-structure `<pdb_id>_final.json` next to each structure file. If those files are absent,
+every structure is rejected and training aborts before the first epoch:
+
+```
+EDIA filtering enabled but JSON file missing for <pdb_id>. Expected file: <pdb_id>_final.json
+...
+Dataset contains 0 valid entries
+```
+
+**What the file is.** EDIAm measures how well an
+atom's modelled position is supported by the experimental electron density — higher is better
+supported. WaterFlow reads one number per water: the `EDIAm` field of each `HOH`/`WAT` record,
+matched to the structure by chain, residue number and insertion code. Waters scoring below
+`--min_edia` (default `0.4`) are dropped as unreliably placed. The file is a flat JSON array of
+per-residue records:
+
+```json
+[{"EDIAm": 0.609, "RSCCS": 0.907, "RSR": 0.116, "compID": "HIS",
+  "pdb": {"strandID": "A", "seqNum": -1, "insCode": ""}, "seqID": 1}, ...]
+```
+
+**Where to get it.** [PDB-REDO](https://pdb-redo.eu/) entries ship with this data, so if your
+structures came from PDB-REDO you may already have it. Otherwise compute it with
+[**density-fitness**](https://github.com/PDB-REDO/density-fitness), the PDB-REDO tool that
+produces exactly these fields. It needs the model *and* its structure factors (an MTZ or
+reflection file) — EDIA cannot be derived from coordinates alone:
+
+```bash
+density-fitness <structure>.cif <structure>.mtz -o <pdb_id>_final.json
+```
+
+Check `density-fitness --help` for your build's exact flag names, and write the output beside
+the structure as `<pdb_id>_final.json`.
+
+**If you have no reflection data**, disable that one filter — the distance and B-factor filters
+need nothing extra and stay on:
+
+```bash
+--no_filter_by_edia
+```
+
+Training then runs on all waters that survive the geometric filters. This is the right choice
+for predicted or non-crystallographic inputs, where electron density does not exist.
+(`--no_filter_by_distance` and `--no_filter_by_bfactor` disable the other two.)
+
+**Logging is opt-in.** Training runs with Weights & Biases disabled unless you pass
+`--wandb_project`, so no account or `wandb login` is required. Supply a project name to log a
+run online:
+
+```bash
+--wandb_project water-flow
+```
+
+### 1. Precompute embeddings
+
+The shipped models use **ESM** (ESM3). Generate per-residue embeddings once, before training:
 
 ```bash
 uv run python -m scripts.generate_esm_embeddings \
     --split_file splits/water_pdbs.txt \
-    --cache_dir ~/flow_cache/ \
-    --device cuda:0
+    --base_pdb_dir <pdb_dir> \
+    --cache_dir <cache_root>
 ```
 
-### SLAE Embeddings (for `--encoder_type slae`)
+Embeddings are written to `<cache_root>/esm/`, keyed by split entry (`6eey_final` →
+`esm/6eey_final.pt`). Use `--struc` instead of `--split_file` for raw files outside the
+training layout, as in [Step 3](#step-3--generate-esm-embeddings).
 
-```bash
-uv run python -m scripts.generate_slae_embeddings \
-    --split_file splits/water_pdbs.txt \
-    --cache_dir ~/flow_cache/ \
-    --slae_ckpt /path/to/SLAE/checkpoints/autoencoder.ckpt
-```
+> **SLAE is legacy.** The `slae` encoder is kept for older runs. It depends on the external
+> `SLAE` package (not a WaterFlow dependency) and an autoencoder checkpoint — see
+> `scripts/generate_slae_embeddings.py`. New runs use ESM.
 
-## Training
+### 2. Train the flow generator
 
-### GVP Encoder (no precomputed embeddings required)
-
-```bash
-uv run python -m scripts.train \
-    --train_list splits/train_list_0.95.txt \
-    --val_list splits/valid_list_0.05.txt \
-    --encoder_type gvp \
-    --batch_size 4
-```
-
-### ESM Encoder (requires precomputed ESM embeddings)
+The geometry cache is built automatically from `--base_pdb_dir` on the first run and reused
+afterward.
 
 ```bash
 uv run python -m scripts.train \
     --train_list splits/train_list_0.95.txt \
     --val_list splits/valid_list_0.05.txt \
+    --base_pdb_dir <pdb_dir> \
+    --processed_dir <cache_root> \
     --encoder_type esm \
     --batch_size 1 \
-    --grad_accum_steps 4 \
-    --processed_dir ~/flow_cache/
+    --grad_accum_steps 4
 ```
 
-### Multi-GPU Training (DDP)
+> `--encoder_type` defaults to `esm`, matching the shipped models, and requires the embeddings
+> from step 1 under `--processed_dir`. Pass `--encoder_type gvp` to train from coordinates
+> alone with no embeddings (and no `--processed_dir`).
 
-To train on several GPUs on one machine, launch the same script with `torchrun`
-and set `--nproc_per_node` to the number of GPUs you want to use. Launching with 
-`torchrun` turns on multi-GPU training, and the plain `python -m scripts.train` 
-command still trains on a single GPU.
+Checkpoints, `config.json`, and logs land in `<save_dir>/<run_name>/`. That run directory is
+the `--flow_run_dir` for later stages.
+
+**Multi-GPU:** launch the same command with `torchrun` — no code flag needed. Plain
+`python -m scripts.train` stays single-GPU.
 
 ```bash
 uv run torchrun --nproc_per_node=4 -m scripts.train \
     --train_list splits/train_list_0.95.txt \
     --val_list splits/valid_list_0.05.txt \
-    --encoder_type gvp \
-    --batch_size 4  # per rank -> effective 16
+    --base_pdb_dir <pdb_dir> \
+    --processed_dir <cache_root> \
+    --encoder_type esm \
+    --batch_size 4        # per rank -> effective 16
 ```
 
-### Confidence Model Training
+Full argument reference, DDP mechanics, and W&B logging: [docs/training.md](docs/training.md).
 
-Trains `ConfidenceGVP` to score flow-sampled candidate waters, reusing the flow
-run's cache layout and config plus a per-PDB candidate directory:
+### 3. Cache candidate waters
+
+The confidence model trains on waters sampled from a trained flow checkpoint. Generate that
+candidate cache once:
+
+```bash
+uv run python -m scripts.cache_candidates \
+    --flow_run_dir <flow_run> \
+    --pdb_list splits/conf_pdbs.txt \
+    --base_pdb_dir <pdb_dir> \
+    --processed_dir <cache_root>
+```
+
+Candidates are written to
+`<cache_root>/candidate_cache/<run>_<ckpt>_<method><steps>_r<ratio>_s<seed>/`, one
+`<pdb_id>.pt` per structure. That directory is the `--candidate_dir` for the next step.
+
+### 4. Train the confidence scorer
 
 ```bash
 uv run python -m scripts.train_confidence \
@@ -333,153 +460,165 @@ uv run python -m scripts.train_confidence \
     --train_list splits/conf_train.txt \
     --val_list splits/conf_valid.txt \
     --candidate_dir <candidate_dir> \
-    --processed_dir <cache_root> \
     --base_pdb_dir <pdb_dir> \
+    --processed_dir <cache_root> \
     --save_dir <out> \
     --run_name <run_name> \
-    --init_from <flow_run>/checkpoints/best.pt --freeze_backbone
+    --init_from <flow_run>/checkpoints/best.pt \
+    --freeze_backbone
 ```
 
-`--init_from` warm-starts the shared backbone from a flow checkpoint;
-`--freeze_backbone` then trains only the score head. Validation reports AUC-PR
-(for checkpoint selection) and best F1. Multi-GPU works exactly like flow
-training — prefix with `torchrun --nproc_per_node=N`, no flag needed: each rank
-trains a disjoint shard, the loss is all-reduced, and the (score, label) pairs
-are pooled across ranks so AUC-PR/F1 rank the full candidate set. Rank 0 alone
-writes checkpoints.
+`--init_from` warm-starts the shared backbone from the flow checkpoint; `--freeze_backbone`
+then trains only the score head. Validation reports AUC-PR (used for checkpoint selection) and
+best F1. Multi-GPU works the same way as flow training — prefix with `torchrun --nproc_per_node=N`.
 
-### Resuming from Checkpoints
-
-To resume training from a checkpoint, you can load the model weights and optimizer state:
+To use your own models for prediction, collect them into one directory under the four names
+`predict_waters.py` expects:
 
 ```bash
-# Checkpoints are saved in <save_dir>/<run_name>/checkpoints/
-# - best.pt: Best validation loss
-# - epoch_N.pt: Periodic checkpoints every --save_every epochs
+mkdir -p my_ckpts
+cp <flow_run>/checkpoints/best.pt        my_ckpts/flow.pt
+cp <flow_run>/config.json                my_ckpts/flow_config.json
+cp <conf_run>/checkpoints/best.pt        my_ckpts/confidence.pt
+cp <conf_run>/config.json                my_ckpts/confidence_config.json
 ```
 
-### Key Training Arguments
+Then predict with `--ckpt_dir my_ckpts`.
 
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--train_list` | required | Path to training split file |
-| `--val_list` | required | Path to validation split file |
-| `--encoder_type` | `gvp` | Encoder type: `gvp`, `esm`, or `slae` |
-| `--batch_size` | `4` | Batch size (use smaller for ESM due to memory) |
-| `--grad_accum_steps` | `1` | Gradient accumulation steps (effective batch = batch_size * grad_accum_steps) |
-| `--flow_layers` | `3` | Number of flow GVP layers |
-| `--hidden_s` | `256` | Scalar hidden dimension |
-| `--hidden_v` | `64` | Vector hidden dimension |
-| `--epochs` | `200` | Number of training epochs |
-| `--lr` | `1e-3` | Learning rate |
-| `--scheduler` | `cosine` | LR scheduler: `cosine`, `step`, or `none` |
-| `--warmup_steps` | `0` | Linear warmup steps |
-| `--processed_dir` | `~/flow_cache/` | Cache directory for preprocessed data |
-| `--sampling_strategy` | `uniform_ball` | Flow prior: `uniform_ball` or `scaled_gaussian`; also resolves `--dynamic_edge_policy auto` |
-| `--dynamic_edge_policy` | `auto` | How water-touching edges are built: `auto`, `radius`, `knn`, or `knn_if_isolated` (see [Edge Construction](#edge-construction)) |
-| `--cutoff` | `8.0` | Distance cutoff in Å for radius edges |
-| `--knn_fallback_k` | `8` | Nearest neighbours attached to waters stranded by the radius query under `knn_if_isolated`; `0` disables |
-| `--disable_ww` | `false` | Ablate water→water edges |
-| `--disable_wp` | `false` | Ablate water→protein edges |
-| `--include_mates` | `false` | Include symmetry mate atoms as protein nodes |
-| `--include_ligands` | `true` | Include ligand/ion/cofactor/nucleic acid heavy atoms as protein nodes. Negate with `--no-include_ligands` |
-| `--save_dir` | `../flow_checkpoints` | Directory to save checkpoints |
-| `--save_every` | `10` | Save checkpoint every N epochs |
-| `--eval_every` | `5` | Run evaluation every N epochs |
-| `--min_edia` | `0.4` | Minimum EDIA score threshold for waters |
-| `--no_filter_by_edia` | - | Disable EDIA-based water filtering |
+### Reproducing the released checkpoints
 
-### Weights & Biases Logging
+The commands below are the recipe recorded in the shipped
+`checkpoints/*/flow_config.json` and `confidence_config.json`, reduced to the flags that differ
+from current defaults. They reproduce every recorded setting **except one**, which no flag can
+express:
 
-Training automatically logs to W&B. Configure with:
+> **The flow loss weighting differs.** Both released models record
+> `"loss_weighting": "uniform"` with `"loss_eps": null` — the loss was a plain unweighted MSE
+> over the velocity field. This repository instead always applies a timestep weighting that
+> upweights the end of the trajectory, `w = 1 / (loss_eps + (1 - t))` with `loss_eps = 1e-3`
+> hardcoded (`src/flow.py:1163`), and exposes no option to turn it off. A run following the
+> commands below therefore optimises a **different objective** than the released models did.
+> Everything else — architecture, graph construction, schedule, optimiser — matches.
 
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--wandb_project` | `water-flow` | W&B project name |
-| `--wandb_dir` | `../wandb_logs` | Local W&B log directory |
-| `--run_name` | auto-generated | Custom run name (format: `YYYYMMDD_HHMMSS_encoder_layers_hidden`) |
+See [What the configs record but the scripts don't
+expose](#what-the-configs-record-but-the-scripts-dont-expose) for why the remaining unmatched
+keys do not affect the result.
 
-## Quality Filtering
+**Flow generator — `checkpoints/mates`:**
 
-WaterFlow applies multiple quality filters to ensure high-quality training data.
+```bash
+uv run python -m scripts.train \
+    --train_list <train.txt> --val_list <val.txt> \
+    --base_pdb_dir <pdb_dir> --processed_dir <cache_root> \
+    --save_dir <out> --run_name <name> \
+    --include_mates \
+    --disable_ww --disable_wp \
+    --epochs 110 \
+    --batch_size 1 --grad_accum_steps 2 \
+    --lr 0.002 --weight_decay 0.03 \
+    --warmup_steps 300 --lr_decay_epochs 100 \
+    --fused_adamw \
+    --eval_every 2 --save_every 2 --n_eval_samples 115 \
+    --seed -1
+```
 
-### Structure-Level Quality Checks
+**Flow generator — `checkpoints/mates_off`:** the same command with three changes — drop
+`--include_mates`, use `--lr 0.004`, and drop `--batch_size 1 --grad_accum_steps 2` (that run
+used the defaults, batch 4 with no accumulation).
 
-These checks determine whether a structure is included in training:
+**Candidate cache** (feeds the confidence model; the released run used ratio 8, seed 0):
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--max_com_dist` | `25.0` | Max protein-water center-of-mass distance (A) |
-| `--max_clash_fraction` | `0.05` | Max fraction of waters clashing with protein |
-| `--clash_dist` | `2.0` | Distance threshold for clash detection (A) |
-| `--min_water_residue_ratio` | `0.1` | Minimum waters per residue ratio |
+```bash
+uv run python -m scripts.cache_candidates \
+    --flow_run_dir <flow_run> \
+    --pdb_list <conf_pdbs.txt> \
+    --base_pdb_dir <pdb_dir> --processed_dir <cache_root> \
+    --water_ratio 8 --seed 0
+```
 
-### Per-Water Quality Filters
+**Confidence scorer** (identical for both checkpoint sets — note **no** `--freeze_backbone`):
 
-These filters remove individual low-quality waters (can be toggled):
+```bash
+uv run python -m scripts.train_confidence \
+    --flow_run_dir <flow_run> \
+    --train_list <conf_train.txt> --val_list <conf_valid.txt> \
+    --candidate_dir <candidate_dir> \
+    --base_pdb_dir <pdb_dir> --processed_dir <cache_root> \
+    --save_dir <out> --run_name <name> \
+    --init_from <flow_run>/checkpoints/best.pt \
+    --epochs 25 \
+    --batch_size 1 --grad_accum_steps 2 \
+    --lr 1e-4 --weight_decay 0.01 \
+    --warmup_steps 300 \
+    --max_candidates 1500 \
+    --strict_cache \
+    --num_workers 8
+```
 
-| Parameter | Default | Toggle Flag | Description |
-|-----------|---------|-------------|-------------|
-| `--max_protein_dist` | `5.0` | `--no_filter_by_distance` | Remove waters far from protein |
-| `--min_edia` | `0.4` | `--no_filter_by_edia` | Remove waters with low EDIA scores |
-| `--max_bfactor_zscore` | `2.0` | `--no_filter_by_bfactor` | Remove waters with high B-factor |
+Everything else — `--encoder_type esm`, `--scheduler cosine`, `--r_in 0.5`, `--r_out 1.5`,
+`--accept_radius 1.0`, `--grad_clip 1.0`, AMP on in bfloat16, all three water filters on — is
+already the default.
 
-<details>
-<summary><strong>About EDIA Scores</strong></summary>
+The remaining flags in those configs are dataloader performance settings that do not change the
+model: `--num_workers 12 --pin_memory --persistent_workers --cache_load_mmap` for flow.
 
-EDIA measures how well an atom's position is supported by the experimental electron density map. Higher EDIA scores indicate more reliable atomic positions.
+#### What the configs record but the scripts don't expose
 
-**Configuration:**
-- EDIA filtering is enabled by default 
-- The EDIA data lives in the `json` file of the format `<pdb_id>_final.json` in the same directory as the structure file, and is obtained from PDB-REDO.
-- Use `--no_filter_by_edia` to explicitly disable EDIA filtering
+The shipped `*_config.json` files were written by an earlier version of the training code that
+had features this repository does not, so they record some keys with no matching CLI flag.
 
-</details>
+**These leftover keys do not affect model loading or inference.** Loading reads only the
+architecture and graph-construction keys — encoder type, hidden dimensions, layer counts,
+cutoff, neighbour limits, edge ablations — and ignores everything else. Each unmatched key was
+either switched off in the recorded run or set to the behaviour the current code already
+implements, with one exception (`loss_weighting`) that matters only when *retraining*:
 
-## Inference
+| Keys | Recorded value | Effect |
+|---|---|---|
+| `loss_weighting`, `loss_eps` | `uniform`, `null` | **Matters for retraining** — see the warning above. The earlier code could select uniform weighting; this repo always applies `1/(loss_eps + (1-t))`. No effect on inference. |
+| `min_snr_gamma`, `t_logit_mean/std` | `5.0`, `0.0`/`1.0` | Inert under `loss_weighting: uniform`; neither exists in this repo. |
+| `t_dist` | `uniform` | Matches: `training_step` draws `t` from `torch.rand` (`src/flow.py:1147`). |
+| `plateau_*` | — | Only read when `scheduler` is `plateau`; both runs used `cosine`. |
+| `early_stopping_*`, `max_train_steps`, `max_val_steps`, `benchmark_*`, `profile_*` | `None` / `false` | All disabled. |
+| `use_bce`, `use_mse` (confidence) | `true`, `false` | This repo's confidence trainer already uses BCE-with-logits on the smootherstep target. |
+| `coverage_weight`, `target_recall` (confidence) | `0.0`, `0.45` | The coverage term is weighted zero, making `target_recall` inert. |
+| `amp_dtype` (confidence) | `bfloat16` | The trainer hardcodes bfloat16 autocast. |
+| `active_water_filters`, `ignored_water_filter_thresholds` | all three filters on, `[]` | A record of the filters used, matching this repo's defaults. |
+| `resume_extend_lr`, `skip_wandb`, `wandb_log_interval` | `false`, `false`, `1` | Resume and logging bookkeeping; no effect on the model. |
 
-Run inference on a trained model:
+The model **architecture** — encoder type, hidden dimensions, layer counts — is what must match
+for a checkpoint to load, and a run following the commands above matches it.
+
+### Evaluating the flow generator alone
+
+`scripts/inference.py` scores the flow generator against ground-truth waters, separately from
+the confidence model. It reads cached training-format graphs (not raw files) and reports
+precision, recall, and RMSD.
 
 ```bash
 uv run python -m scripts.inference \
-    --run_dir /path/to/training_run \
+    --run_dir <flow_run> \
     --pdb_list splits/test_list.txt \
-    --output_dir ./outputs \
+    --base_pdb_dir <pdb_dir> \
+    --processed_dir <cache_root> \
+    --output_dir ./eval \
     --method rk4 \
     --num_steps 100
 ```
 
-### Key Inference Arguments
+`--threshold` (default `1.0` Å) sets the distance for precision/recall matching. Use
+`--water_ratio` to sample a fixed count instead of the ground-truth number; metrics that need
+ground truth are skipped automatically when it is set.
 
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--run_dir` | required | Path to training run directory (contains config.json) |
-| `--pdb_list` | required | Text file with PDB entries (one per line) |
-| `--output_dir` | required | Directory for output plots, GIFs, and metrics |
-| `--method` | `rk4` | Integration method: `euler` (fast) or `rk4` (accurate) |
-| `--num_steps` | `100` | Number of integration steps |
-| `--checkpoint` | `best.pt` | Checkpoint filename to load |
-| `--batch_size` | `8` | Number of proteins to process in parallel |
-| `--save_gifs` | `false` | Save trajectory GIFs (slower) |
-| `--threshold` | `1.0` | Distance threshold for precision/recall (A) |
-| `--water_ratio` | `None` | Sample `num_residues * ratio` waters (if not set, uses ground truth count) |
+## Documentation
 
-> **`--water_ratio` counts mate residues too.** `num_residues` covers ASU *and* mate
-> residues, so `--include_mates` emits ~1.7x more waters at the same ratio (~440 vs
-> ~263 particles at ratio 1, against ~238 true waters). Two runs share a sampling
-> budget only if their mate settings match; compare density-sensitive metrics at
-> parity, not at equal ratio. `--include_mates` is inherited from the training config
-> when the flag is absent.
+- [docs/data.md](docs/data.md) — input layout, split files, EDIA, the geometry / ESM / SLAE
+  cache structure, and quality filters.
+- [docs/model.md](docs/model.md) — the two-stage architecture, encoder types, and edge
+  construction.
+- [docs/training.md](docs/training.md) — full argument reference for the flow and confidence
+  trainers, DDP, checkpoints, and W&B.
 
-### Output Structure
-
-```
-<output_dir>/<run_name>/
-├── plots/              # 3D visualization PNGs for each PDB
-│   ├── 1abc_final.png
-│   └── ...
-├── gifs/               # Trajectory GIFs (if --save_gifs)
-│   ├── 1abc_final.gif
-│   └── ...
-└── metrics.json        # Per-sample and summary statistics
-```
+<p align="center">
+  <img src="figures/inference_sweep.gif" alt="Flow ODE integration sweeping candidate waters from the prior to final kept waters" width="900">
+</p>
