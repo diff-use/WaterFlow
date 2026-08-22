@@ -182,17 +182,21 @@ def predict_structures(
 
     With --geometry_cache set, the flow-model inputs (inference graphs) are cached
     at <geometry_cache>/<name>.pt and the flow outputs (candidate waters) at
-    <geometry_cache>/candidates/<name>.pt. Either is reused when present, so a
-    re-run skips graph construction and flow sampling for cached structures.
+    <geometry_cache>/candidates/<name>.pt. When the mates model is used the cached
+    names carry a `_mates` suffix (<name>_mates.pt), so mates and mates_off runs
+    can share one cache dir without reusing each other's graph. Either is reused
+    when present, so a re-run skips graph construction and flow sampling for
+    cached structures.
     """
     cache = Path(args.geometry_cache) if args.geometry_cache else None
     cand_cache = cache / "candidates" if cache else None
+    mates_tag = "_mates" if args.include_mates else ""
 
     graphs, frames, out_names = [], [], []
     encoder_type = flow_config.get("encoder_type", "gvp")
     for path in struc_paths:
         name = Path(path).stem
-        graph_pt = cache / f"{name}.pt" if cache else None
+        graph_pt = cache / f"{name}{mates_tag}.pt" if cache else None
         if graph_pt is not None and graph_pt.exists():
             graph = torch.load(graph_pt, weights_only=False)
         else:
@@ -204,8 +208,10 @@ def predict_structures(
                 include_ligands=flow_config.get("include_ligands", True),
                 cutoff=flow_config.get("cutoff", 8.0),
                 max_neighbors=flow_config.get("max_neighbors", 256),
-                out_dir=cache,  # None -> not cached
             )
+            if graph_pt is not None:
+                cache.mkdir(parents=True, exist_ok=True)
+                torch.save(graph, graph_pt)
         graphs.append(graph)
         frames.append(_input_frame(path))
         out_names.append(name)
@@ -215,7 +221,7 @@ def predict_structures(
     candidates: list[torch.Tensor | None] = [None] * len(graphs)
     todo_idx, todo_graphs = [], []
     for i, name in enumerate(out_names):
-        cand_pt = cand_cache / f"{name}.pt" if cand_cache else None
+        cand_pt = cand_cache / f"{name}{mates_tag}.pt" if cand_cache else None
         if cand_pt is not None and cand_pt.exists():
             candidates[i] = torch.load(cand_pt, weights_only=False)["candidate_pos"]
         else:
@@ -237,7 +243,10 @@ def predict_structures(
             cand = torch.as_tensor(result["water_pred"], dtype=torch.float32)
             candidates[i] = cand
             if cand_cache is not None:
-                torch.save({"candidate_pos": cand}, cand_cache / f"{out_names[i]}.pt")
+                torch.save(
+                    {"candidate_pos": cand},
+                    cand_cache / f"{out_names[i]}{mates_tag}.pt",
+                )
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -306,6 +315,26 @@ def _collect_struc_paths(args: argparse.Namespace) -> list[str]:
     return paths
 
 
+def _check_embeddings(
+    paths: list[str], encoder_type: str, processed_dir: str | None
+) -> None:
+    """Fail fast (not deep in graph building) if an esm/slae embedding is missing.
+
+    esm/slae look up <processed_dir>/<encoder_type>/<stem>.pt per input; gvp needs
+    none and is skipped.
+    """
+    if encoder_type == "gvp":
+        return
+    emb_dir = Path(processed_dir or ".") / encoder_type
+    missing = [p for p in paths if not (emb_dir / f"{Path(p).stem}.pt").exists()]
+    if missing:
+        raise SystemExit(
+            f"Missing {encoder_type} embeddings under {emb_dir} for "
+            f"{[Path(p).name for p in missing]}. Generate them first with "
+            f"scripts/generate_{encoder_type}_embeddings.py"
+        )
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
@@ -337,8 +366,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Directory to cache flow-model inputs (inference graphs) as "
         "<name>.pt, with flow outputs (candidate waters) under a candidates/ "
-        "subdir. Both are reused when present, so a re-run skips graph "
-        "construction and flow sampling for cached structures. Off by default.",
+        "subdir. Mates runs get a `_mates` suffix (<name>_mates.pt), so mates and "
+        "mates_off can share one dir without colliding. Both are reused when "
+        "present, so a re-run skips graph construction and flow sampling for "
+        "cached structures. Off by default.",
     )
     p.add_argument("--out_dir", required=True)
     p.add_argument("--out_format", default=".pdb", choices=[".pdb", ".cif"])
@@ -427,6 +458,7 @@ def main() -> None:
     load_state_dict_lenient(conf_model, ckpt_dir / "confidence.pt", device)
 
     paths = _collect_struc_paths(args)
+    _check_embeddings(paths, flow_config.get("encoder_type", "gvp"), args.processed_dir)
     logger.info(f"Predicting waters for {len(paths)} structure(s) on {device}")
     for start in tqdm(range(0, len(paths), args.batch_size), desc="predict"):
         predict_structures(

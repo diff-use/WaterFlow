@@ -479,8 +479,14 @@ def parse_args():
     # logging / wandb
     p.add_argument("--log_level", type=str, default="INFO")
     p.add_argument("--log_file", type=str, default=None)
-    p.add_argument("--wandb_project", type=str, default="water-flow")
-    p.add_argument("--wandb_dir", type=str, default="/home/srivasv/wandb_logs")
+    p.add_argument(
+        "--wandb_project",
+        type=str,
+        default=None,
+        help="If set, log to this wandb project. Omit to disable wandb "
+        "(no login required).",
+    )
+    p.add_argument("--wandb_dir", type=str, default=None)
     p.add_argument("--device", type=str, default="cuda")
     args = p.parse_args()
     if args.encoder_type == "gvp" and args.embedding_dim is not None:
@@ -1347,14 +1353,14 @@ def main():
             json.dump(config_dict, f, indent=2)
         logger.info(f"Configuration saved to: {config_file}")
 
-    # Non-main ranks get a disabled wandb client, so wandb.log is a no-op there.
-    # mode=None on rank 0 means WANDB_MODE (default online) applies.
+    # wandb is opt-in: --wandb_project on rank 0 logs online (needs a login);
+    # otherwise "disabled", where wandb.log/finish are no-ops and no key is needed.
     wandb.init(
         project=args.wandb_project,
         dir=args.wandb_dir,
         name=args.run_name,
         config=config_dict,
-        mode=None if main_proc else "disabled",
+        mode="online" if (main_proc and args.wandb_project) else "disabled",
     )
 
     model = build_model(args, device, encoder_config=encoder_config)
