@@ -70,7 +70,10 @@ final set, and writes out the input structure with the predicted waters added.
 
 **Trained models.** This repo contains two types of pretrained models sets under
 `checkpoints/`, varying in whether they were trained with symmetry mates or not as added
-context nodes. The weights are stored in [Git LFS](https://git-lfs.com):
+context nodes. The mates-on models should be selected if the input structure(s) have crytsal header information
+in their `.cif/.pdb` files. Otherwise (for example, for predicted structures), use the mates-off models.
+
+The weights are stored under `checkpoints/` with [Git LFS](https://git-lfs.com):
 
 | `--ckpt_dir` | Symmetry mates | Contents |
 |---|---|---|
@@ -115,8 +118,8 @@ input structure it builds an *inference graph* directly from the raw PDB/CIF:
 - **Waters are removed.** They are what the model predicts, so any existing waters in the file
   are dropped and the graph starts with no water nodes.
 - Protein and hets (ligands, ions, cofactors, nucleic acids) are kept, coordinates
-  are centered on the ASU protein centroid, and symmetry mates are added when the
-  flow run used them. 
+  are centered on the ASU protein centroid, and symmetry mates are added if the
+  selected checkpoint used them. 
 
 **Embeddings.** If the flow model uses the ESM encoder (the default), precompute
 embeddings for your inputs first — the same step as for training
@@ -159,7 +162,8 @@ uv run python -m scripts.predict_waters \
 Pass `--geometry_cache <dir>` to cache the flow inputs (inference graphs) at
 `<dir>/<name>.pt` and the flow outputs (sampled candidates) at
 `<dir>/candidates/<name>.pt`. Both are reused when present, so a re-run skips graph
-construction and flow sampling for structures already cached.
+construction and flow sampling for structures already cached, although this is not an expensive 
+step for a single protein. 
 
 **Outputs**, per structure, in the input coordinate frame:
 
@@ -170,14 +174,14 @@ construction and flow sampling for structures already cached.
 ### Selecting the final waters
 
 This is the main knob. Both modes sample `--water_ratio * num_residues` candidates,
-score each, and cluster overlapping candidates into van der Waals centroids (each
+score each, and cluster overlapping candidates into van der Waals distance-based centroids (each
 centroid keeps its cluster's highest confidence). They differ in how the final set
 is chosen:
 
 | `--selection` | Rule | Use when |
 |---|---|---|
-| `confidence` (default) | Drop candidates below `--confidence_threshold` (default `0.5`), then keep every centroid. | You want a calibrated score cutoff; the water count follows from the data. |
-| `density` | Cluster with no cutoff, then keep the top `floor(--density_ratio * ASU_residues)` centroids by confidence (default ratio `0.6`). | You want a target hydration level tied to protein size, not an absolute score. |
+| `confidence` (default) | Drop candidates below `--confidence_threshold` (default `0.5`), then cluster and keep every centroid. | You want a calibrated score cutoff, or high confidence waters |
+| `density` | Cluster with no cutoff, then keep the top `floor(--density_ratio * ASU_residues)` ranked centroids by confidence (default ratio `0.6`). | You want a target hydration level tied to protein size, not an absolute score. |
 
 Each mode accepts only its own knob: `--confidence_threshold` is rejected under
 `density`, and `--density_ratio` is rejected under `confidence`.
