@@ -16,7 +16,7 @@ WaterFlow is a two-stage Deep Learning model that predicts the positions of orde
   - [Building an environment from scratch](#building-an-environment-from-scratch)
 - [Predicting waters](#predicting-waters)
   - [Step 1 — Fetch the model weights](#step-1--fetch-the-model-weights)
-  - [Step 2 — Pick a checkpoint set](#step-2--pick-a-checkpoint-set)
+  - [Step 2 — Pick a checkpoint model set](#step-2--pick-a-checkpoint-model-set)
   - [Step 3 — Generate ESM embeddings](#step-3--generate-esm-embeddings)
   - [Step 4 — Predict](#step-4--predict)
   - [Predicting on many structures](#predicting-on-many-structures)
@@ -90,8 +90,8 @@ structure it strips any existing waters, builds the graph from protein + het-ato
 candidates with the flow model, scores them with the confidence model, selects the final set,
 and writes the input structure back out with the predicted waters added.
 
-The four steps below cover it end to end: fetch the weights, pick a checkpoint set, generate
-embeddings, and predict.
+The four steps below cover the pipeline end to end. Fetch the weights, pick a checkpoint model set, generate
+embeddings, and predict waters.
 
 ### Step 1 — Fetch the model weights
 
@@ -122,7 +122,7 @@ git lfs install    # once per machine
 git lfs pull       # replaces the pointers with the real files
 ```
 
-### Step 2 — Pick a checkpoint set
+### Step 2 — Pick a checkpoint model set
 
 Two model sets ship with the repo, differing in whether symmetry mates were used as additional
 context nodes during training:
@@ -533,7 +533,7 @@ The remaining flags in those configs are dataloader performance settings that do
 model: `--num_workers 12 --pin_memory --persistent_workers --cache_load_mmap` for flow.
 
 <details>
-<summary><strong>What the configs record but the scripts don't expose</strong></summary>
+<summary><strong>Keys the configs record that do not exist in current train scripts</strong></summary>
 
 The shipped `*_config.json` files were written by an earlier version of the training code that
 had features this repository does not, so they record some keys with no matching CLI flag.
