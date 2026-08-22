@@ -18,7 +18,7 @@ Structures live one per directory under `--base_pdb_dir`:
 ```
 
 Each structure carries the `_final` suffix and contains protein atoms
-(conditioning context) and water molecules (`HOH` residues, the ground truth).
+(conditioning context) and water molecules (`HOH` or `WAT` residues, the ground truth).
 
 **Format resolution:** split-file entries are bare IDs (`6eey_final`, no
 extension). For each entry WaterFlow looks in `<base_pdb_dir>/<pdb_id>/` and
@@ -39,7 +39,7 @@ Plain text, one entry per line:
 
 ## Structure parsing
 
-- Biotite extracts protein atoms, waters (`HOH`), and ligands, dispatching on
+- Biotite extracts protein atoms, waters (`HOH` or `WAT`), and ligands, dispatching on
   extension (`.cif` via `CIFFile`, otherwise `PDBFile`).
 - "Ligand" means every non-protein, non-water heavy atom: small molecules, ions,
   cofactors, nucleic acids. Included by default; disable with `--no-include_ligands`.
@@ -129,12 +129,16 @@ The base name comes from `--geometry_cache_name` (default `geometry`).
 ### Filter metadata
 
 Filtering happens *before* the cache is written, so the thresholds are a property
-of the directory, not of the run reading it — the `.pt` files record none of them.
-Each geometry directory carries a `_filter_meta.json` recording the per-water
-filters and their toggles, the structure-level checks
-(`min_water_residue_ratio`, `max_com_dist`, `max_clash_fraction`, `clash_dist`,
-`interface_dist_threshold`), and the graph parameters behind the cached PP edges
-(`cutoff`, `max_neighbors`).
+of the directory, not of the run reading it — the `.pt` files record almost none of
+them (`max_neighbors` is the exception). Each geometry directory carries a
+`_filter_meta.json` recording the per-water filters and their toggles, the
+structure-level checks (`min_water_residue_ratio`, `max_com_dist`,
+`max_clash_fraction`, `clash_dist`, `interface_dist_threshold`), and the graph
+parameters behind the cached PP edges (`cutoff`, `max_neighbors`).
+
+> These two are the `ProteinWaterDataset` defaults (8.0 / 256), **not** whatever
+> `--cutoff` / `--max_neighbors` you passed to the trainer — those flags only
+> configure the model. Changing them therefore never invalidates a cache.
 
 The first run with `preprocess=True` writes this file; every later run compares
 against it and **refuses to start** on a mismatch rather than mixing differently
@@ -164,6 +168,7 @@ These decide whether a structure is included at all:
 | `--max_clash_fraction` | `0.05` | Max fraction of waters clashing with protein |
 | `--clash_dist` | `2.0` | Distance threshold for a clash (Å) |
 | `--min_water_residue_ratio` | `0.1` | Minimum waters-per-residue ratio |
+| `--interface_dist_threshold` | `4.0` | Drops structures whose ASU chains are non-interacting copies |
 
 ### Per-water filters
 
@@ -175,10 +180,39 @@ These remove individual low-quality waters and can each be toggled off:
 | `--min_edia` | `0.4` | `--no_filter_by_edia` | Remove waters with low EDIA scores |
 | `--max_bfactor_zscore` | `2.0` | `--no_filter_by_bfactor` | Remove waters with high B-factor |
 
-**EDIA** measures how well an atom's position is supported by the experimental
-electron density map; higher is more reliable. EDIA data is read from
-`<pdb_id>_final.json` in the same directory as the structure (from PDB-REDO).
-Filtering is on by default; disable with `--no_filter_by_edia`.
+**EDIA** (Electron Density Interpretation of Atoms) measures how well an atom's
+modelled position is supported by the experimental electron density map; higher is
+more reliable. It requires structure factors, so it exists only for
+crystallographic structures — not for predicted models.
+
+EDIA data is read from `<pdb_id>_final.json` in the same directory as the
+structure. The file is a flat JSON array of per-residue records; the loader keeps
+only entries whose `compID` is `HOH` or `WAT`, and keys each by
+`(pdb.strandID, pdb.seqNum, pdb.insCode)` to match a water in the structure:
+
+```json
+[{"EDIAm": 0.609, "RSCCS": 0.907, "RSR": 0.116, "OPIA": 30, "compID": "HIS",
+  "pdb": {"strandID": "A", "seqNum": -1, "insCode": ""}, "seqID": 1}, ...]
+```
+
+Only `EDIAm` is used; the other fields are ignored. A water with no matching entry
+in the JSON gets `NaN` and **passes** the filter — the comparison is deliberately
+conservative, so an incomplete file drops nothing (`src/dataset.py:782`). The same
+holds for the B-factor filter.
+
+[PDB-REDO](https://pdb-redo.eu/) entries ship with this data. To generate it
+yourself, use [density-fitness](https://github.com/PDB-REDO/density-fitness),
+which emits exactly these fields from a model plus its reflection data:
+
+```bash
+density-fitness <structure>.cif <structure>.mtz -o <pdb_id>_final.json
+```
+
+Filtering is on by default and **rejects a structure whose JSON is missing** rather
+than silently skipping the filter. With no JSONs at all every structure is dropped,
+the loader logs `Dataset contains 0 valid entries`, and training then fails on the
+empty dataset. Disable it with `--no_filter_by_edia` when you have no reflection
+data.
 
 ## Feature encoding
 

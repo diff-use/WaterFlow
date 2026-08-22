@@ -343,17 +343,51 @@ structure, and quality filters.
 
 Two defaults will stop a first run if you are not ready for them:
 
-**Quality filtering needs EDIA scores.** EDIA-based water filtering is on by default and
-expects a per-structure `<pdb_id>_final.json` of electron-density fit scores, produced by the
-external EDIA tool. Without those files every structure is rejected and training aborts with
-`Dataset contains 0 valid entries`. If you do not have them, disable that one filter:
+**Quality filtering needs EDIA scores.** Water filtering by EDIA is on by default and expects a
+per-structure `<pdb_id>_final.json` next to each structure file. If those files are absent,
+every structure is rejected and training aborts before the first epoch:
+
+```
+EDIA filtering enabled but JSON file missing for <pdb_id>. Expected file: <pdb_id>_final.json
+...
+Dataset contains 0 valid entries
+```
+
+**What the file is.** EDIA (Electron Density Interpretation of Atoms) measures how well an
+atom's modelled position is supported by the experimental electron density — higher is better
+supported. WaterFlow reads one number per water: the `EDIAm` field of each `HOH`/`WAT` record,
+matched to the structure by chain, residue number and insertion code. Waters scoring below
+`--min_edia` (default `0.4`) are dropped as unreliably placed. The file is a flat JSON array of
+per-residue records:
+
+```json
+[{"EDIAm": 0.609, "RSCCS": 0.907, "RSR": 0.116, "compID": "HIS",
+  "pdb": {"strandID": "A", "seqNum": -1, "insCode": ""}, "seqID": 1}, ...]
+```
+
+**Where to get it.** [PDB-REDO](https://pdb-redo.eu/) entries ship with this data, so if your
+structures came from PDB-REDO you may already have it. Otherwise compute it with
+[**density-fitness**](https://github.com/PDB-REDO/density-fitness), the PDB-REDO tool that
+produces exactly these fields. It needs the model *and* its structure factors (an MTZ or
+reflection file) — EDIA cannot be derived from coordinates alone:
+
+```bash
+density-fitness <structure>.cif <structure>.mtz -o <pdb_id>_final.json
+```
+
+Check `density-fitness --help` for your build's exact flag names, and write the output beside
+the structure as `<pdb_id>_final.json`.
+
+**If you have no reflection data**, disable that one filter — the distance and B-factor filters
+need nothing extra and stay on:
 
 ```bash
 --no_filter_by_edia
 ```
 
-The distance and B-factor filters need no extra data and stay on. (`--no_filter_by_distance`
-and `--no_filter_by_bfactor` disable those.)
+Training then runs on all waters that survive the geometric filters. This is the right choice
+for predicted or non-crystallographic inputs, where electron density does not exist.
+(`--no_filter_by_distance` and `--no_filter_by_bfactor` disable the other two.)
 
 **Logging is opt-in.** Training runs with Weights & Biases disabled unless you pass
 `--wandb_project`, so no account or `wandb login` is required. Supply a project name to log a
@@ -398,8 +432,9 @@ uv run python -m scripts.train \
     --grad_accum_steps 4
 ```
 
-> **`--encoder_type` defaults to `gvp`, not `esm`.** Pass `--encoder_type esm` explicitly to
-> match the shipped models; `gvp` trains from coordinates alone and ignores `--processed_dir`.
+> `--encoder_type` defaults to `esm`, matching the shipped models, and requires the embeddings
+> from step 1 under `--processed_dir`. Pass `--encoder_type gvp` to train from coordinates
+> alone with no embeddings (and no `--processed_dir`).
 
 Checkpoints, `config.json`, and logs land in `<save_dir>/<run_name>/`. That run directory is
 the `--flow_run_dir` for later stages.
@@ -471,22 +506,112 @@ Then predict with `--ckpt_dir my_ckpts`.
 
 ### Reproducing the released checkpoints
 
-Training with the defaults above does **not** reproduce the shipped models. The differences
-that matter:
+The commands below are the recipe recorded in the shipped
+`checkpoints/*/flow_config.json` and `confidence_config.json`, reduced to the flags that differ
+from current defaults. They reproduce every recorded setting **except one**, which no flag can
+express:
 
-- **Edge ablations.** The released flow models were trained with water–water and
-  water–protein edges disabled, which changes the graph the model sees. Add
-  `--disable_ww --disable_wp` to the flow command to match.
-- **Backbone fine-tuning.** The released confidence model was trained with the whole backbone
-  unfrozen. The example in [step 4](#4-train-the-confidence-scorer) passes `--freeze_backbone`,
-  which is faster but is not what shipped — drop it to match.
-- **Schema drift.** The shipped `*_config.json` files carry keys the current training scripts
-  do not expose (distortion, min-SNR loss weighting, plateau scheduling, early stopping,
-  `target_recall`, `use_bce`, and others), so the released weights were produced by a later
-  version of the training code. A fresh run's `config.json` will not match theirs key for key.
+> **The flow loss weighting differs.** Both released models record
+> `"loss_weighting": "uniform"` with `"loss_eps": null` — the loss was a plain unweighted MSE
+> over the velocity field. This repository instead always applies a timestep weighting that
+> upweights the end of the trajectory, `w = 1 / (loss_eps + (1 - t))` with `loss_eps = 1e-3`
+> hardcoded (`src/flow.py:1163`), and exposes no option to turn it off. A run following the
+> commands below therefore optimises a **different objective** than the released models did.
+> Everything else — architecture, graph construction, schedule, optimiser — matches.
 
-The model **architecture** is what has to match for a checkpoint to load — encoder type, hidden
-dimensions, layer counts — and a default run does match there.
+See [What the configs record but the scripts don't
+expose](#what-the-configs-record-but-the-scripts-dont-expose) for why the remaining unmatched
+keys do not affect the result.
+
+**Flow generator — `checkpoints/mates`:**
+
+```bash
+uv run python -m scripts.train \
+    --train_list <train.txt> --val_list <val.txt> \
+    --base_pdb_dir <pdb_dir> --processed_dir <cache_root> \
+    --save_dir <out> --run_name <name> \
+    --include_mates \
+    --disable_ww --disable_wp \
+    --epochs 110 \
+    --batch_size 1 --grad_accum_steps 2 \
+    --lr 0.002 --weight_decay 0.03 \
+    --warmup_steps 300 --lr_decay_epochs 100 \
+    --fused_adamw \
+    --eval_every 2 --save_every 2 --n_eval_samples 115 \
+    --seed -1
+```
+
+**Flow generator — `checkpoints/mates_off`:** the same command with three changes — drop
+`--include_mates`, use `--lr 0.004`, and drop `--batch_size 1 --grad_accum_steps 2` (that run
+used the defaults, batch 4 with no accumulation).
+
+**Candidate cache** (feeds the confidence model; the released run used ratio 8, seed 0):
+
+```bash
+uv run python -m scripts.cache_candidates \
+    --flow_run_dir <flow_run> \
+    --pdb_list <conf_pdbs.txt> \
+    --base_pdb_dir <pdb_dir> --processed_dir <cache_root> \
+    --water_ratio 8 --seed 0
+```
+
+**Confidence scorer** (identical for both checkpoint sets — note **no** `--freeze_backbone`):
+
+```bash
+uv run python -m scripts.train_confidence \
+    --flow_run_dir <flow_run> \
+    --train_list <conf_train.txt> --val_list <conf_valid.txt> \
+    --candidate_dir <candidate_dir> \
+    --base_pdb_dir <pdb_dir> --processed_dir <cache_root> \
+    --save_dir <out> --run_name <name> \
+    --init_from <flow_run>/checkpoints/best.pt \
+    --epochs 25 \
+    --batch_size 1 --grad_accum_steps 2 \
+    --lr 1e-4 --weight_decay 0.01 \
+    --warmup_steps 300 \
+    --max_candidates 1500 \
+    --strict_cache \
+    --num_workers 8
+```
+
+Everything else — `--encoder_type esm`, `--scheduler cosine`, `--r_in 0.5`, `--r_out 1.5`,
+`--accept_radius 1.0`, `--grad_clip 1.0`, AMP on in bfloat16, all three water filters on — is
+already the default.
+
+**Two caveats on exactness.** The released runs were launched with no seed (`--seed -1` above
+reproduces that, but no unseeded run is bitwise reproducible), and the `mates` run was
+*resumed* from epoch 8 of an earlier run rather than trained straight through. Expect to match
+the recipe, not the weights.
+
+The remaining flags in those configs are dataloader performance settings that do not change the
+model: `--num_workers 12 --pin_memory --persistent_workers --cache_load_mmap` for flow.
+
+#### What the configs record but the scripts don't expose
+
+The shipped `*_config.json` files were written by an earlier version of the training code that
+had features this repository does not, so they record some keys with no matching CLI flag.
+
+**These leftover keys do not affect model loading or inference.** Loading reads only the
+architecture and graph-construction keys — encoder type, hidden dimensions, layer counts,
+cutoff, neighbour limits, edge ablations — and ignores everything else. Each unmatched key was
+either switched off in the recorded run or set to the behaviour the current code already
+implements, with one exception (`loss_weighting`) that matters only when *retraining*:
+
+| Keys | Recorded value | Effect |
+|---|---|---|
+| `loss_weighting`, `loss_eps` | `uniform`, `null` | **Matters for retraining** — see the warning above. The earlier code could select uniform weighting; this repo always applies `1/(loss_eps + (1-t))`. No effect on inference. |
+| `min_snr_gamma`, `t_logit_mean/std` | `5.0`, `0.0`/`1.0` | Inert under `loss_weighting: uniform`; neither exists in this repo. |
+| `t_dist` | `uniform` | Matches: `training_step` draws `t` from `torch.rand` (`src/flow.py:1147`). |
+| `plateau_*` | — | Only read when `scheduler` is `plateau`; both runs used `cosine`. |
+| `early_stopping_*`, `max_train_steps`, `max_val_steps`, `benchmark_*`, `profile_*` | `None` / `false` | All disabled. |
+| `use_bce`, `use_mse` (confidence) | `true`, `false` | This repo's confidence trainer already uses BCE-with-logits on the smootherstep target. |
+| `coverage_weight`, `target_recall` (confidence) | `0.0`, `0.45` | The coverage term is weighted zero, making `target_recall` inert. |
+| `amp_dtype` (confidence) | `bfloat16` | The trainer hardcodes bfloat16 autocast. |
+| `active_water_filters`, `ignored_water_filter_thresholds` | all three filters on, `[]` | A record of the filters used, matching this repo's defaults. |
+| `resume_extend_lr`, `skip_wandb`, `wandb_log_interval` | `false`, `false`, `1` | Resume and logging bookkeeping; no effect on the model. |
+
+The model **architecture** — encoder type, hidden dimensions, layer counts — is what must match
+for a checkpoint to load, and a run following the commands above matches it.
 
 ### Evaluating the flow generator alone
 

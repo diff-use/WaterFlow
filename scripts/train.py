@@ -13,7 +13,7 @@ Usage:
     python -m scripts.train \\
         --train_list /path/to/train.txt \\
         --val_list /path/to/val.txt \\
-        --encoder_type gvp \\
+        --processed_dir /path/to/cache \\
         --epochs 200 \\
         --batch_size 4
 """
@@ -225,7 +225,12 @@ def parse_args():
 
     # model
     p.add_argument(
-        "--encoder_type", type=str, default="gvp", choices=["gvp", "slae", "esm"]
+        "--encoder_type",
+        type=str,
+        default="esm",
+        choices=["gvp", "slae", "esm"],
+        help="Protein encoder. 'esm' (default) and 'slae' need embeddings "
+        "precomputed under --processed_dir; 'gvp' learns from coordinates alone.",
     )
     p.add_argument("--encoder_ckpt", type=str, default=None)
     p.add_argument("--freeze_encoder", action="store_true")

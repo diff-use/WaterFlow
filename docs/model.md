@@ -29,22 +29,21 @@ because water positions move during integration. Default edge cutoff is 8.0 Å
 ## Flow generator
 
 A GVP network predicts the velocity field for water trajectories, conditioned on
-per-residue protein embeddings. Sampling integrates that field from a prior
-(`--sampling_strategy`, either `uniform_ball` or `scaled_gaussian`) to final water
-positions, using Euler or RK4 steps.
+the protein representation from the selected encoder (see below). Sampling
+integrates that field from a prior (`--sampling_strategy`, either `uniform_ball`
+or `scaled_gaussian`) to final water positions, using Euler or RK4 steps.
 
 ### Encoder types
 
 | Encoder | Description | Precomputation |
 |---|---|---|
-| `esm` | ESM3 language-model embeddings, per residue | Yes — `generate_esm_embeddings.py` |
-| `gvp` (CLI default) | Geometric Vector Perceptron over 3D coordinates | No |
+| `esm` (default) | ESM3 language-model embeddings, per residue | Yes — `generate_esm_embeddings.py` |
+| `gvp` | Geometric Vector Perceptron over 3D coordinates | No |
 | `slae` | SLAE per-atom embeddings ([preprint](https://www.biorxiv.org/content/10.1101/2025.10.03.680398v1)) — **legacy** | Yes — external `SLAE` package + checkpoint |
 
-ESM is the encoder used for current runs and by the shipped checkpoints, but
-`--encoder_type` defaults to `gvp`, so pass `--encoder_type esm` explicitly. SLAE
-is retained for older checkpoints; it depends on the external `SLAE` package,
-which is not a WaterFlow dependency.
+ESM is the encoder used for current runs and by the shipped checkpoints, and is
+what `--encoder_type` selects by default. SLAE is retained for older checkpoints;
+it depends on the external `SLAE` package, which is not a WaterFlow dependency.
 
 ### Edge construction
 
@@ -74,10 +73,10 @@ always active.
 ## Confidence scorer
 
 `ConfidenceGVP` scores each candidate water in `[0, 1]`. It reuses the flow
-generator's backbone with the time and self-conditioning inputs removed, and a
-single scalar head per candidate. Because the backbone stays structurally
-identical, the scorer warm-starts from a flow checkpoint (`--init_from`). It uses
-PW and PP edges only.
+generator's backbone with the time conditioning removed (candidates are clean
+samples, not points on a trajectory) and a single scalar head per candidate.
+Because the backbone stays structurally identical, the scorer warm-starts from a
+flow checkpoint (`--init_from`). It uses PW and PP edges only.
 
 - **Target** — `smootherstep_target`: a soft cutoff on the nearest ground-truth
   distance, 1 inside `r_in` (default 0.5 Å) and 0 outside `r_out` (default 1.5 Å).
