@@ -265,10 +265,7 @@ def test_training_step_no_nan_tripwire(device):
         layers=2,
     ).to(device)
 
-    fm = FlowMatcher(
-        model=model,
-        loss_eps=1e-3,
-    )
+    fm = FlowMatcher(model=model)
 
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=1e-4)
 

@@ -909,7 +909,6 @@ class FlowMatcher:
     def __init__(
         self,
         model,
-        loss_eps: float = 1e-3,
         sampling_strategy: str = "uniform_ball",
         use_amp: bool = False,
     ):
@@ -918,7 +917,6 @@ class FlowMatcher:
 
         Args:
             model: FlowWaterGVP model instance
-            loss_eps: Small constant for numerical stability in loss weighting
             sampling_strategy: Source distribution for flow matching noise.
                 "uniform_ball" samples uniformly in balls around protein atoms.
                 "scaled_gaussian" samples from N(0, sigma^2*I).
@@ -935,7 +933,6 @@ class FlowMatcher:
                 f"got '{sampling_strategy}'"
             )
         self.model = model
-        self.loss_eps = loss_eps
         self.use_amp = use_amp
         # Read the graph cutoff off the flow model. Under DDP the attribute lives
         # on the wrapped `.module` (DDP does not forward attribute lookups), so
@@ -1159,10 +1156,9 @@ class FlowMatcher:
         # target velocity
         v_target = x1_star - x0_star
 
-        # weighted MSE loss (upweight near t=1), reduced in fp32
-        w = 1.0 / (self.loss_eps + (1.0 - t_per_atom))
-        per_atom_mse = (v_pred - v_target).pow(2).mean(dim=-1, keepdim=True)
-        loss = (w * per_atom_mse).sum() / w.sum()
+        # MSE over the velocity field, reduced in fp32
+        per_atom_mse = (v_pred - v_target).pow(2).mean(dim=-1)  # (Nw,)
+        loss = per_atom_mse.mean()
 
         # training RMSD
         with torch.no_grad():
@@ -1174,16 +1170,9 @@ class FlowMatcher:
         per_sample_info = None
         if loss.item() > 100.0:
             with torch.no_grad():
-                from torch_scatter import scatter_add
-
-                weighted_mse = (w * per_atom_mse).squeeze(-1)
-                numerator = scatter_add(
-                    weighted_mse, batch_w, dim=0, dim_size=num_graphs
+                per_sample_loss = scatter_mean(
+                    per_atom_mse, batch_w, dim=0, dim_size=num_graphs
                 )
-                denominator = scatter_add(
-                    w.squeeze(-1), batch_w, dim=0, dim_size=num_graphs
-                )
-                per_sample_loss = numerator / (denominator + 1e-8)
                 per_sample_info = {"losses": per_sample_loss, "num_graphs": num_graphs}
 
         (loss / accumulation_steps).backward()
@@ -1234,9 +1223,8 @@ class FlowMatcher:
 
         v_target = x1_star - x0_star
 
-        w = 1.0 / (self.loss_eps + (1.0 - t_per_atom))
-        per_atom_mse = (v_pred - v_target).pow(2).mean(dim=-1, keepdim=True)
-        loss = (w * per_atom_mse).sum() / w.sum()
+        # MSE over the velocity field, reduced in fp32
+        loss = (v_pred - v_target).pow(2).mean()
 
         # GPU RMSD
         x1_hat = x_t + (1.0 - t_per_atom) * v_pred
